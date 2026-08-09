@@ -46,6 +46,9 @@ class PatientCard(QFrame):
             layout.addWidget(widget)
 
 class Dashboard(QWidget):
+    view_records_clicked = pyqtSignal(dict)
+    view_scans_clicked = pyqtSignal(dict)
+
     def __init__(self):
         super().__init__()
         layout = QVBoxLayout(self)
@@ -74,17 +77,20 @@ class Dashboard(QWidget):
         grid = QGridLayout()
         for index, patient in enumerate(MOCK_PATIENTS):
             card = PatientCard(patient)
-            card.view_records_clicked.connect(self.on_view_records)
-            card.view_scans_clicked.connect(self.on_view_scans)
+            card.view_records_clicked.connect(self.view_records_clicked.emit)
+            card.view_scans_clicked.connect(self.view_scans_clicked.emit)
             row, col = divmod(index, 2)   # 2 cards per row
             grid.addWidget(card, row, col)
         layout.addLayout(grid)
 
-    def on_view_records(self, patient: dict):
-        print(f"View records for: {patient['name']}")
-
-    def on_view_scans(self, patient: dict):
-        print(f"View scans for: {patient['name']}")
+        grid = QGridLayout()
+        for index, patient in enumerate(MOCK_PATIENTS):
+            card = PatientCard(patient)
+            card.view_records_clicked.connect(self.view_records_clicked.emit)
+            card.view_scans_clicked.connect(self.view_scans_clicked.emit)
+            row, col = divmod(index, 2)
+            grid.addWidget(card, row, col)
+        layout.addLayout(grid)
 
 if __name__ == "__main__":
     import sys

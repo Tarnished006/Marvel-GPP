@@ -138,7 +138,7 @@ def update_result(result, output_image, timestamp_ms):
 # 3. MAIN INTEGRATED EXECUTION LOOP
 # =====================================================================
 def main():
-    DICOM_FOLDER = r"C:\Users\Tharun R Gowda\Desktop\GPP\DICOM"
+    DICOM_FOLDER = "DICOM"
 
     if not os.path.exists(DICOM_FOLDER):
         print(f"Error: Folder path '{DICOM_FOLDER}' does not exist.")

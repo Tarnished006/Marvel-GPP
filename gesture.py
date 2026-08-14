@@ -1,9 +1,6 @@
-import os
 import time
 import cv2
-import pydicom
 import numpy as np
-import pyvista as pv
 import mediapipe as mp
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
@@ -12,17 +9,30 @@ from signal_bus import signal_bus
 from PyQt6.QtGui import QImage
 from PyQt6.QtCore import QThread
 
-# NOTE: No pyautogui here. All OS cursor movement and clicks are handled
-# in the main UI thread (main.py) via QCursor.setPos() and pyautogui.click()
-# to avoid OS throttling of background thread synthetic input.
+# All OS cursor movement and clicks happen in main.py (UI thread) via
+# QCursor.setPos() + pyautogui.click() to avoid OS throttling of
+# synthetic input from background threads.
 
 class GestureWorker(QThread):
+    # The right hand (after mirror flip) drives the air mouse.
     AIR_MOUSE_HAND = "Right"
 
-    # Robust Two-Tier Pinch Safeguards
-    PINCH_THRESHOLD = 0.15          # Strict trigger threshold (firm, deliberate pinch)
-    PINCH_RELEASE_THRESHOLD = 0.25  # Explicit release threshold (creates stable deadzone 0.15-0.25)
-    CLICK_COOLDOWN = 0.5            # Minimum seconds required between consecutive clicks
+    # ── Pinch thresholds (ratio = thumb-index distance / wrist-palm distance) ──
+    # Using 2D pixel-space is more reliable than 3D because MediaPipe's Z axis
+    # is estimated and noisy. 2D ratios are consistent across hand distances.
+    #
+    # HYSTERESIS DESIGN:
+    #   PINCH_TRIGGER  = 0.12 → requires a deliberate firm physical pinch to fire.
+    #   PINCH_RELEASE  = 0.20 → fingers must separate to this ratio before the
+    #                           state resets.  The 0.08-wide deadzone between the
+    #                           two thresholds prevents the state machine from
+    #                           bouncing rapidly between CLICK and RELEASE when
+    #                           the hand hovers near the trigger boundary.
+    #   CLICK_COOLDOWN = 0.50 → 500 ms minimum between consecutive clicks;
+    #                           guards against double-firing on a single pinch.
+    PINCH_TRIGGER  = 0.12   # Firm pinch required  → below this = click fires
+    PINCH_RELEASE  = 0.20   # Clear separation needed → above this = release
+    CLICK_COOLDOWN = 0.50   # Seconds between consecutive clicks (prevents spam)
 
     def __init__(self):
         super().__init__()
@@ -30,211 +40,231 @@ class GestureWorker(QThread):
         self.latest_hand_result = None
 
         self.air_mouse_enabled = False
-        # alpha=0.15: stable smoothing in normalized space (0.0-1.0).
-        # Main thread scales to screen pixels via QCursor, avoiding OS throttling.
-        self.mouse_filter = EMAFilter(alpha=0.15)
-        self.is_pinching = False
-        self.last_click_time = 0.0  # Time-based cooldown tracker
 
+        # alpha=0.72 → very responsive cursor.  High alpha = follows hand quickly.
+        # EMAFilter formula: output = alpha*new + (1-alpha)*prev
+        # 0.72 gives ~1.5 frame lag at 30 fps, which is imperceptible.
+        self.mouse_filter = EMAFilter(alpha=0.72)
+        self._last_cursor = None   # last emitted cursor pos; avoids jump on re-detect
+
+        self.is_pinching   = False
+        self.last_click_ts = 0.0
+
+        # Hand landmark filters (alpha=0.65: smooth skeleton, fast response)
         self.hand_filters = {
-            "Left": EMAFilter(alpha=0.45),
-            "Right": EMAFilter(alpha=0.45)
+            "Left":  EMAFilter(alpha=0.65),
+            "Right": EMAFilter(alpha=0.65),
         }
+        # Previous palm positions for per-hand rotation delta
         self.prev_palm = {}
 
-        signal_bus.air_mouse_toggle.connect(self.set_air_mouse)
+        signal_bus.air_mouse_toggle.connect(self._on_air_mouse_toggle)
 
         self.connections = [
-            (0, 1), (1, 2), (2, 3), (3, 4),        # Thumb
-            (0, 5), (5, 6), (6, 7), (7, 8),        # Index
-            (5, 9), (9, 10), (10, 11), (11, 12),   # Middle
-            (9, 13), (13, 14), (14, 15), (15, 16), # Ring
-            (13, 17), (0, 17), (17, 18), (18, 19), (19, 20)  # Pinky
+            (0,1),(1,2),(2,3),(3,4),               # Thumb
+            (0,5),(5,6),(6,7),(7,8),               # Index
+            (5,9),(9,10),(10,11),(11,12),           # Middle
+            (9,13),(13,14),(14,15),(15,16),         # Ring
+            (13,17),(0,17),(17,18),(18,19),(19,20), # Pinky
         ]
 
-        base_options = python.BaseOptions(model_asset_path='hand_landmarker.task')
-        options = vision.HandLandmarkerOptions(
-            base_options=base_options,
+        base_opts = python.BaseOptions(model_asset_path="hand_landmarker.task")
+        opts = vision.HandLandmarkerOptions(
+            base_options=base_opts,
             num_hands=2,
-            min_hand_detection_confidence=0.7,
-            min_tracking_confidence=0.7,
+            min_hand_detection_confidence=0.65,
+            min_tracking_confidence=0.65,
             running_mode=vision.RunningMode.LIVE_STREAM,
-            result_callback=self.update_result
+            result_callback=self._on_result,
         )
-        self.detector = vision.HandLandmarker.create_from_options(options)
+        self.detector = vision.HandLandmarker.create_from_options(opts)
 
-    def set_air_mouse(self, enabled: bool):
+    # ─────────────────────────── Slots ────────────────────────────────────────
+    def _on_air_mouse_toggle(self, enabled: bool):
         self.air_mouse_enabled = enabled
         if not enabled:
-            self.mouse_filter.reset()
-            self.last_click_time = 0.0
+            # Don't reset mouse_filter here — causes cursor jump on re-enable.
+            self.last_click_ts = 0.0
             if self.is_pinching:
-                signal_bus.pinch_ended.emit()
                 self.is_pinching = False
+                signal_bus.pinch_ended.emit()
 
-    def update_result(self, result, output_image, timestamp_ms):
+    def _on_result(self, result, _image, _ts):
         self.latest_hand_result = result
-        if result.hand_landmarks:
-            signal_bus.tracking_confidence.emit(1.0)
-        else:
-            signal_bus.tracking_confidence.emit(0.0)
+        signal_bus.tracking_confidence.emit(
+            1.0 if result.hand_landmarks else 0.0
+        )
 
+    # ─────────────────────────── Main loop ────────────────────────────────────
     def run(self):
         cap = cv2.VideoCapture(0)
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH,  640)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        cap.set(cv2.CAP_PROP_FPS, 30)
 
         while self.running:
-            success, frame = cap.read()
-            if not success:
+            ok, frame = cap.read()
+            if not ok:
                 continue
 
             frame = cv2.flip(frame, 1)
-            h, w, _ = frame.shape
+            h, w = frame.shape[:2]
 
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
-            timestamp_ms = int(time.time() * 1000)
-            self.detector.detect_async(mp_image, timestamp_ms)
+            mp_img = mp.Image(
+                image_format=mp.ImageFormat.SRGB,
+                data=cv2.cvtColor(frame, cv2.COLOR_BGR2RGB),
+            )
+            self.detector.detect_async(mp_img, int(time.time() * 1000))
 
             active_labels = set()
+            result = self.latest_hand_result
 
-            if self.latest_hand_result and self.latest_hand_result.hand_landmarks:
-                for idx, hand_landmarks in enumerate(self.latest_hand_result.hand_landmarks):
-                    pixel_landmarks = []
+            if result and result.hand_landmarks:
+                for idx, hand_lms in enumerate(result.hand_landmarks):
+                    # ── Label + mirror correction ──────────────────────────
                     try:
-                        hand_label = self.latest_hand_result.handedness[idx][0].category_name
+                        raw_label = result.handedness[idx][0].category_name
                     except IndexError:
-                        hand_label = f"Unknown_{idx}"
+                        raw_label = f"Unknown_{idx}"
+                    # Camera is mirrored → swap Left/Right
+                    label = "Left" if raw_label == "Right" else "Right"
+                    active_labels.add(label)
 
-                    if hand_label == "Right":
-                        hand_label = "Left"
-                    elif hand_label == "Left":
-                        hand_label = "Right"
+                    # ── Landmark smoothing ──────────────────────────────────
+                    if label not in self.hand_filters:
+                        self.hand_filters[label] = EMAFilter(alpha=0.65)
+                    filt = self.hand_filters[label]
+                    raw = np.array([[lm.x, lm.y, lm.z] for lm in hand_lms])
+                    sm  = filt.filter(raw)  # shape (21,3), normalized 0-1
 
-                    active_labels.add(hand_label)
+                    # ── Draw skeleton ───────────────────────────────────────
+                    px = [(int(sm[i,0]*w), int(sm[i,1]*h)) for i in range(21)]
+                    for pt in px:
+                        cv2.circle(frame, pt, 4, (0,220,0), -1)
+                    for a, b in self.connections:
+                        cv2.line(frame, px[a], px[b], (255,255,255), 1)
 
-                    if hand_label not in self.hand_filters:
-                        self.hand_filters[hand_label] = EMAFilter(alpha=0.45)
+                    is_mouse_hand = (label == self.AIR_MOUSE_HAND)
 
-                    active_filter = self.hand_filters[hand_label]
-                    raw_coords = np.array([[lm.x, lm.y, lm.z] for lm in hand_landmarks])
-                    smoothed_coords = active_filter.filter(raw_coords)
+                    # ── 2-D pinch ratio (wrist→palm = reference length) ─────
+                    # We use pixel-space 2D only — Z is too noisy for distance.
+                    wrist_px = np.array(px[0],  dtype=float)
+                    palm_px  = np.array(px[9],  dtype=float)
+                    thumb_px = np.array(px[4],  dtype=float)
+                    index_px = np.array(px[8],  dtype=float)
+                    mid_px   = np.array(px[12], dtype=float)
 
-                    for coord in smoothed_coords:
-                        cx, cy = int(coord[0] * w), int(coord[1] * h)
-                        pixel_landmarks.append((cx, cy))
-                        cv2.circle(frame, (cx, cy), 5, (0, 255, 0), cv2.FILLED)
+                    ref = np.linalg.norm(wrist_px - palm_px)
+                    if ref < 1.0:
+                        ref = 1.0  # safety guard for zero-division
 
-                    for start_idx, end_idx in self.connections:
-                        cv2.line(frame, pixel_landmarks[start_idx], pixel_landmarks[end_idx], (255, 255, 255), 2)
+                    idx_ratio = np.linalg.norm(thumb_px - index_px) / ref
+                    mid_ratio = np.linalg.norm(thumb_px - mid_px)   / ref
 
-                    is_air_mouse_hand = (hand_label == self.AIR_MOUSE_HAND)
+                    # ══════════════════════════════════════════════════════════
+                    # AIR MOUSE — cursor movement + pinch-to-click
+                    # ══════════════════════════════════════════════════════════
+                    if is_mouse_hand and self.air_mouse_enabled:
+                        tip = sm[8]  # index fingertip (normalized)
 
-                    if is_air_mouse_hand and self.air_mouse_enabled:
-                        index_tip = smoothed_coords[8]
-                        # 8% margin — covers full screen without over-stretching
-                        margin = 0.08
-                        adj_x = np.clip((index_tip[0] - margin) / (1.0 - 2 * margin), 0.0, 1.0)
-                        adj_y = np.clip((index_tip[1] - margin) / (1.0 - 2 * margin), 0.0, 1.0)
-                        # Smooth in normalised space; main thread converts to pixels
-                        smoothed_norm = self.mouse_filter.filter(
-                            np.array([[adj_x, adj_y, 0]])
+                        # 10 % border margin → full-screen reachability
+                        m = 0.10
+                        ax = float(np.clip((tip[0] - m) / (1.0 - 2*m), 0.0, 1.0))
+                        ay = float(np.clip((tip[1] - m) / (1.0 - 2*m), 0.0, 1.0))
+
+                        smoothed = self.mouse_filter.filter(
+                            np.array([[ax, ay, 0.0]])
                         )[0]
-                        # Emit normalised floats — main thread calls QCursor.setPos()
-                        signal_bus.cursor_moved.emit(
-                            float(smoothed_norm[0]), float(smoothed_norm[1])
-                        )
+                        cx, cy = float(smoothed[0]), float(smoothed[1])
+                        self._last_cursor = (cx, cy)
 
-                    # =====================================================
-                    # 2. 3D DICOM GESTURE CONTROL MAPPINGS
-                    # =====================================================
-                    palm_x, palm_y = smoothed_coords[9][0], smoothed_coords[9][1]
+                        # Always emit current position (no locking — locking
+                        # is what made the cursor appear "stuck")
+                        signal_bus.cursor_moved.emit(cx, cy)
 
-                    wrist_pt = np.array(pixel_landmarks[0])
-                    palm_pt = np.array(pixel_landmarks[9])
-                    hand_size = np.linalg.norm(wrist_pt - palm_pt)
-
-                    thumb_pt = np.array(pixel_landmarks[4])
-                    index_pt = np.array(pixel_landmarks[8])
-                    middle_pt = np.array(pixel_landmarks[12])
-
-                    index_ratio = (np.linalg.norm(thumb_pt - index_pt) / hand_size) if hand_size > 0 else 999
-                    middle_ratio = (np.linalg.norm(thumb_pt - middle_pt) / hand_size) if hand_size > 0 else 999
-
-                    is_3d_hand = (not self.air_mouse_enabled) or (not is_air_mouse_hand)
-
-                    # =====================================================
-                    # 2. AIR MOUSE CLICK (HYSTERESIS + TIME-BASED COOLDOWN)
-                    # =====================================================
-                    if is_air_mouse_hand and self.air_mouse_enabled:
-                        current_time = time.time()
-
-                        # Strict Click Trigger: requires deliberate physical pinch + cooldown
-                        if index_ratio < self.PINCH_THRESHOLD:
-                            if not self.is_pinching and (current_time - self.last_click_time >= self.CLICK_COOLDOWN):
-                                self.is_pinching = True
-                                self.last_click_time = current_time
+                        # ── Pinch-to-click state machine ──────────────────
+                        now = time.time()
+                        if idx_ratio < self.PINCH_TRIGGER:
+                            if (not self.is_pinching
+                                    and now - self.last_click_ts >= self.CLICK_COOLDOWN):
+                                self.is_pinching   = True
+                                self.last_click_ts = now
                                 signal_bus.pinch_started.emit()
-                        # Explicit Release Threshold: deadzone between 0.15 and 0.25 prevents state flipping
-                        elif index_ratio > self.PINCH_RELEASE_THRESHOLD:
+                        elif idx_ratio > self.PINCH_RELEASE:
                             if self.is_pinching:
                                 self.is_pinching = False
                                 signal_bus.pinch_ended.emit()
 
-                        # Visual HUD indicator at index fingertip
-                        tip_cx, tip_cy = pixel_landmarks[8]
+                        # HUD ring at fingertip
+                        tip_px = px[8]
                         if self.is_pinching:
-                            cv2.circle(frame, (tip_cx, tip_cy), 14, (0, 255, 255), 3)
-                            cv2.putText(frame, "CLICK", (tip_cx + 15, tip_cy - 10),
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+                            cv2.circle(frame, tip_px, 14, (0,255,255), 3)
+                            cv2.putText(frame, "CLICK",
+                                        (tip_px[0]+15, tip_px[1]-10),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.55,
+                                        (0,255,255), 2)
                         else:
-                            cv2.circle(frame, (tip_cx, tip_cy), 8, (255, 100, 0), 2)
+                            cv2.circle(frame, tip_px, 9, (255,100,0), 2)
 
-                    # =====================================================
-                    # 3. 3D DICOM GESTURE CONTROL MAPPINGS
-                    # =====================================================
-                    if is_3d_hand:
-                        if index_ratio < 0.22:          # Thumb + Index pinch -> Zoom In
+                    # ══════════════════════════════════════════════════════════
+                    # 3-D VIEWER CONTROL — rotation, zoom, tissue melt
+                    # Routing logic:
+                    #   Air mouse ON  → RIGHT hand = cursor only
+                    #                   LEFT  hand = 3-D control
+                    #   Air mouse OFF → EITHER hand = 3-D control (first hand wins)
+                    # ══════════════════════════════════════════════════════════
+                    drives_3d = False
+                    if self.air_mouse_enabled:
+                        drives_3d = (label != self.AIR_MOUSE_HAND)
+                    else:
+                        # Without air mouse, use first hand detected (idx==0)
+                        drives_3d = (idx == 0)
+
+                    if drives_3d:
+                        palm_x = float(sm[9,0])
+                        palm_y = float(sm[9,1])
+
+                        if idx_ratio < 0.22:        # thumb+index → zoom in
                             signal_bus.zoom_command.emit(1)
-                            self.prev_palm.pop(hand_label, None)
-                        elif middle_ratio < 0.22:       # Thumb + Middle pinch -> Zoom Out
+                            self.prev_palm.pop(label, None)
+
+                        elif mid_ratio < 0.22:      # thumb+middle → zoom out
                             signal_bus.zoom_command.emit(-1)
-                            self.prev_palm.pop(hand_label, None)
-                        else:                           # Open hand rotation
-                            if hand_label in self.prev_palm:
-                                prev_x, prev_y = self.prev_palm[hand_label]
-                                delta_x = palm_x - prev_x
-                                delta_y = palm_y - prev_y
-                                
-                                if abs(delta_x) <= 0.05 and abs(delta_y) <= 0.05:
-                                    if abs(delta_x) > 0.008 or abs(delta_y) > 0.008:
-                                        # 3 floats — matches pyqtSignal(float, float, float)
-                                        signal_bus.hand_rotation.emit(
-                                            float(delta_x), float(delta_y), 0.0
-                                        )
-                            self.prev_palm[hand_label] = (palm_x, palm_y)
+                            self.prev_palm.pop(label, None)
 
-                        # Tissue Melting
-                        melt_factor = 1.0 - palm_y
-                        signal_bus.tissue_melt.emit(melt_factor)
+                        else:                       # open palm → rotate
+                            if label in self.prev_palm:
+                                px0, py0 = self.prev_palm[label]
+                                dx = float(np.clip(palm_x - px0, -0.06, 0.06))
+                                dy = float(np.clip(palm_y - py0, -0.06, 0.06))
+                                # Deadzone = 0.003 (filters micro-tremor)
+                                if abs(dx) > 0.003 or abs(dy) > 0.003:
+                                    signal_bus.hand_rotation.emit(dx, dy, 0.0)
+                            self.prev_palm[label] = (palm_x, palm_y)
 
-            for label in list(self.prev_palm.keys()):
-                if label not in active_labels:
-                    self.prev_palm.pop(label, None)
-                    if label in self.hand_filters:
-                        self.hand_filters[label].reset()
+                        # Tissue melt driven by palm height
+                        signal_bus.tissue_melt.emit(float(np.clip(1.0 - palm_y, 0.0, 1.0)))
 
+            # ── Clean up state for hands that left the frame ─────────────────
+            for gone in list(self.prev_palm):
+                if gone not in active_labels:
+                    del self.prev_palm[gone]
+                    self.hand_filters.get(gone, EMAFilter(alpha=0.65)).reset()
+
+            # If the air-mouse hand disappeared, release any held click
             if self.AIR_MOUSE_HAND not in active_labels:
                 if self.is_pinching:
-                    signal_bus.pinch_ended.emit()
                     self.is_pinching = False
-                self.mouse_filter.reset()
+                    signal_bus.pinch_ended.emit()
+                # Do NOT reset mouse_filter here — that causes a cursor jump
+                # the next time the hand re-enters the frame.
 
-            annotated_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            h_img, w_img, ch = annotated_rgb.shape
-            qt_image = QImage(annotated_rgb.data, w_img, h_img, ch * w_img, QImage.Format.Format_RGB888)
-            signal_bus.camera_frame.emit(qt_image)
+            # ── Emit annotated camera frame ──────────────────────────────────
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            h2, w2, ch = rgb.shape
+            signal_bus.camera_frame.emit(
+                QImage(rgb.data, w2, h2, ch * w2, QImage.Format.Format_RGB888)
+            )
 
         cap.release()
         self.detector.close()

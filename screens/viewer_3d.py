@@ -98,29 +98,46 @@ class Viewer3D(QWidget):
             self.load_dicom(scan_path)
 
     def rotate_camera(self, delta_x: float, delta_y: float, delta_z: float = 0.0):
-        """Clamped camera rotation — ignored when viewer is not the active screen.
-        Accepts 3 floats to match pyqtSignal(float, float, float) in signal_bus."""
+        """
+        Fluid, gimbal-safe 3D camera orbit using VTK's native camera
+        Azimuth/Elevation methods — the only reliable way to orbit in VTK.
+
+        camera.Azimuth(deg) rotates the camera around the focal point
+        about the view-up axis.  camera.Elevation(deg) rotates up/down.
+        OrthogonalizeViewUp() prevents gimbal lock by re-orthogonalising
+        the view-up vector after each rotation.
+        """
         if not self.isVisible():
             return
-        max_delta = 0.05
-        delta_x = max(-max_delta, min(max_delta, delta_x))
-        delta_y = max(-max_delta, min(max_delta, delta_y))
 
-        azimuth_step = -delta_x * 250.0
-        elevation_step = -delta_y * 250.0
+        az_deg = -delta_x * 180.0
+        el_deg = -delta_y * 180.0
 
-        elevation_limit = 80.0
-        proposed = self.elevation_angle + elevation_step
-        if proposed > elevation_limit:
-            elevation_step = elevation_limit - self.elevation_angle
-        elif proposed < -elevation_limit:
-            elevation_step = -elevation_limit - self.elevation_angle
-        self.elevation_angle += elevation_step
+        # Clamp per-frame delta so a hand jerk never spins 180°
+        az_deg = float(np.clip(az_deg, -12.0, 12.0))
+        el_deg = float(np.clip(el_deg, -12.0, 12.0))
 
-        self.plotter.camera.azimuth += azimuth_step
-        self.plotter.camera.elevation += elevation_step
-        self.plotter.camera.up = (0.0, 0.0, 1.0)
-        self.plotter.update()
+        # Elevation safety: keep camera between -80° and +80° from equator
+        try:
+            pos   = np.array(self.plotter.camera.position)
+            focal = np.array(self.plotter.camera.focal_point)
+            d     = pos - focal
+            dist  = np.linalg.norm(d)
+            if dist > 0:
+                cur_el = float(np.degrees(np.arcsin(np.clip(d[2] / dist, -1.0, 1.0))))
+                if cur_el + el_deg >  80.0:
+                    el_deg = max(0.0,  80.0 - cur_el)
+                elif cur_el + el_deg < -80.0:
+                    el_deg = min(0.0, -80.0 - cur_el)
+        except Exception:
+            pass
+
+        # VTK native orbit — these are DELTA methods, not absolute setters
+        cam = self.plotter.camera
+        cam.Azimuth(az_deg)
+        cam.Elevation(el_deg)
+        cam.OrthogonalizeViewUp()   # prevents gimbal lock accumulation
+        self.plotter.render()
 
     def zoom_camera(self, zoom_direction):
         if not self.isVisible():
@@ -129,15 +146,15 @@ class Viewer3D(QWidget):
             self.plotter.camera.zoom(1.03)
         elif zoom_direction < 0:
             self.plotter.camera.zoom(0.97)
-        self.plotter.update()
+        self.plotter.render()
 
     def set_tissue_melt(self, melt_factor):
         if not self.isVisible():
             return
-        if abs(melt_factor - self.current_melt) < 0.05:
+        if abs(melt_factor - self.current_melt) < 0.03:
             return
         self.current_melt = melt_factor
         if self.skin_actor:
             new_opacity = max(0.0, min(1.0, 1.0 - melt_factor))
             self.skin_actor.GetProperty().SetOpacity(new_opacity)
-            self.plotter.update()
+            self.plotter.render()

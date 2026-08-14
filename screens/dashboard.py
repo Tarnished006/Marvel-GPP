@@ -1,17 +1,16 @@
-from PyQt6.QtWidgets import QFrame, QVBoxLayout, QLabel, QPushButton
-from PyQt6.QtCore import Qt, pyqtSignal
+import sys
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
-    QLineEdit, QComboBox, QLabel
+    QLineEdit, QComboBox, QLabel, QFrame, QPushButton, QScrollArea
 )
-# screens/dashboard.py
+from PyQt6.QtCore import Qt, pyqtSignal
+
 MOCK_PATIENTS = [
     {"mrn": "84729-A", "name": "Doe, John",    "age": 45, "sex": "M", "scans": 2},
     {"mrn": "55910-B", "name": "Smith, Alice", "age": 62, "sex": "F", "scans": 1},
     {"mrn": "33921-C", "name": "Patel, K.",    "age": 28, "sex": "M", "scans": 4},
     {"mrn": "11029-D", "name": "Lee, M.",      "age": 35, "sex": "F", "scans": 2},
 ]
-
 
 
 class PatientCard(QFrame):
@@ -45,6 +44,7 @@ class PatientCard(QFrame):
         for widget in (photo, name_label, info_label, records_btn, scans_btn):
             layout.addWidget(widget)
 
+
 class Dashboard(QWidget):
     view_records_clicked = pyqtSignal(dict)
     view_scans_clicked = pyqtSignal(dict)
@@ -74,34 +74,46 @@ class Dashboard(QWidget):
 
         # --- Patient directory grid ---
         layout.addWidget(QLabel("PATIENT DIRECTORY"))
-        grid = QGridLayout()
+        
+        # Wrapping the grid in a QScrollArea to prevent off-screen clipping
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        
+        # Create a container widget for the grid
+        scroll_content = QWidget()
+        grid = QGridLayout(scroll_content)
+        
         for index, patient in enumerate(MOCK_PATIENTS):
             card = PatientCard(patient)
             card.view_records_clicked.connect(self.view_records_clicked.emit)
             card.view_scans_clicked.connect(self.view_scans_clicked.emit)
             row, col = divmod(index, 2)   # 2 cards per row
             grid.addWidget(card, row, col)
-        layout.addLayout(grid)
+            
+        # Add the populated container to the scroll area
+        scroll_area.setWidget(scroll_content)
+        
+        # Add the scroll area to the main dashboard layout
+        layout.addWidget(scroll_area)
+        
+        # NOTE: The duplicated grid loop that was causing the bug has been removed.
 
-        grid = QGridLayout()
-        for index, patient in enumerate(MOCK_PATIENTS):
-            card = PatientCard(patient)
-            card.view_records_clicked.connect(self.view_records_clicked.emit)
-            card.view_scans_clicked.connect(self.view_scans_clicked.emit)
-            row, col = divmod(index, 2)
-            grid.addWidget(card, row, col)
-        layout.addLayout(grid)
 
 if __name__ == "__main__":
-    import sys
     from PyQt6.QtWidgets import QApplication
-    from theme import DARK_STYLESHEET
+    # Fallback if theme isn't present in local test
+    try:
+        from theme import DARK_STYLESHEET
+    except ImportError:
+        DARK_STYLESHEET = ""
 
     app = QApplication(sys.argv)
-    app.setStyleSheet(DARK_STYLESHEET)
+    if DARK_STYLESHEET:
+        app.setStyleSheet(DARK_STYLESHEET)
 
     window = Dashboard()
     window.resize(700, 500)
     window.show()
 
-    sys.exit(app.exec())        
+    sys.exit(app.exec())

@@ -1,16 +1,23 @@
-# signal_bus.py
 from PyQt6.QtCore import QObject, pyqtSignal
+from PyQt6.QtGui import QImage
 
 class SignalBus(QObject):
-    cursor_moved = pyqtSignal(float, float)       # x, y (normalized 0.0-1.0)
+    # Air Mouse & Gesture Signals
+    cursor_moved = pyqtSignal(float, float)        # x, y (normalized 0.0-1.0)
     pinch_started = pyqtSignal()
     pinch_ended = pyqtSignal()
-    palm_swipe = pyqtSignal(str)                   # "left" or "right"
-    hand_rotation = pyqtSignal(float, float, float)  # pitch, yaw, roll
-    voice_command = pyqtSignal(str)                # e.g. "start_note", "reset_view"
-    pedal_pressed = pyqtSignal()
-    tracking_confidence = pyqtSignal(float)         # 0.0-1.0
 
-# One single shared instance — everyone imports and uses THIS,
-# not their own SignalBus() copy.
+    # Air Mouse on/off toggle (emitted by UI nav button)
+    air_mouse_toggle = pyqtSignal(bool)            # True = enable, False = disable
+
+    # 3D Manipulation Signals
+    hand_rotation = pyqtSignal(float, float, float) # pitch (delta_x), yaw (delta_y), roll
+    zoom_command = pyqtSignal(int)                 # +1 (Zoom In) or -1 (Zoom Out)
+    tissue_melt = pyqtSignal(float)                # melt_factor (0.0 - 1.0)
+
+    # System & Camera Overlay Signals
+    tracking_confidence = pyqtSignal(float)        # 0.0-1.0
+    camera_frame = pyqtSignal(QImage)              # Live camera HUD frame
+
+# Shared singleton instance
 signal_bus = SignalBus()

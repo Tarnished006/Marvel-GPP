@@ -16,23 +16,11 @@ class Viewer3D(QWidget):
         self.plotter = QtInteractor(self)
         self.layout.addWidget(self.plotter.interactor)
 
-        # FIX: the camera is now driven entirely through signal_bus /
-        # hand_rotation (gesture control), so VTK's own built-in
-        # mouse-driven camera style (click-drag to orbit, scroll to zoom)
-        # is redundant. Worse, it stays active and can capture the real OS
-        # mouse when a synthetic air-mouse click lands on this viewport,
-        # which can "steal" the cursor from the rest of the app -- that's
-        # what was freezing the cursor and blocking clicks on other
-        # screens/buttons. Swapping in the no-op base interactor style
-        # disables VTK's own mouse handling while leaving rendering and
-        # our camera.azimuth/elevation calls completely untouched.
-        # FIXED: vtkInteractorStyle() (base class) still leaks some mouse
-        # events to VTK internals on certain VTK builds, so synthetic
-        # air-mouse clicks (from pyautogui) could interrupt the camera state
-        # or steal focus from the rest of the app.
-        # vtkInteractorStyleUser() is the correct "null" style — it blocks
-        # ALL default VTK mouse/keyboard handling while leaving our own
-        # camera.azimuth / camera.elevation calls completely untouched.
+        # vtkInteractorStyleUser() is the "null" style — it blocks ALL
+        # default VTK mouse/keyboard handling while leaving our own
+        # camera.Azimuth / camera.Elevation calls completely untouched.
+        # This keeps a synthetic air-mouse click from ever being captured
+        # by VTK's own camera controls.
         self.plotter.iren.interactor.SetInteractorStyle(vtk.vtkInteractorStyleUser())
 
         self.elevation_angle = 0.0

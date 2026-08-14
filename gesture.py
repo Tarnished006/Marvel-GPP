@@ -211,14 +211,21 @@ class GestureWorker(QThread):
                     # Routing logic:
                     #   Air mouse ON  → RIGHT hand = cursor only
                     #                   LEFT  hand = 3-D control
-                    #   Air mouse OFF → EITHER hand = 3-D control (first hand wins)
+                    #   Air mouse OFF → BOTH hands = 3-D control
                     # ══════════════════════════════════════════════════════════
-                    drives_3d = False
                     if self.air_mouse_enabled:
                         drives_3d = (label != self.AIR_MOUSE_HAND)
                     else:
-                        # Without air mouse, use first hand detected (idx==0)
-                        drives_3d = (idx == 0)
+                        # FIX: idx is MediaPipe's per-frame detection order,
+                        # not a stable hand identity. Using idx == 0 here
+                        # reintroduced the "uncontrollable rotation" bug from
+                        # earlier -- whichever hand happens to be listed
+                        # first can silently swap between frames, so the
+                        # rotation delta gets computed against the wrong
+                        # hand's previous position. prev_palm is already
+                        # tracked per-label, so it's safe to just let both
+                        # hands drive the 3D view when the air mouse is off.
+                        drives_3d = True
 
                     if drives_3d:
                         palm_x = float(sm[9,0])

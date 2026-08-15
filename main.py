@@ -292,6 +292,8 @@ class MainWindow(QMainWindow):
         event.accept()
 
 if __name__ == "__main__":
+    from database import init_db
+    init_db()
     app = QApplication(sys.argv)
     app.setStyleSheet(DARK_STYLESHEET)
 

@@ -5,7 +5,8 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt
 
-from screens.scans import MOCK_SCANS
+from database import get_scans_for_ui
+from screens.scans import dicom_to_qpixmap
 
 
 class Viewer3D(QWidget):
@@ -76,6 +77,13 @@ class Viewer3D(QWidget):
         self.scan_label.setText(
             f"{patient['name']} ({patient['mrn']}) · {scan['type']} · {scan['date']}"
         )
+        pixmap = dicom_to_qpixmap(scan["file_path"])
+        if pixmap:
+            self.render_area.setPixmap(pixmap.scaled(
+            600, 600, Qt.AspectRatioMode.KeepAspectRatio
+        ))
+        else:
+            self.render_area.setText("[ could not load image ]")
 
         # Rebuild sidebar thumbnails for this patient's scans
         while self.sidebar_layout.count():
@@ -84,7 +92,7 @@ class Viewer3D(QWidget):
                 item.widget().deleteLater()
 
         self.sidebar_layout.addWidget(QLabel("Scans"))
-        for s in MOCK_SCANS.get(patient["mrn"], []):
+        for s in get_scans_for_ui(patient["mrn"]):
             label = QLabel(f"[img] {s['type']}")
             if s == scan:
                 label.setStyleSheet("border: 1px solid #4caf50;")  # highlight active scan

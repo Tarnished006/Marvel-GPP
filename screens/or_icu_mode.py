@@ -4,9 +4,9 @@ from PyQt6.QtWidgets import (
     QLineEdit, QPushButton, QFrame, QStackedWidget
 )
 from PyQt6.QtCore import Qt
+from database import get_patients_for_ui, get_scans_for_ui
 
-from screens.dashboard import MOCK_PATIENTS
-from screens.scans import MOCK_SCANS
+
 
 
 class PatientSelectCard(QFrame):
@@ -45,7 +45,8 @@ class OrIcuMode(QWidget):
         layout.addWidget(search_box)
 
         grid = QGridLayout()
-        for index, patient in enumerate(MOCK_PATIENTS):
+        patients = get_patients_for_ui()
+        for index, patient in enumerate(patients):
             card = PatientSelectCard(patient, on_select=self.start_session)
             row, col = divmod(index, 3)
             grid.addWidget(card, row, col)
@@ -123,7 +124,7 @@ class OrIcuMode(QWidget):
                 item.widget().deleteLater()
 
         self.right_sidebar_layout.addWidget(QLabel("<b>SCANS</b>"))
-        scans = MOCK_SCANS.get(patient["mrn"], [])
+        scans = get_scans_for_ui(patient["mrn"])
         for scan in scans:
             btn = QPushButton(f"[img] {scan['type']}")
             btn.clicked.connect(lambda checked, s=scan: self.show_scan_in_middle(s))

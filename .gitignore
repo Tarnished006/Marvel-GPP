@@ -1,0 +1,4 @@
+raw_downloads/
+aegis.db
+__pycache__/
+*.pyc

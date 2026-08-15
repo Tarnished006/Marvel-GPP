@@ -74,6 +74,9 @@ if __name__ == "__main__":
     app.setStyleSheet(DARK_STYLESHEET)
 
     window = MainWindow()
-    window.showMaximized()
+    screen = app.primaryScreen().availableGeometry()
+    window.resize(screen.width(), screen.height())
+    window.move(screen.x(), screen.y())
+    window.show()
 
     sys.exit(app.exec())

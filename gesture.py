@@ -110,11 +110,15 @@ class GestureWorker(QThread):
             frame = cv2.flip(frame, 1)
             h, w = frame.shape[:2]
 
+            now_ms = int(time.time() * 1000)
+            ts = max(getattr(self, "_last_ts_ms", 0) + 1, now_ms)
+            self._last_ts_ms = ts
+
             mp_img = mp.Image(
                 image_format=mp.ImageFormat.SRGB,
                 data=cv2.cvtColor(frame, cv2.COLOR_BGR2RGB),
             )
-            self.detector.detect_async(mp_img, int(time.time() * 1000))
+            self.detector.detect_async(mp_img, ts)
 
             active_labels = set()
             result = self.latest_hand_result
@@ -230,23 +234,37 @@ class GestureWorker(QThread):
                     if drives_3d:
                         palm_x = float(sm[9,0])
                         palm_y = float(sm[9,1])
+                        palm_px_pos = px[9]
 
-                        if idx_ratio < 0.22:        # thumb+index → zoom in
+                        if idx_ratio < 0.20:        # thumb+index → zoom in
                             signal_bus.zoom_command.emit(1)
                             self.prev_palm.pop(label, None)
+                            cv2.putText(frame, "ZOOM IN (+)",
+                                        (palm_px_pos[0]-40, palm_px_pos[1]-20),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.55,
+                                        (0,255,255), 2)
 
-                        elif mid_ratio < 0.22:      # thumb+middle → zoom out
+                        elif mid_ratio < 0.20:      # thumb+middle → zoom out
                             signal_bus.zoom_command.emit(-1)
                             self.prev_palm.pop(label, None)
+                            cv2.putText(frame, "ZOOM OUT (-)",
+                                        (palm_px_pos[0]-40, palm_px_pos[1]-20),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.55,
+                                        (0,255,255), 2)
 
-                        else:                       # open palm → rotate
+                        else:                       # open palm → 3D camera rotation
                             if label in self.prev_palm:
                                 px0, py0 = self.prev_palm[label]
                                 dx = float(np.clip(palm_x - px0, -0.06, 0.06))
                                 dy = float(np.clip(palm_y - py0, -0.06, 0.06))
+                                
                                 # Deadzone = 0.003 (filters micro-tremor)
                                 if abs(dx) > 0.003 or abs(dy) > 0.003:
                                     signal_bus.hand_rotation.emit(dx, dy, 0.0)
+                                    cv2.putText(frame, "3D ROTATE",
+                                                (palm_px_pos[0]-35, palm_px_pos[1]-20),
+                                                cv2.FONT_HERSHEY_SIMPLEX, 0.50,
+                                                (0,230,255), 2)
                             self.prev_palm[label] = (palm_x, palm_y)
 
                         # Tissue melt driven by palm height
@@ -269,12 +287,20 @@ class GestureWorker(QThread):
             # ── Emit annotated camera frame ──────────────────────────────────
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             h2, w2, ch = rgb.shape
-            signal_bus.camera_frame.emit(
-                QImage(rgb.data, w2, h2, ch * w2, QImage.Format.Format_RGB888)
-            )
+            # MUST use .copy() so PyQt owns the pixel buffer; otherwise passing raw
+            # numpy pointers across thread boundaries causes C++ segfault crashes
+            # when numpy garbage collects or overwrites the camera buffer.
+            qimg_copy = QImage(rgb.data, w2, h2, ch * w2, QImage.Format.Format_RGB888).copy()
+            signal_bus.camera_frame.emit(qimg_copy)
+
+            # Prevent CPU thread starvation
+            time.sleep(0.005)
 
         cap.release()
-        self.detector.close()
+        try:
+            self.detector.close()
+        except Exception:
+            pass
 
     def stop(self):
         self.running = False

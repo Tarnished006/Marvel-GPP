@@ -182,6 +182,7 @@ class MainWindow(QMainWindow):
 
         self.dashboard.view_records_clicked.connect(self.show_record)
         self.dashboard.view_scans_clicked.connect(self.show_scans)
+        self.dashboard.view_3d_direct_clicked.connect(self.show_3d_direct)
 
         self.clinical_btn.clicked.connect(lambda: self._go_root(self.dashboard))
         self.viewer_btn.clicked.connect(lambda: self._go_root(self.viewer_3d))
@@ -205,19 +206,6 @@ class MainWindow(QMainWindow):
     def trigger_os_click(self):
         """Fires a real OS click from the UI thread at the cursor's current position."""
         try:
-            # Let Qt actually process the QCursor.setPos() call above before
-            # clicking, so the click can't race ahead of the cursor move.
-            QApplication.processEvents()
-
-            # FIX: previously called pyautogui.click(self.cursor_x, self.cursor_y).
-            # Passing explicit coordinates makes PyAutoGUI do its own internal
-            # moveTo() using ITS OWN screen-coordinate system, which can
-            # disagree with Qt's QCursor coordinate system on displays with
-            # OS scaling (125%/150% on Windows, any HiDPI setup) -- the click
-            # can then land at a different point than where the cursor
-            # visually is, even though the cursor itself looks correctly
-            # placed. QCursor.setPos() already put the cursor exactly where
-            # it needs to be, so just click there -- no coordinates needed.
             pyautogui.click()
         except Exception as e:
             print(f"[MainWindow] click failed: {e}")
@@ -267,6 +255,11 @@ class MainWindow(QMainWindow):
     def show_3d_viewer(self, patient: dict, scan: dict):
         self.viewer_3d.load_scan(patient, scan)
         self._push_screen(self.viewer_3d)
+
+    def show_3d_direct(self, patient: dict, scan: dict):
+        """Called by local-scan cards on the dashboard — skip gallery, go straight to 3D."""
+        self.viewer_3d.load_scan(patient, scan)
+        self._go_root(self.viewer_3d)
 
     def _toggle_camera_hud(self):
         self.cam_hud.toggle_visibility()

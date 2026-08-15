@@ -1,11 +1,10 @@
-from PyQt6.QtWidgets import QFrame, QVBoxLayout, QLabel, QPushButton
-from PyQt6.QtCore import Qt, pyqtSignal
+import sys
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
-    QLineEdit, QComboBox, QLabel
+    QLineEdit, QComboBox, QLabel, QFrame, QPushButton, QScrollArea
 )
+from PyQt6.QtCore import Qt, pyqtSignal
 from database import get_patients_for_ui
-# screens/dashboard.py
 
 
 class PatientCard(QFrame):
@@ -39,6 +38,7 @@ class PatientCard(QFrame):
         for widget in (photo, name_label, info_label, records_btn, scans_btn):
             layout.addWidget(widget)
 
+
 class Dashboard(QWidget):
     view_records_clicked = pyqtSignal(dict)
     view_scans_clicked = pyqtSignal(dict)
@@ -68,7 +68,15 @@ class Dashboard(QWidget):
 
         # --- Patient directory grid (loaded fresh from the DB each time) ---
         layout.addWidget(QLabel("PATIENT DIRECTORY"))
-        grid = QGridLayout()
+
+        # Wrapping the grid in a QScrollArea to prevent off-screen clipping
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+
+        scroll_content = QWidget()
+        grid = QGridLayout(scroll_content)
+
         patients = get_patients_for_ui()
         for index, patient in enumerate(patients):
             card = PatientCard(patient)
@@ -76,15 +84,21 @@ class Dashboard(QWidget):
             card.view_scans_clicked.connect(self.view_scans_clicked.emit)
             row, col = divmod(index, 2)   # 2 cards per row
             grid.addWidget(card, row, col)
-        layout.addLayout(grid)
+
+        scroll_area.setWidget(scroll_content)
+        layout.addWidget(scroll_area)
+
 
 if __name__ == "__main__":
-    import sys
     from PyQt6.QtWidgets import QApplication
-    from theme import DARK_STYLESHEET
+    try:
+        from theme import DARK_STYLESHEET
+    except ImportError:
+        DARK_STYLESHEET = ""
 
     app = QApplication(sys.argv)
-    app.setStyleSheet(DARK_STYLESHEET)
+    if DARK_STYLESHEET:
+        app.setStyleSheet(DARK_STYLESHEET)
 
     window = Dashboard()
     window.resize(700, 500)

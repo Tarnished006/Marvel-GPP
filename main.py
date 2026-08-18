@@ -204,11 +204,20 @@ class MainWindow(QMainWindow):
         QCursor.setPos(self.cursor_x, self.cursor_y)
 
     def trigger_os_click(self):
-        """Fires a real OS click from the UI thread at the cursor's current position."""
+        """Fires an instantaneous OS click from the UI thread at the cursor's current position."""
         try:
-            pyautogui.click()
+            if sys.platform == "win32":
+                import ctypes
+                # MOUSEEVENTF_LEFTDOWN = 0x0002, MOUSEEVENTF_LEFTUP = 0x0004
+                ctypes.windll.user32.mouse_event(2, 0, 0, 0, 0)
+                ctypes.windll.user32.mouse_event(4, 0, 0, 0, 0)
+            else:
+                pyautogui.click()
         except Exception as e:
-            print(f"[MainWindow] click failed: {e}")
+            try:
+                pyautogui.click()
+            except Exception:
+                pass
 
     def _go_root(self, widget):
         self._nav_history.clear()

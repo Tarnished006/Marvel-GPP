@@ -60,7 +60,7 @@ class CameraHUD(QWidget):
         inner.setSpacing(4)
 
         # Header label
-        header = QLabel("📷  Gesture Camera")
+        header = QLabel("[Camera]  Gesture Camera")
         header.setStyleSheet(
             "color: #8a8a8a; font-size: 10px; font-weight: 600;"
             " letter-spacing: 0.5px;"
@@ -135,7 +135,7 @@ class MainWindow(QMainWindow):
 
         # Air Mouse toggle — OFF by default
         self._air_mouse_on = False
-        self.air_mouse_btn = QPushButton("🖱 Air Mouse: OFF")
+        self.air_mouse_btn = QPushButton("Air Mouse: OFF")
         self.air_mouse_btn.setCheckable(True)
         self.air_mouse_btn.setChecked(False)
         self.air_mouse_btn.setStyleSheet(
@@ -143,13 +143,13 @@ class MainWindow(QMainWindow):
         )
         self.air_mouse_btn.clicked.connect(self._toggle_air_mouse)
 
-        self.back_btn = QPushButton("← Back")
+        self.back_btn = QPushButton("<- Back")
         self.back_btn.setVisible(False)
         self.back_btn.clicked.connect(self._go_back)
         self._nav_history = []
 
         # Camera HUD toggle — shown in nav bar
-        self.cam_btn = QPushButton("📷 Camera: ON")
+        self.cam_btn = QPushButton("Camera: ON")
         self.cam_btn.setStyleSheet(
             "QPushButton { color: #aaa; border: 1px solid #444; padding: 4px 10px; }"
         )
@@ -240,13 +240,13 @@ class MainWindow(QMainWindow):
         self._air_mouse_on = not self._air_mouse_on
         signal_bus.air_mouse_toggle.emit(self._air_mouse_on)
         if self._air_mouse_on:
-            self.air_mouse_btn.setText("🖱 Air Mouse: ON")
+            self.air_mouse_btn.setText("Air Mouse: ON")
             self.air_mouse_btn.setStyleSheet(
                 "QPushButton { color: #00e5ff; border: 1px solid #00e5ff; "
                 "padding: 4px 10px; font-weight: bold; }"
             )
         else:
-            self.air_mouse_btn.setText("🖱 Air Mouse: OFF")
+            self.air_mouse_btn.setText("Air Mouse: OFF")
             self.air_mouse_btn.setStyleSheet(
                 "QPushButton { color: #888; border: 1px solid #555; padding: 4px 10px; }"
             )
@@ -273,12 +273,12 @@ class MainWindow(QMainWindow):
     def _toggle_camera_hud(self):
         self.cam_hud.toggle_visibility()
         if self.cam_hud.isVisible():
-            self.cam_btn.setText("📷 Camera: ON")
+            self.cam_btn.setText("Camera: ON")
             self.cam_btn.setStyleSheet(
                 "QPushButton { color: #aaa; border: 1px solid #444; padding: 4px 10px; }"
             )
         else:
-            self.cam_btn.setText("📷 Camera: OFF")
+            self.cam_btn.setText("Camera: OFF")
             self.cam_btn.setStyleSheet(
                 "QPushButton { color: #555; border: 1px solid #333; padding: 4px 10px; }"
             )

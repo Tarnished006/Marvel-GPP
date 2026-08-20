@@ -63,7 +63,7 @@ class PatientCard(QFrame):
         layout.setSpacing(6)
 
         # Header icon / badge
-        badge = QLabel("🗂 LOCAL SCAN" if is_local else "👤 PATIENT")
+        badge = QLabel("[LOCAL SCAN]" if is_local else "[PATIENT]")
         badge.setStyleSheet(
             f"color: {'#5a9' if is_local else '#777'};"
             " font-size: 9px; font-weight: 700; letter-spacing: 0.8px;"
@@ -83,7 +83,7 @@ class PatientCard(QFrame):
         layout.addWidget(info_label)
 
         if is_local:
-            open_btn = QPushButton("Open in 3D Viewer →")
+            open_btn = QPushButton("Open in 3D Viewer ->")
             open_btn.setStyleSheet(
                 "QPushButton { background: #1a2a1a; color: #7cfc00;"
                 " border: 1px solid #3a5a3a; border-radius: 4px; padding: 5px; font-size: 11px; }"

@@ -293,7 +293,7 @@ class Viewer3D(QWidget):
 
         self._active_path = folder_path
         self.scan_label.setText(label or os.path.basename(folder_path))
-        self.status_label.setText("📂  Reading DICOM slices…")
+        self.status_label.setText("Reading DICOM slices…")
         self.state_stack.setCurrentIndex(self._PAGE_LOADING)
 
         self._loader = DicomLoader(folder_path, preset=preset)
@@ -338,7 +338,7 @@ class Viewer3D(QWidget):
         self.state_stack.setCurrentIndex(self._PAGE_SCENE)
 
     def _on_load_failed(self, error_msg: str):
-        self.status_label.setText(f"❌  Load failed:\n{error_msg}")
+        self.status_label.setText(f"Load failed:\n{error_msg}")
         print(f"[Viewer3D] DICOM load error: {error_msg}")
 
     # ── Public entry point ───────────────────────────────────────────────────
@@ -358,7 +358,7 @@ class Viewer3D(QWidget):
         else:
             self.scan_label.setText(label)
             self.status_label.setText(
-                f"⚠️  No renderable volume found at:\n{folder or '(no path)'}"
+                f"No renderable volume found at:\n{folder or '(no path)'}"
             )
             self.state_stack.setCurrentIndex(self._PAGE_LOADING)
 

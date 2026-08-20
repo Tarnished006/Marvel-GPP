@@ -148,7 +148,7 @@ class MeshSet:
     """
 
     def _build_bone(self, isovalue: float) -> pv.PolyData:
-        mesh = self.volume.volume_data.contour(isosurfaces=[isovalue])
+        mesh = self.volume.volume_data.contour(isosurfaces=[isovalue],method="flying_edges")
 
         if mesh.n_cells == 0:
             raise ValueError(
@@ -234,16 +234,16 @@ class DicomLoader(QThread):
     def run(self):
         try:
             mode = "Jetson-optimised" if JETSON_OPTIMIZED else "full-quality"
-            self.progress.emit(f"📂  Reading DICOM slices  [{mode}]…")
+            self.progress.emit(f"Reading DICOM slices  [{mode}]…")
 
             volume = DicomVolume(self.folder_path)
             lo, hi = volume.scalar_range()
             dims   = volume.volume_data.dimensions
             self.progress.emit(
-                f"✅  Volume ready\n"
+                f"Volume ready\n"
                 f"    {dims[0]}×{dims[1]}×{dims[2]} voxels  ·  "
                 f"HU {lo:.0f} → {hi:.0f}\n\n"
-                f"🦴  Generating bone mesh…"
+                f"Generating bone mesh…"
             )
 
             meshset = MeshSet.__new__(MeshSet)
@@ -252,10 +252,10 @@ class DicomLoader(QThread):
 
             meshset.bone_mesh = meshset._build_bone(meshset.bone_isovalue)
             self.progress.emit(
-                f"✅  Bone mesh ready\n"
+                f"Bone mesh ready\n"
                 f"    {meshset.bone_mesh.n_points:,} vertices  ·  "
                 f"    {meshset.bone_mesh.n_cells:,} triangles\n\n"
-                f"🖥  Uploading to GPU…"
+                f"Uploading to GPU…"
             )
 
             self.finished.emit(meshset)

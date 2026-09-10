@@ -24,7 +24,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QStackedWidget, QSizePolicy, QScrollArea,
 )
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 from signal_bus import signal_bus
 from dicom_engine import DicomLoader, MeshSet
 
@@ -82,7 +82,13 @@ class Viewer3D(QWidget):
         self._loader            = None
         self._initial_load_done = False   # lazy-load guard
 
+        # Voice-control state
+        self._voice_spin_timer = QTimer(self)
+        self._voice_spin_timer.timeout.connect(self._voice_spin_step)
+        self._voice_base_parallel_scale = None
+
         # Wire gesture signals
+        signal_bus.voice_command.connect(self.handle_voice_command)
         signal_bus.hand_rotation.connect(self.rotate_camera)
         signal_bus.zoom_command.connect(self.zoom_camera)
         signal_bus.tissue_melt.connect(self.set_tissue_melt)
@@ -288,11 +294,12 @@ class Viewer3D(QWidget):
                 self._loader.failed.disconnect()
             except Exception:
                 pass
-            self._loader.requestInterruption()
+            self._loader.terminate()
+            self._loader.wait()
 
         self._active_path = folder_path
         self.scan_label.setText(label or os.path.basename(folder_path))
-        self.status_label.setText("Preparing 3D model…")
+        self.status_label.setText("Reading DICOM slices…")
         self.state_stack.setCurrentIndex(self._PAGE_LOADING)
 
         self._loader = DicomLoader(folder_path, preset=preset)
@@ -324,6 +331,7 @@ class Viewer3D(QWidget):
 
         self.bone_actor, _skin = meshset.add_to_plotter(self.plotter)
         self.plotter.reset_camera()
+        self._voice_base_parallel_scale = self.plotter.camera.parallel_scale
         self.plotter.render()
 
         self.info_bar.setText(
@@ -360,6 +368,68 @@ class Viewer3D(QWidget):
                 f"No renderable volume found at:\n{folder or '(no path)'}"
             )
             self.state_stack.setCurrentIndex(self._PAGE_LOADING)
+
+    def handle_voice_command(self, phrase: str):
+        """Execute a recognized voice command on the active 3D view."""
+        command = " ".join(phrase.lower().strip().split())
+        print(f"[Viewer3D] Received voice command: {command!r}", flush=True)
+
+        if self.state_stack.currentIndex() != self._PAGE_SCENE:
+            return
+
+        # Use the underlying VTK camera directly.  PyVista's Camera wrapper
+        # does not expose every VTK camera method on all installed versions.
+        cam = self.plotter.renderer.GetActiveCamera()
+
+        # Standard anatomical views
+        if command in ("anterior", "posterior", "lateral", "top", "bottom"):
+            focal = np.array(cam.GetFocalPoint(), dtype=float)
+            pos = np.array(cam.GetPosition(), dtype=float)
+            distance = float(np.linalg.norm(pos - focal))
+            if distance <= 0:
+                distance = 1.0
+
+            positions = {
+                "anterior": (0, -distance, 0),
+                "posterior": (0, distance, 0),
+                "lateral": (distance, 0, 0),
+                "top": (0, 0, distance),
+                "bottom": (0, 0, -distance),
+            }
+
+            new_pos = focal + np.array(positions[command], dtype=float)
+            cam.SetPosition(*new_pos)
+            cam.SetFocalPoint(*focal)
+
+            if command in ("top", "bottom"):
+                cam.SetViewUp(0, 1, 0)
+            else:
+                cam.SetViewUp(0, 0, 1)
+
+            cam.OrthogonalizeViewUp()
+            self.plotter.render()
+            return
+
+        if command in ("reset", "reset view"):
+            self.plotter.reset_camera()
+            self.plotter.render()
+            return
+
+
+        # Spin control
+        if command == "start spin":
+            self._voice_spin_timer.start(50)
+            return
+
+        if command == "stop spin":
+            self._voice_spin_timer.stop()
+            return
+
+    def _voice_spin_step(self):
+        if self.isVisible() and self.state_stack.currentIndex() == self._PAGE_SCENE:
+            cam = self.plotter.renderer.GetActiveCamera()
+            cam.Azimuth(2.0)
+            self.plotter.render()
 
     # ── Pure Gesture Camera Control ──────────────────────────────────────────
 

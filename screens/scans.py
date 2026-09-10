@@ -48,9 +48,13 @@ class ScanCard(QFrame):
         thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
         pixmap = dicom_to_qpixmap(scan["file_path"])
         thumb.setPixmap(
-        pixmap.scaled(120, 120, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
-        if pixmap else QPixmap()
-)
+            pixmap.scaled(
+                120, 120,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.FastTransformation,
+            )
+            if pixmap else QPixmap()
+        )
 
         info = QLabel(f"{scan['type']} · {scan['date']}")
         btn = QPushButton("View in 3D")

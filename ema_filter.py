@@ -31,7 +31,7 @@ class LowPassFilter:
         self._s = None
 
     def filter(self, value, alpha: float):
-        if self._y is None:
+        if self._s is None:
             s = value
         else:
             s = alpha * value + (1.0 - alpha) * self._s
@@ -40,7 +40,7 @@ class LowPassFilter:
         return s
 
     def last_value(self):
-        return self._y
+        return self._s
 
     def reset(self):
         self._y = None

@@ -288,12 +288,11 @@ class Viewer3D(QWidget):
                 self._loader.failed.disconnect()
             except Exception:
                 pass
-            self._loader.terminate()
-            self._loader.wait()
+            self._loader.requestInterruption()
 
         self._active_path = folder_path
         self.scan_label.setText(label or os.path.basename(folder_path))
-        self.status_label.setText("Reading DICOM slices…")
+        self.status_label.setText("Preparing 3D model…")
         self.state_stack.setCurrentIndex(self._PAGE_LOADING)
 
         self._loader = DicomLoader(folder_path, preset=preset)

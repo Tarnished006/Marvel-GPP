@@ -1,128 +1,117 @@
-# voice_commands.py
 """
-Offline fixed-phrase voice recognition for Aegis-Touch, using Vosk.
+Aegis-Touch voice controller.
 
-Push-to-talk design: continuous listening picks up ambient OR chatter as
-false "commands" (see the '[unk]' noise hits from the first test run).
-So instead, audio is only captured between an explicit START and STOP
-trigger -- Vosk only ever processes what was said in that window.
-
-Trigger source is swappable on purpose:
-  - Today: Enter key (press to start speaking, press again to stop).
-  - Later: USB foot pedal, once we know what keystroke/event it sends --
-    swap `keyboard_trigger_*` for a `pedal_trigger_*` and nothing else changes.
-
-Week 2 scope: recognize a small closed set of phrases reliably (the
-preset camera views -- Anterior / Lateral / Reset). NOT free-form
-dictation -- that's Week 3+.
-
-Setup (one-time, on your own machine):
-  1. pip install vosk sounddevice
-  2. Download "vosk-model-small-en-us-0.15" from
-     https://alphacephei.com/vosk/models
-  3. Unzip it into this repo as ./vosk-model-small-en-us-0.15/
+Vosk runs in a separate Python process so that a native Vosk crash
+cannot crash the main PyQt/MediaPipe application.
 """
 
-import json
 import os
-import queue
+import sys
+import subprocess
 
-import sounddevice as sd
-from vosk import Model, KaldiRecognizer
+from PyQt6.QtCore import QThread, pyqtSignal
+
 
 MODEL_PATH = "vosk-model-small-en-us-0.15"
-SAMPLE_RATE = 16000
-
-# The fixed grammar. Vosk will only ever return one of these (or silence) --
-# it will not hallucinate other words.
-COMMAND_PHRASES = [
-    "anterior",
-    "posterior",
-    "lateral",
-    "reset",
-    "reset view",
-]
 
 
-def keyboard_trigger_start():
-    """Blocks until the user presses Enter to begin speaking."""
-    input("\nPress ENTER, then say a command...")
-
-
-def keyboard_trigger_stop():
-    """Blocks until the user presses Enter again to end the recording window."""
-    input("(listening -- press ENTER again to stop) ")
-
-
-# --- Swap point for the foot pedal, once we know its trigger event ---
-# def pedal_trigger_start():
-#     wait_for_pedal_press()
-# def pedal_trigger_stop():
-#     wait_for_pedal_release()
-
-
-class PushToTalkListener:
+class VoiceCommandWorker(QThread):
+    voice_result = pyqtSignal(str)
     """
-    Records exactly one audio window per call to listen_once(), bounded by
-    trigger_start()/trigger_stop(), and runs it through Vosk's fixed grammar.
+    Runs the Vosk engine in a completely separate Python process.
+
+    The main Aegis application only receives recognized text.
     """
 
-    def __init__(self, trigger_start=keyboard_trigger_start,
-                 trigger_stop=keyboard_trigger_stop, model_path: str = MODEL_PATH):
-        if not os.path.isdir(model_path):
-            raise FileNotFoundError(
-                f"Vosk model folder '{model_path}' not found.\n"
-                f"Download it from https://alphacephei.com/vosk/models "
-                f"(grab 'vosk-model-small-en-us-0.15') and unzip it into "
-                f"this repo's root, next to this script, so the folder "
-                f"'{model_path}' exists here."
+    def __init__(self, model_path: str = MODEL_PATH):
+        super().__init__()
+
+        self.model_path = model_path
+        self._armed = False
+        self._running = True
+        self.process = None
+
+    def run(self):
+        project_root = os.path.dirname(os.path.abspath(__file__))
+        process_script = os.path.join(project_root, "voice_process.py")
+
+        python_executable = sys.executable
+
+        env = os.environ.copy()
+
+        try:
+            self.process = subprocess.Popen(
+                [
+                    python_executable,
+                    process_script,
+                ],
+                cwd=project_root,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=None,
+                text=True,
+                bufsize=1,
             )
-        self.trigger_start = trigger_start
-        self.trigger_stop = trigger_stop
-        self.model = Model(model_path)
-        self._grammar = json.dumps(COMMAND_PHRASES + ["[unk]"])
-        self._audio_q: queue.Queue = queue.Queue()
 
-    def _audio_callback(self, indata, frames, time_info, status):
-        self._audio_q.put(bytes(indata))
+            print("[voice_commands] Voice process started.")
 
-    def listen_once(self) -> str:
-        """Runs one full start -> record -> stop -> recognize cycle. Returns the recognized phrase (or '')."""
-        self.trigger_start()
+            while self._running:
 
-        self._audio_q = queue.Queue()
-        stream = sd.RawInputStream(
-            samplerate=SAMPLE_RATE, blocksize=2000, dtype="int16",
-            channels=1, callback=self._audio_callback,
-        )
-        stream.start()
+                line = self.process.stdout.readline()
 
-        self.trigger_stop()
+                if not line:
+                    break
 
-        stream.stop()
-        stream.close()
+                line = line.strip()
 
-        # Fresh recognizer per utterance keeps this stateless between commands.
-        recognizer = KaldiRecognizer(self.model, SAMPLE_RATE, self._grammar)
-        while not self._audio_q.empty():
-            recognizer.AcceptWaveform(self._audio_q.get())
+                if line == "LOADING":
+                    print("[voice_commands] Loading Vosk model...")
 
-        result = json.loads(recognizer.FinalResult())
-        text = result.get("text", "").strip()
-        return text
+                elif line == "READY":
+                    print("[voice_commands] Vosk model ready.")
 
+                elif line.startswith("RESULT:"):
+                    phrase = line[len("RESULT:"):].strip()
 
-if __name__ == "__main__":
-    # Manual test: press ENTER, say "anterior" / "lateral" / "posterior" /
-    # "reset", press ENTER again, see it recognized. Ctrl+C to stop.
-    listener = PushToTalkListener()
-    print(f"Fixed phrases: {COMMAND_PHRASES}")
-    try:
-        while True:
-            phrase = listener.listen_once()
-            if phrase:
-                print(f"  -> Recognized command: '{phrase}'")
+                    if phrase and self._armed:
+                        print(
+                            f"[voice_commands] Recognized: '{phrase}'"
+                        )
+
+                        self.voice_result.emit(phrase)
+
+            print("[voice_commands] Voice process stopped.")
+
+        except Exception as e:
+            print(f"[voice_commands] Error: {e}")
+
+        finally:
+            self.process = None
+
+    def set_armed(self, armed: bool):
+        self._armed = armed
+
+        if self.process is None:
+            return
+
+        try:
+            if armed:
+                self.process.stdin.write("ARM\n")
             else:
-                print("  -> (nothing recognized)")
-    except KeyboardInterrupt:
-        print("\nStopped.")
+                self.process.stdin.write("DISARM\n")
+
+            self.process.stdin.flush()
+
+        except (BrokenPipeError, OSError):
+            pass
+
+    def stop(self):
+        self._running = False
+        self._armed = False
+
+        if self.process is not None:
+            try:
+                self.process.stdin.write("EXIT\n")
+                self.process.stdin.flush()
+            except (BrokenPipeError, OSError):
+                pass

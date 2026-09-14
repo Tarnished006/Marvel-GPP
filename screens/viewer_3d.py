@@ -294,8 +294,8 @@ class Viewer3D(QWidget):
                 self._loader.failed.disconnect()
             except Exception:
                 pass
-            self._loader.terminate()
-            self._loader.wait()
+            self._loader.requestInterruption()
+            self._loader.wait(2000)
 
         self._active_path = folder_path
         self.scan_label.setText(label or os.path.basename(folder_path))

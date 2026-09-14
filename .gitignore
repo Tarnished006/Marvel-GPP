@@ -1,4 +1,6 @@
 raw_downloads/
 aegis.db
 __pycache__/
+**/__pycache__/
 *.pyc
+.cache/

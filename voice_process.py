@@ -65,6 +65,19 @@ def record_and_recognize(model):
     return result.get("text", "").strip()
 
 
+def _stdin_reader(q: queue.Queue):
+    while True:
+        try:
+            line = sys.stdin.readline()
+            if not line:
+                q.put("EXIT")
+                break
+            q.put(line.strip().upper())
+        except Exception:
+            q.put("EXIT")
+            break
+
+
 def main():
     if not os.path.isdir(MODEL_PATH):
         print("ERROR: Vosk model folder not found", flush=True)
@@ -76,44 +89,43 @@ def main():
 
     print("READY", flush=True)
 
+    import threading
+    stdin_q = queue.Queue()
+    t = threading.Thread(target=_stdin_reader, args=(stdin_q,), daemon=True)
+    t.start()
+
     armed = False
 
     while True:
-        command = sys.stdin.readline()
+        try:
+            command = stdin_q.get(timeout=0.2 if armed else None)
+        except queue.Empty:
+            command = None
 
-        if not command:
-            break
+        if command:
+            if command == "ARM":
+                armed = True
+            elif command == "DISARM":
+                armed = False
+            elif command == "EXIT":
+                break
 
-        command = command.strip().upper()
+        if armed:
+            phrase = record_and_recognize(model)
 
-        if command == "ARM":
-            armed = True
+            if phrase:
+                try:
+                    print(f"RESULT:{phrase}", flush=True)
+                except BrokenPipeError:
+                    return
 
-            while armed:
-                phrase = record_and_recognize(model)
-
-                if phrase:
-                    try:
-                        print(f"RESULT:{phrase}", flush=True)
-                    except BrokenPipeError:
-                        return
-
-                # Check whether the parent sent DISARM/EXIT.
-                import select
-
-                if select.select([sys.stdin], [], [], 0)[0]:
-                    incoming = sys.stdin.readline().strip().upper()
-
-                    if incoming == "DISARM":
-                        armed = False
-                    elif incoming == "EXIT":
-                        return
-
-        elif command == "DISARM":
-            armed = False
-
-        elif command == "EXIT":
-            break
+            # Check whether the parent sent DISARM/EXIT while recording
+            while not stdin_q.empty():
+                incoming = stdin_q.get_nowait()
+                if incoming == "DISARM":
+                    armed = False
+                elif incoming == "EXIT":
+                    return
 
 
 if __name__ == "__main__":

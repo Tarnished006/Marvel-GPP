@@ -258,8 +258,16 @@ class MainWindow(QMainWindow):
         # When pinch starts, user's hand naturally trembles by 5-15px.
         # Suppress hand jitter within 20px radius of click origin to prevent
         # converting deliberate button clicks into aborted drags.
+        from PyQt6.QtWidgets import QAbstractButton
+        clicked_w = getattr(self, "_clicked_widget", None)
+        is_button = isinstance(clicked_w, QAbstractButton)
+
         if getattr(self, "_mouse_is_down", False):
-            if not getattr(self, "_is_dragging", False):
+            if is_button:
+                # Buttons should never turn into drags; lock cursor to click origin
+                self.cursor_x = self._click_origin_x
+                self.cursor_y = self._click_origin_y
+            elif not getattr(self, "_is_dragging", False):
                 dx = clamped_x - self._click_origin_x
                 dy = clamped_y - self._click_origin_y
                 if (dx * dx + dy * dy > 20 * 20):
@@ -274,9 +282,9 @@ class MainWindow(QMainWindow):
                 self.cursor_x = clamped_x
                 self.cursor_y = clamped_y
                 # If dragging an in-app Qt widget, dispatch direct QMouseEvent Move
-                if getattr(self, "_clicked_widget", None) is not None:
+                if clicked_w is not None:
                     pos_pt = QPoint(self.cursor_x, self.cursor_y)
-                    local_pos = self._clicked_widget.mapFromGlobal(pos_pt)
+                    local_pos = clicked_w.mapFromGlobal(pos_pt)
                     move_ev = QMouseEvent(
                         QMouseEvent.Type.MouseMove,
                         QPointF(local_pos),
@@ -285,7 +293,7 @@ class MainWindow(QMainWindow):
                         Qt.MouseButton.LeftButton,
                         Qt.KeyboardModifier.NoModifier,
                     )
-                    QApplication.sendEvent(self._clicked_widget, move_ev)
+                    QApplication.sendEvent(clicked_w, move_ev)
         else:
             self.cursor_x = clamped_x
             self.cursor_y = clamped_y
@@ -359,8 +367,12 @@ class MainWindow(QMainWindow):
         if not getattr(self, "_mouse_is_down", False):
             return
 
-        # If stationary click (not dragged), snap back to exact click origin
-        if not getattr(self, "_is_dragging", False):
+        from PyQt6.QtWidgets import QAbstractButton
+        target = getattr(self, "_clicked_widget", None)
+        is_button = isinstance(target, QAbstractButton)
+
+        # If button or stationary click (not dragged), snap back to exact click origin
+        if is_button or not getattr(self, "_is_dragging", False):
             target_x = self._click_origin_x
             target_y = self._click_origin_y
             self.cursor_x = target_x
@@ -371,7 +383,6 @@ class MainWindow(QMainWindow):
             target_y = getattr(self, "cursor_y", self._click_origin_y)
 
         target_pos = QPoint(target_x, target_y)
-        target = getattr(self, "_clicked_widget", None)
 
         if target is not None:
             local_pos = target.mapFromGlobal(target_pos)

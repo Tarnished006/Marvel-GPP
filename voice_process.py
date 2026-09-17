@@ -20,9 +20,6 @@ COMMAND_PHRASES = [
     "bottom",
     "reset",
     "reset view",
-
-    "start spin",
-    "stop spin",
 ]
 
 

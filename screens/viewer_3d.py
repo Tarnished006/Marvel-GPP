@@ -28,6 +28,7 @@ from pyvistaqt import QtInteractor
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QStackedWidget, QSizePolicy, QScrollArea,
+    QComboBox, QFrame,
 )
 from PyQt6.QtCore import Qt, QTimer
 from signal_bus import signal_bus
@@ -259,7 +260,9 @@ class Viewer3D(QWidget):
         self.view_mode_stack = QStackedWidget()
 
         # 1. 3D View Container
-        container_3d = QWidget()
+        self.container_3d = QWidget()
+        self.container_3d.resizeEvent = self._on_container_3d_resized
+        container_3d = self.container_3d
         layout_3d = QVBoxLayout(container_3d)
         layout_3d.setContentsMargins(0, 0, 0, 0)
         layout_3d.setSpacing(0)
@@ -330,6 +333,30 @@ class Viewer3D(QWidget):
         self.btn_ghost_plane.clicked.connect(self._toggle_ghost_plane)
         snap_bar.addWidget(self.btn_ghost_plane)
 
+        snap_bar.addSpacing(14)
+        bone_mode_lbl = QLabel("Bone Mode:")
+        bone_mode_lbl.setStyleSheet("color: #555; font-size: 9px; font-weight: 600; text-transform: uppercase;")
+        snap_bar.addWidget(bone_mode_lbl)
+
+        self.combo_bone_mode = QComboBox()
+        self.combo_bone_mode.addItem("🦴 Normal Bone View")
+        self.combo_bone_mode.addItem("🌡 Hounsfield Heatmap")
+        self.combo_bone_mode.setFixedHeight(22)
+        self.combo_bone_mode.setStyleSheet(
+            "QComboBox {"
+            "  background: #141414; color: #00e5ff; border: 1px solid #282828;"
+            "  border-radius: 3px; font-size: 9px; font-weight: 600; padding: 0 8px;"
+            "}"
+            "QComboBox:hover { background: #1c1c1c; border-color: #00b4d8; }"
+            "QComboBox::drop-down { border: none; width: 14px; }"
+            "QComboBox QAbstractItemView {"
+            "  background: #111; color: #ddd; selection-background-color: #003344;"
+            "  selection-color: #00e5ff; border: 1px solid #333;"
+            "}"
+        )
+        self.combo_bone_mode.currentIndexChanged.connect(self._on_bone_mode_changed)
+        snap_bar.addWidget(self.combo_bone_mode)
+
         snap_bar.addStretch()
 
         snap_bar_widget = QWidget()
@@ -340,6 +367,9 @@ class Viewer3D(QWidget):
         self.plotter = QtInteractor(container_3d, auto_update=False)
         self.plotter.set_background("#090909")
         layout_3d.addWidget(self.plotter.interactor, stretch=1)
+
+        # Floating HUD card explaining HU density scale
+        self.legend_card = self._build_legend_card(container_3d)
 
         self.view_mode_stack.addWidget(container_3d)  # Index 0: 3D
 

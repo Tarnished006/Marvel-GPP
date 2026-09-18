@@ -116,9 +116,11 @@ class MPRSliceWidget(QFrame):
         self.cobb_hover: QPointF = None
         self.cobb_measurements: list[CobbAngleMeasurement] = []
 
-        # ROI Flashlight Lens State
+        # ROI Diagnostic Magnifying Loupe State (2.0x Digital Magnification)
         self.flashlight_active: bool = False
         self.flashlight_pos: QPointF = None
+        self.flashlight_pinned: bool = False
+        self.flashlight_pinned_pos: QPointF = None
 
         # Real-world spacing (dx, dy) for this specific projection in mm/pixel
         self.mm_per_pixel_x: float = 1.0
@@ -184,6 +186,17 @@ class MPRSliceWidget(QFrame):
         if event.button() != Qt.MouseButton.LeftButton:
             return
 
+        # ── Diagnostic Magnifying Loupe Pinning ───────────────────────────────
+        if self.flashlight_active:
+            self.flashlight_pinned = not self.flashlight_pinned
+            if self.flashlight_pinned:
+                self.flashlight_pinned_pos = event.position()
+            else:
+                self.flashlight_pinned_pos = None
+                self.flashlight_pos = event.position()
+            self.update()
+            return
+
         # ── Cobb Angle 4-Point State Machine ──────────────────────────────────
         if self.cobb_active:
             now = time.time()
@@ -192,11 +205,15 @@ class MPRSliceWidget(QFrame):
                 self.last_p1_ts = now
                 self.update()
             elif len(self.cobb_pts) == 1:
-                if now - self.last_p1_ts < 0.15:
-                    return
                 dx_px = (u - self.cobb_pts[0].x()) * rect.width()
                 dy_px = (v - self.cobb_pts[0].y()) * rect.height()
-                if math.hypot(dx_px, dy_px) < 3.0:
+                if math.hypot(dx_px, dy_px) < 14.0:
+                    # User clicked or double-clicked on Point 1: delete/cancel Line 1!
+                    self.cobb_pts.clear()
+                    self.cobb_hover = None
+                    self.update()
+                    return
+                if now - self.last_p1_ts < 0.15:
                     return
                 self.cobb_pts.append(QPointF(u, v))
                 self.last_p1_ts = now
@@ -208,11 +225,15 @@ class MPRSliceWidget(QFrame):
                 self.last_p1_ts = now
                 self.update()
             elif len(self.cobb_pts) == 3:
-                if now - self.last_p1_ts < 0.15:
-                    return
                 dx_px = (u - self.cobb_pts[2].x()) * rect.width()
                 dy_px = (v - self.cobb_pts[2].y()) * rect.height()
-                if math.hypot(dx_px, dy_px) < 3.0:
+                if math.hypot(dx_px, dy_px) < 14.0:
+                    # User clicked or double-clicked on Point 3: delete/cancel Line 2!
+                    self.cobb_pts.pop()
+                    self.cobb_hover = None
+                    self.update()
+                    return
+                if now - self.last_p1_ts < 0.15:
                     return
                 p4 = QPointF(u, v)
                 p1, p2, p3 = self.cobb_pts[0], self.cobb_pts[1], self.cobb_pts[2]
@@ -232,13 +253,17 @@ class MPRSliceWidget(QFrame):
                 self.last_p1_ts = now
                 self.update()
             else:
-                # Step 2: Pin Point 2 and Commit
-                if now - self.last_p1_ts < 0.15:
-                    return
-
+                # Step 2: Pin Point 2 and Commit OR Delete if clicked on Point 1
                 dx_px = (u - self.caliper_p1.x()) * rect.width()
                 dy_px = (v - self.caliper_p1.y()) * rect.height()
-                if math.hypot(dx_px, dy_px) < 4.0:
+                if math.hypot(dx_px, dy_px) < 14.0:
+                    # User clicked or double-clicked on the same node/point: delete/cancel the caliper line!
+                    self.caliper_p1 = None
+                    self.caliper_hover = None
+                    self.update()
+                    return
+
+                if now - self.last_p1_ts < 0.15:
                     return
 
                 dist_mm = self._calc_dist_mm(self.caliper_p1, QPointF(u, v))
@@ -257,7 +282,8 @@ class MPRSliceWidget(QFrame):
         v = float(np.clip((event.position().y() - rect.top()) / rect.height(), 0.0, 1.0))
 
         if self.flashlight_active:
-            self.flashlight_pos = event.position()
+            if not self.flashlight_pinned:
+                self.flashlight_pos = event.position()
             self.update()
 
         if self.cobb_active:
@@ -271,9 +297,85 @@ class MPRSliceWidget(QFrame):
         elif event.buttons() & Qt.MouseButton.LeftButton:
             self.crosshair_moved.emit(u, v)
 
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            rect = self._get_target_rect()
+            if rect.width() > 0 and rect.height() > 0:
+                u = float(np.clip((event.position().x() - rect.left()) / rect.width(), 0.0, 1.0))
+                v = float(np.clip((event.position().y() - rect.top()) / rect.height(), 0.0, 1.0))
+                # Support press-drag-release caliper gesture (> 8px drag commits Point 2 on release)
+                if self.caliper_active and self.caliper_p1 is not None:
+                    dx_px = (u - self.caliper_p1.x()) * rect.width()
+                    dy_px = (v - self.caliper_p1.y()) * rect.height()
+                    now = time.time()
+                    if math.hypot(dx_px, dy_px) >= 8.0 and (now - self.last_p1_ts >= 0.10):
+                        dist_mm = self._calc_dist_mm(self.caliper_p1, QPointF(u, v))
+                        self.measurements.append(CaliperMeasurement(self.caliper_p1, QPointF(u, v), dist_mm))
+                        self.caliper_p1 = None
+                        self.caliper_hover = None
+                        self.update()
+
+    def mouseDoubleClickEvent(self, event):
+        rect = self._get_target_rect()
+        if rect.width() <= 0 or rect.height() <= 0:
+            return
+
+        # 1. If currently starting a caliper line, double-click deletes it immediately
+        if self.caliper_active and self.caliper_p1 is not None:
+            self.caliper_p1 = None
+            self.caliper_hover = None
+            self.update()
+            return
+
+        # 2. If currently starting a Cobb angle, double-click deletes it immediately
+        if self.cobb_active and self.cobb_pts:
+            self.cobb_pts.clear()
+            self.cobb_hover = None
+            self.update()
+            return
+
+        # 3. Double-click on any existing caliper line deletes that line
+        pos = event.position()
+        if self.measurements:
+            for i in reversed(range(len(self.measurements))):
+                m = self.measurements[i]
+                p1_px = QPointF(rect.left() + m.p1.x() * rect.width(), rect.top() + m.p1.y() * rect.height())
+                p2_px = QPointF(rect.left() + m.p2.x() * rect.width(), rect.top() + m.p2.y() * rect.height())
+                if self._dist_to_segment_2d(pos, p1_px, p2_px) < 16.0:
+                    self.measurements.pop(i)
+                    self.update()
+                    return
+
+        # 4. Double-click on any existing Cobb angle line deletes that measurement
+        if self.cobb_measurements:
+            for i in reversed(range(len(self.cobb_measurements))):
+                cm = self.cobb_measurements[i]
+                p1_px = self._to_widget_pt(cm.p1, rect)
+                p2_px = self._to_widget_pt(cm.p2, rect)
+                p3_px = self._to_widget_pt(cm.p3, rect)
+                p4_px = self._to_widget_pt(cm.p4, rect)
+                if (self._dist_to_segment_2d(pos, p1_px, p2_px) < 16.0 or
+                    self._dist_to_segment_2d(pos, p3_px, p4_px) < 16.0):
+                    self.cobb_measurements.pop(i)
+                    self.update()
+                    return
+
+    @staticmethod
+    def _dist_to_segment_2d(p: QPointF, a: QPointF, b: QPointF) -> float:
+        """Calculates distance from point p to line segment ab in 2D pixels."""
+        ab_x = b.x() - a.x()
+        ab_y = b.y() - a.y()
+        l2 = ab_x * ab_x + ab_y * ab_y
+        if l2 < 1e-6:
+            return float(math.hypot(p.x() - a.x(), p.y() - a.y()))
+        t = max(0.0, min(1.0, ((p.x() - a.x()) * ab_x + (p.y() - a.y()) * ab_y) / l2))
+        proj_x = a.x() + t * ab_x
+        proj_y = a.y() + t * ab_y
+        return float(math.hypot(p.x() - proj_x, p.y() - proj_y))
+
     def leaveEvent(self, event):
         super().leaveEvent(event)
-        if self.flashlight_active:
+        if self.flashlight_active and not self.flashlight_pinned:
             self.flashlight_pos = None
             self.update()
 
@@ -338,34 +440,62 @@ class MPRSliceWidget(QFrame):
             painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "No Slice Loaded")
             return
 
-        # ── ROI Flashlight Lens (130px illuminated contrast spotlight) ────────
-        if self.flashlight_active and self.flashlight_pos is not None:
-            fpos = self.flashlight_pos
-            lens_r = 65.0
+        # ── ROI Diagnostic Magnifying Loupe (2.0x Digital Zoom with Micro-Reticle) ────
+        active_lens_pos = self.flashlight_pinned_pos if self.flashlight_pinned else self.flashlight_pos
+        if self.flashlight_active and active_lens_pos is not None and self._pixmap and not self._pixmap.isNull():
+            fpos = active_lens_pos
+            lens_r = 75.0  # 150px wide high-resolution inspection loupe
             lens_path = QPainterPath()
             lens_path.addEllipse(fpos, lens_r, lens_r)
 
+            # Map center of loupe to source DICOM slice coordinates
+            u = float(np.clip((fpos.x() - rect.left()) / max(rect.width(), 1.0), 0.0, 1.0))
+            v = float(np.clip((fpos.y() - rect.top()) / max(rect.height(), 1.0), 0.0, 1.0))
+            src_cx = u * self._pixmap.width()
+            src_cy = v * self._pixmap.height()
+
+            zoom_factor = 2.0
+            scale_x = self._pixmap.width() / max(rect.width(), 1.0)
+            scale_y = self._pixmap.height() / max(rect.height(), 1.0)
+            src_w = (lens_r * 2.0 / zoom_factor) * scale_x
+            src_h = (lens_r * 2.0 / zoom_factor) * scale_y
+
+            src_rect = QRectF(src_cx - src_w / 2.0, src_cy - src_h / 2.0, src_w, src_h)
+            dst_rect = QRectF(fpos.x() - lens_r, fpos.y() - lens_r, lens_r * 2.0, lens_r * 2.0)
+
             painter.save()
             painter.setClipPath(lens_path)
-            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_ColorDodge)
-            painter.fillRect(QRectF(fpos.x() - lens_r, fpos.y() - lens_r, lens_r * 2, lens_r * 2), QColor(90, 115, 140, 180))
+            # Render true 2.0x magnified DICOM pixel detail
+            painter.drawPixmap(dst_rect.toRect(), self._pixmap, src_rect.toRect())
+            # Contrast illumination overlay for hairline fractures & micro-structures
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Screen)
+            painter.fillRect(dst_rect, QColor(30, 55, 75, 70))
             painter.restore()
 
-            painter.setPen(QPen(QColor(0, 229, 255, 220), 2))
+            # Precision Bezel (outer glowing cyan ring and dark inner bevel)
+            painter.setPen(QPen(QColor(0, 229, 255, 240), 2.5))
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawEllipse(fpos, lens_r, lens_r)
 
-            painter.setPen(QPen(QColor(0, 229, 255, 130), 1, Qt.PenStyle.DashLine))
-            painter.drawLine(QPointF(fpos.x() - 8, fpos.y()), QPointF(fpos.x() + 8, fpos.y()))
-            painter.drawLine(QPointF(fpos.x(), fpos.y() - 8), QPointF(fpos.x(), fpos.y() + 8))
+            painter.setPen(QPen(QColor(10, 25, 40, 200), 1.5))
+            painter.drawEllipse(fpos, lens_r - 2.0, lens_r - 2.0)
 
-            lens_tag = QRectF(fpos.x() - 40, fpos.y() - lens_r - 18, 80, 16)
-            painter.setBrush(QBrush(QColor(10, 25, 35, 210)))
+            # Precision Central Reticle
+            pen_reticle = QPen(QColor(0, 229, 255, 180), 1, Qt.PenStyle.DashLine)
+            painter.setPen(pen_reticle)
+            painter.drawLine(QPointF(fpos.x() - 12, fpos.y()), QPointF(fpos.x() + 12, fpos.y()))
+            painter.drawLine(QPointF(fpos.x(), fpos.y() - 12), QPointF(fpos.x(), fpos.y() + 12))
+
+            # Diagnostic Loupe Status Badge
+            badge_text = "📌 2.0x PINNED" if self.flashlight_pinned else "🔍 2.0x ZOOM"
+            badge_sub = "Click to unpin" if self.flashlight_pinned else "Click to pin"
+            badge_rect = QRectF(fpos.x() - 60, fpos.y() - lens_r - 22, 120, 18)
+            painter.setBrush(QBrush(QColor(10, 25, 35, 225)))
             painter.setPen(QPen(QColor(0, 229, 255), 1))
-            painter.drawRoundedRect(lens_tag, 3, 3)
+            painter.drawRoundedRect(badge_rect, 4, 4)
             painter.setPen(QColor(0, 229, 255))
             painter.setFont(QFont("sans-serif", 7, QFont.Weight.Bold))
-            painter.drawText(lens_tag, Qt.AlignmentFlag.AlignCenter, "🔦 ROI LENS")
+            painter.drawText(badge_rect, Qt.AlignmentFlag.AlignCenter, f"{badge_text} · {badge_sub}")
 
         # 2. Draw Crosshairs
         cx = rect.left() + self.cross_u * rect.width()
@@ -626,8 +756,8 @@ class MPRView(QWidget):
         self.btn_cobb.clicked.connect(self._toggle_cobb)
         self.top_bar.addWidget(self.btn_cobb)
 
-        # Flashlight Lens toggle
-        self.btn_flashlight = QPushButton("🔦 Lens: OFF")
+        # Diagnostic Magnifying Loupe toggle
+        self.btn_flashlight = QPushButton("🔍 2x Lens: OFF")
         self.btn_flashlight.setCheckable(True)
         self.btn_flashlight.setFixedHeight(24)
         self.btn_flashlight.setStyleSheet(
@@ -638,8 +768,8 @@ class MPRView(QWidget):
         self.btn_flashlight.clicked.connect(self._toggle_flashlight)
         self.top_bar.addWidget(self.btn_flashlight)
 
-        # Tumor Volumetrics calculation
-        self.btn_volume = QPushButton("🧊 Tumor Vol")
+        # Lesion / ROI Volumetrics calculation
+        self.btn_volume = QPushButton("🧊 Lesion / ROI Vol")
         self.btn_volume.setFixedHeight(24)
         self.btn_volume.setStyleSheet(
             "QPushButton { background: #181818; color: #888; border: 1px solid #333; "
@@ -831,10 +961,12 @@ class MPRView(QWidget):
 
     def _toggle_flashlight(self):
         self.flashlight_mode = self.btn_flashlight.isChecked()
-        self.btn_flashlight.setText("🔦 Lens: ON" if self.flashlight_mode else "🔦 Lens: OFF")
+        self.btn_flashlight.setText("🔍 2x Lens: ON" if self.flashlight_mode else "🔍 2x Lens: OFF")
         for w in (self.w_axial, self.w_coronal, self.w_sagittal):
             w.flashlight_active = self.flashlight_mode
             w.flashlight_pos = None
+            w.flashlight_pinned = False
+            w.flashlight_pinned_pos = None
             w.update()
 
     def undo_measurement(self):
@@ -860,7 +992,7 @@ class MPRView(QWidget):
             w.update()
 
     def _calculate_volumetrics(self):
-        """Calculates RECIST 1D, WHO 2D, and Ellipsoid 3D tumor volume from calipers."""
+        """Calculates RECIST 1D, WHO 2D, and Ellipsoid 3D lesion / structure volume from calipers."""
         all_dists = []
         for w in (self.w_axial, self.w_coronal, self.w_sagittal):
             for m in w.measurements:
@@ -870,8 +1002,8 @@ class MPRView(QWidget):
         if not all_dists:
             QMessageBox.information(
                 self,
-                "Tumor Volumetrics",
-                "No caliper measurements found.\n\nPlease measure 1 to 3 tumor axes using the Caliper tool (Length, Width, Height) to calculate volume."
+                "Lesion / ROI Volumetrics",
+                "No caliper measurements found.\n\nPlease measure 1 to 3 axes of the target structure or lesion using the Caliper tool (Length, Width, Height) to calculate volume."
             )
             return
 
@@ -887,20 +1019,22 @@ class MPRView(QWidget):
         who_2d = L * W
 
         msg = (
-            f"<h3>Tumor Volumetric Analysis (RECIST / WHO)</h3>"
+            f"<h3>3D Lesion & Structure Volumetric Analysis</h3>"
+            f"<p style='color: #bbb; font-size: 11px;'>Applicable for: Tumors, Cysts, Hematomas, Nodules, Abscesses, and Organ/Bone Sizing</p>"
+            f"<hr>"
             f"<p><b>Calibrated Dimensions:</b><br>"
             f"• Max Diameter (L): <b>{L:.1f} mm</b><br>"
             f"• Perpendicular Width (W): <b>{W:.1f} mm</b><br>"
             f"• Longitudinal Height (H): <b>{H:.1f} mm</b></p>"
             f"<hr>"
-            f"<p><b>Clinical Staging Metrics:</b><br>"
+            f"<p><b>Clinical Diagnostic Metrics:</b><br>"
             f"• <b>1D RECIST 1.1:</b> {recist_1d:.1f} mm (Longest Axial Dimension)<br>"
             f"• <b>2D WHO Cross-Product:</b> {who_2d:.1f} mm²<br>"
             f"• <b>3D Ellipsoid Volume:</b> <span style='color: #00e5ff; font-size: 14px;'><b>{volume_cm3:.2f} cm³</b></span> ({volume_mm3:.1f} mm³ / mL)</p>"
             f"<p style='color: #888; font-size: 10px;'>Formula: V = (π / 6) · L · W · H | Calibrated with physical DICOM millimeter spacing.</p>"
         )
         box = QMessageBox(self)
-        box.setWindowTitle("Clinical Tumor Volumetrics")
+        box.setWindowTitle("Clinical Lesion & Structure Volumetrics")
         box.setText(msg)
         box.setTextFormat(Qt.TextFormat.RichText)
         box.setIcon(QMessageBox.Icon.Information)
@@ -1045,3 +1179,28 @@ class MPRView(QWidget):
         self._refresh_coronal_slice()
         self._refresh_axial_slice()
         self._update_crosshair_positions()
+
+    def get_measurement_summary(self) -> list[dict]:
+        """Returns structured summary of all Caliper and Cobb angle measurements across viewports."""
+        summary = []
+        for plane, widget in (("Axial", self.w_axial), ("Coronal", self.w_coronal), ("Sagittal", self.w_sagittal)):
+            for idx, m in enumerate(widget.measurements, 1):
+                summary.append({
+                    "plane": plane,
+                    "type": "Caliper",
+                    "label": f"{plane} #{idx}",
+                    "value": f"{m.dist_mm:.1f} mm",
+                    "num_value": m.dist_mm,
+                    "unit": "mm",
+                })
+            for idx, cm in enumerate(widget.cobb_measurements, 1):
+                summary.append({
+                    "plane": plane,
+                    "type": "Cobb Angle",
+                    "label": f"{plane} Cobb #{idx}",
+                    "value": f"{cm.angle_deg:.1f}°",
+                    "num_value": cm.angle_deg,
+                    "unit": "deg",
+                })
+        return summary
+

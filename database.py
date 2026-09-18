@@ -87,3 +87,67 @@ def get_scans_for_ui(mrn: str) -> list[dict]:
         }
         for s in get_scans_for_patient(mrn)
     ]
+
+def get_patient(mrn: str) -> dict | None:
+    """Fetch single patient record by MRN."""
+    conn = get_connection()
+    row = conn.execute("SELECT * FROM patients WHERE mrn = ?", (mrn,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+def touch_patient(mrn: str):
+    """Stamp last-viewed timestamp for a patient (safe if column absent)."""
+    try:
+        conn = get_connection()
+        try:
+            conn.execute("ALTER TABLE patients ADD COLUMN last_viewed TEXT")
+            conn.commit()
+        except Exception:
+            pass
+        conn.execute("UPDATE patients SET last_viewed = datetime('now') WHERE mrn = ?", (mrn,))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+def log_action(action: str, mrn: str = None, details: str = ""):
+    """Audit log entry for HIPAA / clinical compliance."""
+    try:
+        conn = get_connection()
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS audit_log ("
+            "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "  timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,"
+            "  action TEXT,"
+            "  mrn TEXT,"
+            "  details TEXT"
+            ")"
+        )
+        conn.execute(
+            "INSERT INTO audit_log (action, mrn, details) VALUES (?, ?, ?)",
+            (action, mrn, str(details))
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[audit_log] {action} (mrn={mrn}): {details}")
+
+def get_notes_for_patient(mrn: str) -> list[dict]:
+    """Retrieve clinical notes for a patient."""
+    try:
+        conn = get_connection()
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS notes ("
+            "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "  patient_mrn TEXT,"
+            "  timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,"
+            "  author TEXT,"
+            "  content TEXT,"
+            "  FOREIGN KEY (patient_mrn) REFERENCES patients(mrn)"
+            ")"
+        )
+        rows = conn.execute("SELECT * FROM notes WHERE patient_mrn = ?", (mrn,)).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+    except Exception:
+        return []

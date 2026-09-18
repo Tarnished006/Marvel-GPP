@@ -87,3 +87,67 @@ def get_scans_for_ui(mrn: str) -> list[dict]:
         }
         for s in get_scans_for_patient(mrn)
     ]
+
+# --- Compatibility functions for main.py ------------------------------------
+
+def get_patient(mrn: str) -> dict | None:
+    """Return patient record matching mrn from patients table, or None if not found."""
+    try:
+        conn = get_connection()
+        row = conn.execute("SELECT * FROM patients WHERE mrn = ?", (mrn,)).fetchone()
+        conn.close()
+        return dict(row) if row else None
+    except Exception:
+        return None
+
+def get_notes_for_patient(mrn: str) -> list[dict]:
+    """Return notes for patient if notes table exists; empty list safely otherwise."""
+    try:
+        conn = get_connection()
+        table_check = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='notes'"
+        ).fetchone()
+        if table_check:
+            rows = conn.execute(
+                "SELECT * FROM notes WHERE patient_mrn = ? ORDER BY created_at DESC", (mrn,)
+            ).fetchall()
+            conn.close()
+            return [dict(r) for r in rows]
+        conn.close()
+    except Exception:
+        pass
+    return []
+
+def touch_patient(mrn: str):
+    """Stamp a patient as just-viewed if schema supports it; harmless no-op otherwise."""
+    try:
+        conn = get_connection()
+        cols = [info[1] for info in conn.execute("PRAGMA table_info(patients)").fetchall()]
+        if "last_viewed_at" in cols:
+            import datetime
+            now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            conn.execute("UPDATE patients SET last_viewed_at = ? WHERE mrn = ?", (now_str, mrn))
+            conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+def log_action(action: str, patient_mrn: str = None, detail: str = ""):
+    """Record an access/modification event if audit table exists; silent safe fallback otherwise."""
+    try:
+        conn = get_connection()
+        table_check = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('audit_log', 'activity_log')"
+        ).fetchone()
+        if table_check:
+            table_name = table_check[0]
+            import datetime
+            now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            conn.execute(
+                f"INSERT INTO {table_name} (patient_mrn, action, detail, created_at) VALUES (?, ?, ?, ?)",
+                (patient_mrn, action, str(detail), now_str)
+            )
+            conn.commit()
+        conn.close()
+    except Exception:
+        pass

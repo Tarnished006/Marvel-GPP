@@ -28,12 +28,18 @@ from pyvistaqt import QtInteractor
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QStackedWidget, QSizePolicy, QScrollArea,
+<<<<<<< HEAD
     QComboBox, QFrame,
+=======
+    QComboBox, QFrame, QSlider, QSplitter,
+>>>>>>> e360d5e (Add CT visualization features and synchronization improvements)
 )
 from PyQt6.QtCore import Qt, QTimer
 from signal_bus import signal_bus
 from dicom_engine import DicomLoader, MeshSet
 from screens.mpr_view import MPRView
+from screens.slice_2d_viewer import Slice2DViewerWidget
+from screens.study_info_panel import StudyInfoDialog, StudyInfoPanel, extract_safe_metadata
 
 try:
     from database import get_scans_for_ui
@@ -98,9 +104,36 @@ class Viewer3D(QWidget):
         # Voice/feature state
         self._voice_zoom_level = 1.0      # bookkeeping for "zoom to X percent"
         self._clip_active      = False    # cross-section clipping plane
+        self._clip_axis        = "y"      # active clipping axis: 'x', 'y', or 'z'
+        self._clip_fraction    = 0.5      # position along axis (0.0 to 1.0)
+        self._clip_inverted    = False    # direction toggle (invert retained side)
+        self._clipped_mesh     = None     # derived clipped mesh
+        self._original_mesh    = None     # reference to unmodified complete bone mesh
         self._density_active   = False    # HU density colormap
+        self._bone_opacity     = 1.0      # bone mesh opacity (0.1 to 1.0)
         self._spin_timer       = QTimer(self)
         self._spin_timer.timeout.connect(self._spin_tick)
+
+        # ── 2D ↔ 3D Synchronization State ──────────────────────────────────────
+        self._sync_2d_3d_enabled = False  # OFF by default
+        self._sync_show_marker   = True   # 3D reference marker visible when sync is active
+        self._sync_link_clipping = False  # optionally link clipping plane to 2D slice
+        self._sync_marker_actor  = None
+        self._sync_in_progress   = False  # reentrancy guard against feedback loops
+        self._reference_pos      = (0.0, 0.0, 0.0)
+
+        # ── 3D Measurement State ──────────────────────────────────────────────
+        self._measuring_3d            = False  # OFF by default
+        self._measurements_3d_visible = True
+        self._pending_3d_point        = None
+        self._measurements_3d         = []
+        self._measurement_actor_names = []
+
+        # ── Study Information & Scan Metadata Panel ───────────────────────────
+        self._safe_dicom_headers = None
+        self.study_info_dialog = StudyInfoDialog(viewer=self, parent=self)
+        self.study_info_panel = self.study_info_dialog
+        self.study_info_dialog.closed.connect(self._on_study_info_dialog_closed)
 
         # Voice commands arrive via MainWindow._handle_voice_command(), which calls
         # handle_voice_command() directly -- do NOT also connect signal_bus.voice_command
@@ -225,8 +258,125 @@ class Viewer3D(QWidget):
         )
         self.btn_mpr_mode.clicked.connect(lambda: self._switch_view_mode(1))
 
+        self.btn_toggle_2d = QPushButton("🖼 2D Slice: OFF")
+        self.btn_toggle_2d.setCheckable(True)
+        self.btn_toggle_2d.setChecked(False)
+        self.btn_toggle_2d.setFixedHeight(24)
+        self.btn_toggle_2d.setStyleSheet(
+            "QPushButton { background: #1a1a1a; color: #888; border: 1px solid #333; "
+            "border-radius: 4px; font-size: 10px; font-weight: 600; padding: 0 10px; }"
+            "QPushButton:checked { background: #00222a; color: #00e5ff; border-color: #00b4d8; }"
+            "QPushButton:hover { color: #ccc; }"
+        )
+        self.btn_toggle_2d.clicked.connect(self._on_toggle_2d_clicked)
+
+        # ── Synchronized 2D ↔ 3D Controls ─────────────────────────────────────
+        self.btn_sync_toggle = QPushButton("🔗 Sync 2D↔3D: OFF")
+        self.btn_sync_toggle.setCheckable(True)
+        self.btn_sync_toggle.setChecked(False)
+        self.btn_sync_toggle.setFixedHeight(24)
+        self.btn_sync_toggle.setStyleSheet(
+            "QPushButton { background: #1a1a1a; color: #888; border: 1px solid #333; "
+            "border-radius: 4px; font-size: 10px; font-weight: 600; padding: 0 8px; }"
+            "QPushButton:checked { background: #00222a; color: #00e5ff; border-color: #00b4d8; }"
+            "QPushButton:hover { color: #ccc; }"
+        )
+        self.btn_sync_toggle.clicked.connect(self._on_sync_toggle_clicked)
+
+        self.btn_sync_marker = QPushButton("📍 3D Marker: ON")
+        self.btn_sync_marker.setCheckable(True)
+        self.btn_sync_marker.setChecked(True)
+        self.btn_sync_marker.setFixedHeight(24)
+        self.btn_sync_marker.setStyleSheet(
+            "QPushButton { background: #1a1a1a; color: #888; border: 1px solid #333; "
+            "border-radius: 4px; font-size: 10px; font-weight: 600; padding: 0 8px; }"
+            "QPushButton:checked { background: #00222a; color: #00e5ff; border-color: #00b4d8; }"
+            "QPushButton:hover { color: #ccc; }"
+        )
+        self.btn_sync_marker.clicked.connect(self._on_sync_marker_clicked)
+
+        self.btn_sync_crosshair = QPushButton("🎯 Crosshair: ON")
+        self.btn_sync_crosshair.setCheckable(True)
+        self.btn_sync_crosshair.setChecked(True)
+        self.btn_sync_crosshair.setFixedHeight(24)
+        self.btn_sync_crosshair.setStyleSheet(
+            "QPushButton { background: #1a1a1a; color: #888; border: 1px solid #333; "
+            "border-radius: 4px; font-size: 10px; font-weight: 600; padding: 0 8px; }"
+            "QPushButton:checked { background: #00222a; color: #00e5ff; border-color: #00b4d8; }"
+            "QPushButton:hover { color: #ccc; }"
+        )
+        self.btn_sync_crosshair.clicked.connect(self._on_sync_crosshair_clicked)
+
+        self.btn_sync_clip = QPushButton("✂ Link Clip: OFF")
+        self.btn_sync_clip.setCheckable(True)
+        self.btn_sync_clip.setChecked(False)
+        self.btn_sync_clip.setFixedHeight(24)
+        self.btn_sync_clip.setStyleSheet(
+            "QPushButton { background: #1a1a1a; color: #888; border: 1px solid #333; "
+            "border-radius: 4px; font-size: 10px; font-weight: 600; padding: 0 8px; }"
+            "QPushButton:checked { background: #00222a; color: #00e5ff; border-color: #00b4d8; }"
+            "QPushButton:hover { color: #ccc; }"
+        )
+        self.btn_sync_clip.clicked.connect(self._on_sync_clip_clicked)
+
+        # ── 3D Distance Measurement Controls ──────────────────────────────────
+        self.btn_measure_3d = QPushButton("📏 Measure: OFF")
+        self.btn_measure_3d.setCheckable(True)
+        self.btn_measure_3d.setChecked(False)
+        self.btn_measure_3d.setFixedHeight(24)
+        self.btn_measure_3d.setStyleSheet(
+            "QPushButton { background: #1a1a1a; color: #888; border: 1px solid #333; "
+            "border-radius: 4px; font-size: 10px; font-weight: 600; padding: 0 8px; }"
+            "QPushButton:checked { background: #2a2200; color: #ffea00; border-color: #ffd600; }"
+            "QPushButton:hover { color: #ccc; }"
+        )
+        self.btn_measure_3d.clicked.connect(self._on_measure_3d_btn_clicked)
+
+        self.btn_measure_3d_vis = QPushButton("👁 Measure: ON")
+        self.btn_measure_3d_vis.setCheckable(True)
+        self.btn_measure_3d_vis.setChecked(True)
+        self.btn_measure_3d_vis.setFixedHeight(24)
+        self.btn_measure_3d_vis.setStyleSheet(
+            "QPushButton { background: #1a1a1a; color: #888; border: 1px solid #333; "
+            "border-radius: 4px; font-size: 10px; font-weight: 600; padding: 0 8px; }"
+            "QPushButton:checked { background: #1a1a1a; color: #00e5ff; border-color: #00b4d8; }"
+            "QPushButton:hover { color: #ccc; }"
+        )
+        self.btn_measure_3d_vis.clicked.connect(self._on_measure_3d_vis_clicked)
+
+        self.btn_clear_measure_3d = QPushButton("🗑 Clear")
+        self.btn_clear_measure_3d.setFixedHeight(24)
+        self.btn_clear_measure_3d.setStyleSheet(
+            "QPushButton { background: #1a1a1a; color: #888; border: 1px solid #333; "
+            "border-radius: 4px; font-size: 10px; font-weight: 600; padding: 0 8px; }"
+            "QPushButton:hover { color: #ff5555; border-color: #ff5555; }"
+        )
+        self.btn_clear_measure_3d.clicked.connect(self.clear_measurements_3d)
+
+        # ── Study Information & Scan Metadata Button ─────────────────────────
+        self.btn_study_info = QPushButton("📋 Study Info")
+        self.btn_study_info.setCheckable(True)
+        self.btn_study_info.setChecked(False)
+        self.btn_study_info.setFixedHeight(24)
+        self.btn_study_info.setStyleSheet(
+            "QPushButton { background: #1a1a1a; color: #888; border: 1px solid #333; "
+            "border-radius: 4px; font-size: 10px; font-weight: 600; padding: 0 8px; }"
+            "QPushButton:checked { background: #00222a; color: #00e5ff; border-color: #00b4d8; }"
+            "QPushButton:hover { color: #ccc; }"
+        )
+        self.btn_study_info.clicked.connect(self.toggle_study_info)
+
         top_row.addWidget(self.btn_3d_mode)
         top_row.addWidget(self.btn_mpr_mode)
+        top_row.addWidget(self.btn_toggle_2d)
+        top_row.addWidget(self.btn_sync_toggle)
+        top_row.addWidget(self.btn_sync_marker)
+        top_row.addWidget(self.btn_sync_crosshair)
+        top_row.addWidget(self.btn_sync_clip)
+        top_row.addWidget(self.btn_measure_3d)
+        top_row.addWidget(self.btn_measure_3d_vis)
+        top_row.addWidget(self.btn_clear_measure_3d)
+        top_row.addWidget(self.btn_study_info)
         top_row.addSpacing(10)
 
         self.info_bar = QLabel("")
@@ -364,9 +514,176 @@ class Viewer3D(QWidget):
         snap_bar_widget.setLayout(snap_bar)
         layout_3d.addWidget(snap_bar_widget)
 
+        # ── Interactive Clipping Control Strip ──────────────────────────────────
+        clip_bar = QHBoxLayout()
+        clip_bar.setContentsMargins(8, 3, 8, 3)
+        clip_bar.setSpacing(6)
+
+        clip_lbl = QLabel("✂ Clip Plane:")
+        clip_lbl.setStyleSheet("color: #555; font-size: 9px; font-weight: 600; text-transform: uppercase;")
+        clip_bar.addWidget(clip_lbl)
+
+        self.btn_clip_toggle = QPushButton("Enable")
+        self.btn_clip_toggle.setCheckable(True)
+        self.btn_clip_toggle.setChecked(False)
+        self.btn_clip_toggle.setFixedHeight(22)
+        self.btn_clip_toggle.setStyleSheet(
+            "QPushButton { background: #141414; color: #888; border: 1px solid #282828; "
+            "border-radius: 3px; font-size: 9px; padding: 0 8px; font-weight: 600; }"
+            "QPushButton:checked { background: #00222a; color: #00e5ff; border: 1px solid #00b4d8; }"
+            "QPushButton:hover { background: #222; color: #eee; }"
+        )
+        self.btn_clip_toggle.toggled.connect(self._on_clip_toggle_clicked)
+        clip_bar.addWidget(self.btn_clip_toggle)
+
+        clip_bar.addSpacing(10)
+        axis_lbl = QLabel("Axis:")
+        axis_lbl.setStyleSheet("color: #555; font-size: 9px; font-weight: 600;")
+        clip_bar.addWidget(axis_lbl)
+
+        self.combo_clip_axis = QComboBox()
+        self.combo_clip_axis.addItem("X")
+        self.combo_clip_axis.addItem("Y")
+        self.combo_clip_axis.addItem("Z")
+        self.combo_clip_axis.setCurrentIndex(1)  # Default Y
+        self.combo_clip_axis.setFixedHeight(22)
+        self.combo_clip_axis.setEnabled(False)
+        self.combo_clip_axis.setStyleSheet(
+            "QComboBox {"
+            "  background: #141414; color: #bbb; border: 1px solid #282828;"
+            "  border-radius: 3px; font-size: 9px; font-weight: 600; padding: 0 6px;"
+            "}"
+            "QComboBox:hover { border-color: #444; }"
+            "QComboBox:disabled { color: #444; border-color: #1a1a1a; }"
+            "QComboBox::drop-down { border: none; width: 14px; }"
+            "QComboBox QAbstractItemView {"
+            "  background: #111; color: #ddd; selection-background-color: #003344;"
+            "  selection-color: #00e5ff; border: 1px solid #333;"
+            "}"
+        )
+        self.combo_clip_axis.currentIndexChanged.connect(self._on_clip_axis_changed)
+        clip_bar.addWidget(self.combo_clip_axis)
+
+        clip_bar.addSpacing(10)
+        self.lbl_clip_pos = QLabel("Position: 50%")
+        self.lbl_clip_pos.setStyleSheet("color: #444; font-size: 9px; font-weight: 600; min-width: 95px;")
+        clip_bar.addWidget(self.lbl_clip_pos)
+
+        self.slider_clip_pos = QSlider(Qt.Orientation.Horizontal)
+        self.slider_clip_pos.setRange(0, 100)
+        self.slider_clip_pos.setValue(50)
+        self.slider_clip_pos.setFixedHeight(22)
+        self.slider_clip_pos.setMinimumWidth(120)
+        self.slider_clip_pos.setMaximumWidth(240)
+        self.slider_clip_pos.setEnabled(False)
+        self.slider_clip_pos.setStyleSheet(
+            "QSlider::groove:horizontal {"
+            "  height: 4px; background: #222; border-radius: 2px;"
+            "}"
+            "QSlider::sub-page:horizontal {"
+            "  background: #0088a8; border-radius: 2px;"
+            "}"
+            "QSlider::handle:horizontal {"
+            "  background: #00e5ff; border: 1px solid #00b4d8; width: 12px;"
+            "  margin-top: -4px; margin-bottom: -4px; border-radius: 6px;"
+            "}"
+            "QSlider::handle:horizontal:hover {"
+            "  background: #fff; border-color: #00e5ff;"
+            "}"
+            "QSlider:disabled {"
+            "  background: transparent;"
+            "}"
+        )
+        self.slider_clip_pos.valueChanged.connect(self._on_clip_slider_changed)
+        clip_bar.addWidget(self.slider_clip_pos)
+
+        clip_bar.addSpacing(10)
+        self.btn_clip_reverse = QPushButton("⇄ Reverse Direction")
+        self.btn_clip_reverse.setFixedHeight(22)
+        self.btn_clip_reverse.setEnabled(False)
+        self.btn_clip_reverse.setStyleSheet(
+            "QPushButton { background: #141414; color: #888; border: 1px solid #282828; "
+            "border-radius: 3px; font-size: 9px; padding: 0 8px; font-weight: 600; }"
+            "QPushButton:hover { background: #222; color: #eee; border-color: #444; }"
+            "QPushButton:disabled { color: #444; border-color: #1a1a1a; }"
+            "QPushButton:pressed { background: #00e5ff; color: #000; font-weight: bold; border-color: #00e5ff; }"
+        )
+        self.btn_clip_reverse.clicked.connect(self.reverse_clip_direction)
+        clip_bar.addWidget(self.btn_clip_reverse)
+
+        clip_bar.addSpacing(16)
+        sep_op = QFrame()
+        sep_op.setFrameShape(QFrame.Shape.VLine)
+        sep_op.setFrameShadow(QFrame.Shadow.Sunken)
+        sep_op.setStyleSheet("color: #222; background-color: #222; width: 1px; max-height: 18px;")
+        clip_bar.addWidget(sep_op)
+        clip_bar.addSpacing(12)
+
+        opacity_lbl = QLabel("Opacity:")
+        opacity_lbl.setStyleSheet("color: #555; font-size: 9px; font-weight: 600; text-transform: uppercase;")
+        clip_bar.addWidget(opacity_lbl)
+
+        self.lbl_opacity = QLabel("100%")
+        self.lbl_opacity.setStyleSheet("color: #00e5ff; font-size: 9px; font-weight: 600; min-width: 32px;")
+        clip_bar.addWidget(self.lbl_opacity)
+
+        self.slider_opacity = QSlider(Qt.Orientation.Horizontal)
+        self.slider_opacity.setRange(10, 100)
+        self.slider_opacity.setValue(100)
+        self.slider_opacity.setFixedHeight(22)
+        self.slider_opacity.setMinimumWidth(80)
+        self.slider_opacity.setMaximumWidth(130)
+        self.slider_opacity.setStyleSheet(
+            "QSlider::groove:horizontal {"
+            "  height: 4px; background: #222; border-radius: 2px;"
+            "}"
+            "QSlider::sub-page:horizontal {"
+            "  background: #0088a8; border-radius: 2px;"
+            "}"
+            "QSlider::handle:horizontal {"
+            "  background: #00e5ff; border: 1px solid #00b4d8; width: 12px;"
+            "  margin-top: -4px; margin-bottom: -4px; border-radius: 6px;"
+            "}"
+            "QSlider::handle:horizontal:hover {"
+            "  background: #fff; border-color: #00e5ff;"
+            "}"
+        )
+        self.slider_opacity.valueChanged.connect(self._on_opacity_slider_changed)
+        clip_bar.addWidget(self.slider_opacity)
+
+        clip_bar.addStretch()
+
+        self.clip_bar_widget = QWidget()
+        self.clip_bar_widget.setStyleSheet("background: #080808; border-bottom: 1px solid #181818;")
+        self.clip_bar_widget.setLayout(clip_bar)
+        layout_3d.addWidget(self.clip_bar_widget)
+
         self.plotter = QtInteractor(container_3d, auto_update=False)
         self.plotter.set_background("#090909")
-        layout_3d.addWidget(self.plotter.interactor, stretch=1)
+
+        self.view_split = QSplitter(Qt.Orientation.Horizontal)
+        self.view_split.setStyleSheet("QSplitter::handle { background: #1a1a1a; width: 4px; }")
+        self.view_split.addWidget(self.plotter.interactor)
+        self.panel_2d = Slice2DViewerWidget(parent=self)
+        self.panel_2d.setVisible(False)
+        self.panel_2d.closed.connect(lambda: self.set_2d_panel_visible(False))
+        self.panel_2d.slice_changed.connect(self._on_2d_slice_changed)
+        self.panel_2d.reference_position_changed.connect(self._on_2d_ref_pos_changed)
+        self.panel_2d.measurement_added.connect(self._on_2d_measurement_added)
+        self.panel_2d.measurement_cleared.connect(self._on_2d_measurement_cleared)
+        self.panel_2d.window_level_changed.connect(lambda w, l: self._notify_metadata_changed())
+        self.panel_2d.orientation_changed.connect(lambda o: self._notify_metadata_changed())
+        if hasattr(self.panel_2d, "btn_crosshair_toggle"):
+            self.panel_2d.btn_crosshair_toggle.clicked.connect(
+                lambda: self.set_crosshair_visible(self.panel_2d.is_crosshair_visible())
+            )
+        self.view_split.addWidget(self.panel_2d)
+        self.view_split.setStretchFactor(0, 3)
+        self.view_split.setStretchFactor(1, 2)
+        layout_3d.addWidget(self.view_split, stretch=1)
+
+        # Floating HUD card explaining HU density scale
+        self.legend_card = self._build_legend_card(container_3d)
 
         # Floating HUD card explaining HU density scale
         self.legend_card = self._build_legend_card(container_3d)
@@ -401,6 +718,630 @@ class Viewer3D(QWidget):
         content_row.addWidget(self.toggle_btn)
 
         return page
+
+    def _build_legend_card(self, parent: QWidget) -> QFrame:
+        """Constructs floating HUD card explaining the HU density color scale."""
+        card = QFrame(parent)
+        card.setFixedSize(235, 122)
+        card.setStyleSheet(
+            "QFrame {"
+            "  background: rgba(13, 13, 13, 230);"
+            "  border: 1px solid #2a2a2a;"
+            "  border-radius: 6px;"
+            "}"
+        )
+        card.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
+        v = QVBoxLayout(card)
+        v.setContentsMargins(10, 8, 10, 8)
+        v.setSpacing(4)
+
+        title = QLabel("🌡 CT Density Scale (HU)")
+        title.setStyleSheet(
+            "color: #00e5ff; font-size: 10px; font-weight: 700; border: none; background: transparent;"
+        )
+        v.addWidget(title)
+
+        items = [
+            ("🔴 > 1000 HU", "Dense Cortical Bone", "#ff4444"),
+            ("🟢 500–1000 HU", "Subcortical / Intermediate Bone", "#44dd66"),
+            ("🔵 200–500 HU", "Trabecular / Cancellous Bone", "#3399ff"),
+        ]
+        for tag, desc, col in items:
+            row = QHBoxLayout()
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(6)
+            dot = QLabel("●")
+            dot.setStyleSheet(
+                f"color: {col}; font-size: 10px; border: none; background: transparent;"
+            )
+            lbl_tag = QLabel(tag)
+            lbl_tag.setStyleSheet(
+                "color: #ccc; font-size: 9px; font-weight: 600; border: none; background: transparent;"
+            )
+            lbl_desc = QLabel(f"({desc})")
+            lbl_desc.setStyleSheet(
+                "color: #777; font-size: 8px; border: none; background: transparent;"
+            )
+            row.addWidget(dot)
+            row.addWidget(lbl_tag)
+            row.addWidget(lbl_desc)
+            row.addStretch()
+            v.addLayout(row)
+
+        disclaimer = QLabel("Heuristic HU visualization — not for diagnostic BMD.")
+        disclaimer.setStyleSheet(
+            "color: #555; font-size: 8px; font-style: italic; border: none; background: transparent; margin-top: 2px;"
+        )
+        v.addWidget(disclaimer)
+
+        card.setVisible(False)
+        return card
+
+    def _on_container_3d_resized(self, event):
+        """Handle container_3d resize to keep the legend card properly positioned."""
+        QWidget.resizeEvent(self.container_3d, event)
+        self._reposition_legend()
+
+    def _reposition_legend(self):
+        """Keep the legend card anchored at the bottom-left of the 3D viewport."""
+        if hasattr(self, "legend_card") and hasattr(self, "plotter") and hasattr(self, "container_3d"):
+            card_w = self.legend_card.width()
+            card_h = self.legend_card.height()
+            try:
+                pt = self.plotter.interactor.mapTo(self.container_3d, self.plotter.interactor.rect().bottomLeft())
+                x = pt.x() + 16
+                y = pt.y() - card_h - 16
+            except Exception:
+                p_geom = self.plotter.interactor.geometry()
+                x = p_geom.x() + 16
+                y = max(p_geom.y() + 16, p_geom.y() + p_geom.height() - card_h - 20)
+            self.legend_card.move(x, y)
+            self.legend_card.raise_()
+
+    def _on_toggle_2d_clicked(self, checked: bool):
+        self.set_2d_panel_visible(checked)
+
+    def set_2d_panel_visible(self, visible: bool):
+        """Toggles or sets the visibility of the side-by-side 2D slice viewer panel."""
+        if not hasattr(self, "panel_2d"):
+            return
+        is_vis = bool(visible)
+        self.panel_2d.setVisible(is_vis)
+        if hasattr(self, "btn_toggle_2d"):
+            self.btn_toggle_2d.blockSignals(True)
+            self.btn_toggle_2d.setChecked(is_vis)
+            self.btn_toggle_2d.setText("🖼 2D Slice: ON" if is_vis else "🖼 2D Slice: OFF")
+            self.btn_toggle_2d.blockSignals(False)
+
+        if is_vis and hasattr(self, "view_split"):
+            tot_w = max(400, self.view_split.width())
+            self.view_split.setSizes([int(tot_w * 0.58), int(tot_w * 0.42)])
+
+        # Re-anchor legend card after splitter layout updates
+        QTimer.singleShot(50, self._reposition_legend)
+
+    # ── 2D ↔ 3D Synchronization Handlers & State Management ───────────────────
+
+    def _on_sync_toggle_clicked(self, checked: bool):
+        self.set_sync_2d_3d(checked)
+
+    def _on_sync_marker_clicked(self, checked: bool):
+        self.set_marker_visible(checked)
+
+    def _on_sync_crosshair_clicked(self, checked: bool):
+        self.set_crosshair_visible(checked)
+
+    def _on_sync_clip_clicked(self, checked: bool):
+        self.set_link_clipping(checked)
+
+    def set_sync_2d_3d(self, enabled: bool):
+        """Enables or disables synchronized 2D–3D anatomical position linking."""
+        self._sync_2d_3d_enabled = bool(enabled)
+        if hasattr(self, "btn_sync_toggle"):
+            self.btn_sync_toggle.blockSignals(True)
+            self.btn_sync_toggle.setChecked(self._sync_2d_3d_enabled)
+            self.btn_sync_toggle.setText("🔗 Sync 2D↔3D: ON" if self._sync_2d_3d_enabled else "🔗 Sync 2D↔3D: OFF")
+            self.btn_sync_toggle.blockSignals(False)
+
+        if self._sync_2d_3d_enabled:
+            if hasattr(self, "panel_2d"):
+                pos = self.panel_2d.get_current_physical_position()
+                self._reference_pos = pos
+                if getattr(self, "_sync_show_marker", True):
+                    self._update_3d_marker(pos[0], pos[1], pos[2])
+                if getattr(self, "_sync_link_clipping", False):
+                    self._sync_2d_to_clipping(
+                        self.panel_2d.current_orientation,
+                        self.panel_2d.get_current_slice_index()
+                    )
+        else:
+            self._remove_3d_marker()
+        self._notify_metadata_changed()
+
+    def is_sync_2d_3d_enabled(self) -> bool:
+        """Returns True if 2D–3D position synchronization is currently active."""
+        return getattr(self, "_sync_2d_3d_enabled", False)
+
+    def set_marker_visible(self, visible: bool):
+        """Sets visibility of the 3D reference marker."""
+        self._sync_show_marker = bool(visible)
+        if hasattr(self, "btn_sync_marker"):
+            self.btn_sync_marker.blockSignals(True)
+            self.btn_sync_marker.setChecked(self._sync_show_marker)
+            self.btn_sync_marker.setText("📍 3D Marker: ON" if self._sync_show_marker else "📍 3D Marker: OFF")
+            self.btn_sync_marker.blockSignals(False)
+
+        if self._sync_show_marker and getattr(self, "_sync_2d_3d_enabled", False):
+            self._update_3d_marker(*getattr(self, "_reference_pos", (0.0, 0.0, 0.0)))
+        else:
+            self._remove_3d_marker()
+
+    def is_marker_visible(self) -> bool:
+        """Returns True if the 3D reference marker is currently set to visible."""
+        return getattr(self, "_sync_show_marker", True)
+
+    def set_crosshair_visible(self, visible: bool):
+        """Sets visibility of the 2D crosshair overlay."""
+        vis = bool(visible)
+        if hasattr(self, "btn_sync_crosshair"):
+            self.btn_sync_crosshair.blockSignals(True)
+            self.btn_sync_crosshair.setChecked(vis)
+            self.btn_sync_crosshair.setText("🎯 Crosshair: ON" if vis else "🎯 Crosshair: OFF")
+            self.btn_sync_crosshair.blockSignals(False)
+
+        if hasattr(self, "panel_2d"):
+            self.panel_2d.set_crosshair_visible(vis)
+
+    def is_crosshair_visible(self) -> bool:
+        """Returns True if the 2D crosshair overlay is enabled."""
+        if hasattr(self, "panel_2d"):
+            return self.panel_2d.is_crosshair_visible()
+        return True
+
+    def set_link_clipping(self, enabled: bool):
+        """Toggles bidirectional linking between the 2D slice and the 3D clipping plane."""
+        self._sync_link_clipping = bool(enabled)
+        if hasattr(self, "btn_sync_clip"):
+            self.btn_sync_clip.blockSignals(True)
+            self.btn_sync_clip.setChecked(self._sync_link_clipping)
+            self.btn_sync_clip.setText("✂ Link Clip: ON" if self._sync_link_clipping else "✂ Link Clip: OFF")
+            self.btn_sync_clip.blockSignals(False)
+
+        if self._sync_link_clipping and getattr(self, "_sync_2d_3d_enabled", False) and hasattr(self, "panel_2d"):
+            self._sync_2d_to_clipping(
+                self.panel_2d.current_orientation,
+                self.panel_2d.get_current_slice_index()
+            )
+
+    def is_clipping_linked(self) -> bool:
+        """Returns True if clipping plane is linked to the 2D slice."""
+        return getattr(self, "_sync_link_clipping", False)
+
+    def map_slice_to_3d(self, orientation: str, slice_index: int) -> tuple[float, float, float]:
+        """Calculates physical position (X, Y, Z) in mm for a given slice orientation and index.
+        - Axial slice maps to physical Z position: slice_index * slice_thickness
+        - Coronal slice maps to physical Y position: slice_index * pixel_spacing[0]
+        - Sagittal slice maps to physical X position: slice_index * pixel_spacing[1]
+        """
+        dx, dy, dz = 1.0, 1.0, 1.0
+        if hasattr(self, "panel_2d") and self.panel_2d.vol_data is not None:
+            dy = float(self.panel_2d.pixel_spacing[0])
+            dx = float(self.panel_2d.pixel_spacing[1])
+            dz = float(self.panel_2d.slice_thickness)
+        elif hasattr(self, "mpr_view") and self.mpr_view.vol_8bit is not None:
+            dy = float(self.mpr_view.pixel_spacing[0])
+            dx = float(self.mpr_view.pixel_spacing[1])
+            dz = float(self.mpr_view.slice_thickness)
+
+        cur_x, cur_y, cur_z = getattr(self, "_reference_pos", (0.0, 0.0, 0.0))
+        orient = orientation.lower().strip()
+        if orient == "axial":
+            z = slice_index * dz
+            return (cur_x, cur_y, float(z))
+        elif orient == "coronal":
+            y = slice_index * dy
+            return (cur_x, float(y), cur_z)
+        else:  # sagittal
+            x = slice_index * dx
+            return (float(x), cur_y, cur_z)
+
+    def map_3d_to_slice(self, x_mm: float, y_mm: float, z_mm: float) -> tuple[int, int, int]:
+        """Maps physical coordinate (X, Y, Z) in mm to volume slice indices (idx_x, idx_y, idx_z).
+        Safely clamped to volume dimensions.
+        """
+        H, W, D = 1, 1, 1
+        dx, dy, dz = 1.0, 1.0, 1.0
+        if hasattr(self, "panel_2d") and self.panel_2d.vol_data is not None:
+            H, W, D = self.panel_2d.vol_data.shape
+            dy = max(1e-4, float(self.panel_2d.pixel_spacing[0]))
+            dx = max(1e-4, float(self.panel_2d.pixel_spacing[1]))
+            dz = max(1e-4, float(self.panel_2d.slice_thickness))
+        elif hasattr(self, "mpr_view") and self.mpr_view.vol_8bit is not None:
+            H, W, D = self.mpr_view.vol_8bit.shape
+            dy = max(1e-4, float(self.mpr_view.pixel_spacing[0]))
+            dx = max(1e-4, float(self.mpr_view.pixel_spacing[1]))
+            dz = max(1e-4, float(self.mpr_view.slice_thickness))
+
+        ix = int(np.clip(round(x_mm / dx), 0, W - 1))
+        iy = int(np.clip(round(y_mm / dy), 0, H - 1))
+        iz = int(np.clip(round(z_mm / dz), 0, D - 1))
+        return (ix, iy, iz)
+
+    def _update_3d_marker(self, x: float, y: float, z: float):
+        """Renders or moves the lightweight 3D reference marker sphere at physical position (X, Y, Z).
+        Does NOT permanently modify the bone mesh or re-run HU sampling.
+        """
+        self._reference_pos = (float(x), float(y), float(z))
+        if (
+            not getattr(self, "_sync_2d_3d_enabled", False)
+            or not getattr(self, "_sync_show_marker", True)
+            or not hasattr(self, "plotter")
+            or self.plotter is None
+        ):
+            return
+
+        radius = 2.5
+        if getattr(self, "mesh_bounds", None) is not None:
+            xmin, xmax, ymin, ymax, zmin, zmax = self.mesh_bounds
+            diag = ((xmax - xmin)**2 + (ymax - ymin)**2 + (zmax - zmin)**2)**0.5
+            radius = max(1.5, diag * 0.015)
+
+        try:
+            sphere = pv.Sphere(radius=radius, center=(float(x), float(y), float(z)))
+            self._sync_marker_actor = self.plotter.add_mesh(
+                sphere,
+                name="sync_marker",
+                color="#00e5ff",
+                specular=0.6,
+                specular_power=20,
+                ambient=0.35,
+                render=False
+            )
+            self.plotter.render()
+        except Exception as exc:
+            print(f"[Viewer3D] Marker update error: {exc}")
+
+    def _remove_3d_marker(self):
+        """Removes the lightweight 3D reference marker from the scene without touching the bone mesh."""
+        try:
+            if hasattr(self, "plotter") and self.plotter is not None:
+                self.plotter.remove_actor("sync_marker", render=False)
+                self.plotter.render()
+            self._sync_marker_actor = None
+        except Exception:
+            pass
+
+    def _on_2d_slice_changed(self, orientation: str, slice_index: int):
+        """Slot called when 2D slice index changes."""
+        if getattr(self, "_sync_in_progress", False):
+            return
+
+        self._sync_in_progress = True
+        try:
+            if getattr(self, "_sync_2d_3d_enabled", False):
+                if hasattr(self, "panel_2d"):
+                    pos = self.panel_2d.get_current_physical_position()
+                    self._reference_pos = pos
+                    if getattr(self, "_sync_show_marker", True):
+                        self._update_3d_marker(pos[0], pos[1], pos[2])
+
+                    if getattr(self, "_sync_link_clipping", False):
+                        self._sync_2d_to_clipping(orientation, slice_index)
+        finally:
+            self._sync_in_progress = False
+
+        self._notify_metadata_changed()
+
+    def _on_2d_ref_pos_changed(self, x_mm: float, y_mm: float, z_mm: float):
+        """Slot called when 2D in-plane crosshair or slice moves."""
+        if getattr(self, "_sync_in_progress", False):
+            return
+        self._reference_pos = (x_mm, y_mm, z_mm)
+        if getattr(self, "_sync_2d_3d_enabled", False) and getattr(self, "_sync_show_marker", True):
+            self._update_3d_marker(x_mm, y_mm, z_mm)
+        self._notify_metadata_changed()
+
+    def _sync_2d_to_clipping(self, orientation: str, slice_index: int):
+        """Updates 3D clipping plane to align with 2D slice."""
+        if not hasattr(self, "panel_2d"):
+            return
+        count = self.panel_2d.get_slice_count()
+        if count <= 1:
+            return
+
+        fraction = float(np.clip(slice_index / max(1, count - 1), 0.005, 0.995))
+        axis_map = {"axial": "z", "coronal": "y", "sagittal": "x"}
+        target_axis = axis_map.get(orientation.lower(), "z")
+
+        if getattr(self, "_clip_axis", "y") != target_axis:
+            self.set_clip_axis(target_axis)
+        self.set_clip_position(fraction)
+        if hasattr(self, "slider_clip_pos"):
+            self.slider_clip_pos.blockSignals(True)
+            self.slider_clip_pos.setValue(int(round(fraction * 100)))
+            self.slider_clip_pos.blockSignals(False)
+        if not getattr(self, "_clip_active", False):
+            self.set_clipping(True)
+
+    def _sync_clip_to_2d(self, fraction: float):
+        """Updates 2D slice position when 3D clipping slider is adjusted."""
+        if (
+            not getattr(self, "_sync_2d_3d_enabled", False)
+            or not getattr(self, "_sync_link_clipping", False)
+            or getattr(self, "_sync_in_progress", False)
+            or not hasattr(self, "panel_2d")
+        ):
+            return
+
+        self._sync_in_progress = True
+        try:
+            axis = getattr(self, "_clip_axis", "y").lower().strip()
+            axis_to_orient = {"z": "axial", "y": "coronal", "x": "sagittal"}
+            target_orient = axis_to_orient.get(axis, "axial")
+
+            if self.panel_2d.current_orientation != target_orient:
+                self.panel_2d.set_orientation(target_orient)
+
+            count = self.panel_2d.get_slice_count()
+            if count > 0:
+                idx = int(np.clip(round(fraction * (count - 1)), 0, count - 1))
+                self.panel_2d.set_slice_index(idx)
+
+            pos = self.panel_2d.get_current_physical_position()
+            self._reference_pos = pos
+            if getattr(self, "_sync_show_marker", True):
+                self._update_3d_marker(pos[0], pos[1], pos[2])
+        finally:
+            self._sync_in_progress = False
+
+    # ── 3D Distance Measurement System ────────────────────────────────────────
+
+    @staticmethod
+    def calc_3d_distance(p1: tuple[float, float, float], p2: tuple[float, float, float]) -> float:
+        """Calculates Euclidean distance in mm between two 3D physical coordinates."""
+        x1, y1, z1 = float(p1[0]), float(p1[1]), float(p1[2])
+        x2, y2, z2 = float(p2[0]), float(p2[1]), float(p2[2])
+        return float(np.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2 + (z2 - z1) ** 2))
+
+    def start_measurement(self):
+        """Activates 3D point-to-point measurement mode."""
+        self.set_measuring_3d(True)
+
+    def finish_measurement(self):
+        """Finishes or cancels active 3D measurement mode."""
+        self.set_measuring_3d(False)
+
+    def set_measuring_3d(self, active: bool):
+        """Sets active 3D point-to-point measurement state."""
+        self._measuring_3d = bool(active)
+        if hasattr(self, "btn_measure_3d"):
+            self.btn_measure_3d.blockSignals(True)
+            self.btn_measure_3d.setChecked(self._measuring_3d)
+            self.btn_measure_3d.setText("📏 Measure: ON" if self._measuring_3d else "📏 Measure: OFF")
+            self.btn_measure_3d.blockSignals(False)
+        if self._measuring_3d:
+            self._pending_3d_point = None
+            if hasattr(self, "info_bar") and self.info_bar:
+                self.info_bar.setText("  📏 3D Measurement: Select first surface point")
+        else:
+            self.cancel_pending_3d_measurement()
+            if hasattr(self, "info_bar") and self.info_bar:
+                self.info_bar.setText("  📏 3D Measurement: OFF")
+
+    def is_measuring_3d(self) -> bool:
+        return bool(self._measuring_3d)
+
+    def cancel_pending_3d_measurement(self):
+        """Cancels in-progress first point selection."""
+        if self._pending_3d_point is not None:
+            self._pending_3d_point = None
+            try:
+                if hasattr(self, "plotter") and self.plotter is not None:
+                    self.plotter.remove_actor("measure_3d_temp_pt")
+                    self.plotter.render()
+            except Exception:
+                pass
+
+    def clear_measurements_3d(self):
+        """Removes all 3D measurement lines, endpoint markers, and labels."""
+        if hasattr(self, "plotter") and self.plotter is not None:
+            for name in list(self._measurement_actor_names):
+                try:
+                    self.plotter.remove_actor(name)
+                except Exception:
+                    pass
+            self.cancel_pending_3d_measurement()
+            self.plotter.render()
+        self._measurement_actor_names.clear()
+        self._measurements_3d.clear()
+        if hasattr(self, "info_bar") and self.info_bar and getattr(self, "_measuring_3d", False):
+            self.info_bar.setText("  📏 3D Measurement: Cleared")
+        self._notify_metadata_changed()
+
+    def set_measurements_3d_visible(self, visible: bool):
+        """Toggles visibility of 3D measurement actors."""
+        self._measurements_3d_visible = bool(visible)
+        if hasattr(self, "btn_measure_3d_vis"):
+            self.btn_measure_3d_vis.blockSignals(True)
+            self.btn_measure_3d_vis.setChecked(self._measurements_3d_visible)
+            self.btn_measure_3d_vis.setText("👁 Measure: ON" if self._measurements_3d_visible else "👁 Measure: OFF")
+            self.btn_measure_3d_vis.blockSignals(False)
+        if hasattr(self, "plotter") and self.plotter is not None:
+            for name in self._measurement_actor_names:
+                act = self.plotter.actors.get(name)
+                if act:
+                    act.SetVisibility(self._measurements_3d_visible)
+            self.plotter.render()
+
+    def is_measurements_3d_visible(self) -> bool:
+        return bool(self._measurements_3d_visible)
+
+    def get_measurements_3d(self) -> list[dict]:
+        return list(self._measurements_3d)
+
+    def _add_3d_measurement(
+        self,
+        pt1: tuple[float, float, float],
+        pt2: tuple[float, float, float],
+        source: str = "3D"
+    ) -> dict:
+        """Adds independent line, sphere endpoints, and distance label to PyVista scene."""
+        dist = self.calc_3d_distance(pt1, pt2)
+        import uuid
+        m_id = str(uuid.uuid4())[:8]
+
+        line_name = f"measure_line_{m_id}"
+        pt1_name = f"measure_pt1_{m_id}"
+        pt2_name = f"measure_pt2_{m_id}"
+        lbl_name = f"measure_lbl_{m_id}"
+
+        if hasattr(self, "plotter") and self.plotter is not None:
+            try:
+                line_mesh = pv.Line(pt1, pt2)
+                self.plotter.add_mesh(line_mesh, name=line_name, color="#ffea00", line_width=3)
+
+                s1 = pv.Sphere(radius=2.0, center=pt1)
+                s2 = pv.Sphere(radius=2.0, center=pt2)
+                self.plotter.add_mesh(s1, name=pt1_name, color="#ffea00")
+                self.plotter.add_mesh(s2, name=pt2_name, color="#ffea00")
+
+                midpoint = [
+                    (float(pt1[0]) + float(pt2[0])) / 2.0,
+                    (float(pt1[1]) + float(pt2[1])) / 2.0,
+                    (float(pt1[2]) + float(pt2[2])) / 2.0
+                ]
+                self.plotter.add_point_labels(
+                    [midpoint],
+                    [f"{dist:.1f} mm"],
+                    name=lbl_name,
+                    point_color="#ffea00",
+                    point_size=1,
+                    text_color="#ffffff",
+                    fill_shape=True,
+                    shape_color="#111111",
+                    shape_opacity=0.8,
+                    font_size=11,
+                    always_visible=True
+                )
+            except Exception as exc:
+                print(f"[Viewer3D] Add 3D measurement actor warning: {exc}")
+
+        actor_names = [line_name, pt1_name, pt2_name, lbl_name]
+        self._measurement_actor_names.extend(actor_names)
+
+        m_record = {
+            "id": m_id,
+            "source": source,
+            "pt1": pt1,
+            "pt2": pt2,
+            "distance_mm": dist,
+            "actor_names": actor_names
+        }
+        self._measurements_3d.append(m_record)
+
+        if not self._measurements_3d_visible and hasattr(self, "plotter") and self.plotter is not None:
+            for name in actor_names:
+                act = self.plotter.actors.get(name)
+                if act:
+                    act.SetVisibility(False)
+
+        if hasattr(self, "plotter") and self.plotter is not None:
+            self.plotter.render()
+        self._notify_metadata_changed()
+        return m_record
+
+    def _on_measure_3d_btn_clicked(self):
+        self.set_measuring_3d(self.btn_measure_3d.isChecked())
+
+    def _on_measure_3d_vis_clicked(self):
+        self.set_measurements_3d_visible(self.btn_measure_3d_vis.isChecked())
+
+    def _on_2d_measurement_added(self, m):
+        """When 2D measurement is created, sync to 3D if 2D-3D sync is enabled."""
+        if getattr(self, "_sync_2d_3d_enabled", False):
+            try:
+                pt1 = m.physical_start
+                pt2 = m.physical_end
+                self._add_3d_measurement(pt1, pt2, source="2D_synced")
+            except Exception as exc:
+                print(f"[Viewer3D] 2D->3D measurement sync warning: {exc}")
+        self._notify_metadata_changed()
+
+    def _on_2d_measurement_cleared(self):
+        """When 2D measurements are cleared, remove synced 3D measurements if sync is active."""
+        if getattr(self, "_sync_2d_3d_enabled", False):
+            remaining = []
+            for m in list(self._measurements_3d):
+                if m.get("source") == "2D_synced":
+                    for name in m.get("actor_names", []):
+                        try:
+                            if hasattr(self, "plotter") and self.plotter is not None:
+                                self.plotter.remove_actor(name)
+                            if name in self._measurement_actor_names:
+                                self._measurement_actor_names.remove(name)
+                        except Exception:
+                            pass
+                else:
+                    remaining.append(m)
+            self._measurements_3d = remaining
+            if hasattr(self, "plotter") and self.plotter is not None:
+                self.plotter.render()
+        self._notify_metadata_changed()
+
+    # ── Study Information & Scan Metadata Panel Methods ───────────────────────
+
+    def show_study_info(self):
+        """Opens and refreshes the safe study metadata panel."""
+        if hasattr(self, "study_info_dialog"):
+            self.study_info_dialog.update_metadata()
+            self.study_info_dialog.show()
+            self.study_info_dialog.raise_()
+            self.study_info_dialog.activateWindow()
+        if hasattr(self, "btn_study_info"):
+            self.btn_study_info.blockSignals(True)
+            self.btn_study_info.setChecked(True)
+            self.btn_study_info.blockSignals(False)
+
+    def hide_study_info(self):
+        """Closes the safe study metadata panel."""
+        if hasattr(self, "study_info_dialog"):
+            self.study_info_dialog.hide()
+        if hasattr(self, "btn_study_info"):
+            self.btn_study_info.blockSignals(True)
+            self.btn_study_info.setChecked(False)
+            self.btn_study_info.blockSignals(False)
+
+    def toggle_study_info(self):
+        """Toggles visibility of the safe study metadata panel."""
+        if hasattr(self, "study_info_dialog") and self.study_info_dialog.isVisible():
+            self.hide_study_info()
+        else:
+            self.show_study_info()
+
+    def is_study_info_visible(self) -> bool:
+        """Returns True if the study information panel is currently visible."""
+        return self.study_info_dialog.isVisible() if hasattr(self, "study_info_dialog") else False
+
+    def get_safe_study_metadata(self) -> dict:
+        """Returns non-sensitive DICOM metadata and real-time viewer state."""
+        return extract_safe_metadata(self)
+
+    def _notify_metadata_changed(self):
+        """Pushes live state updates to the open study info panel without re-reading DICOM."""
+        if hasattr(self, "study_info_dialog") and self.study_info_dialog is not None:
+            if self.study_info_dialog.isVisible():
+                self.study_info_dialog.update_metadata()
+
+    def _on_study_info_dialog_closed(self):
+        """Resets the Study Info button state when the dialog is closed."""
+        if hasattr(self, "btn_study_info"):
+            self.btn_study_info.blockSignals(True)
+            self.btn_study_info.setChecked(False)
+            self.btn_study_info.blockSignals(False)
+
+    def _on_bone_mode_changed(self, index: int):
+        """Slot for Bone Mode dropdown: 0 = Normal Bone View, 1 = Hounsfield Heatmap."""
+        self.set_density_colormap(index == 1)
 
     def _switch_view_mode(self, idx: int):
         self.view_mode_stack.setCurrentIndex(idx)
@@ -526,16 +1467,57 @@ class Viewer3D(QWidget):
             light_type="scene light",
         ))
 
-        self.bone_actor, _skin = meshset.add_to_plotter(self.plotter)
+        self.bone_actor, _skin = meshset.add_to_plotter(
+            self.plotter,
+            density_mode=self._density_active,
+        )
         self.mesh_bounds = meshset.bone_mesh.bounds
         # Kept so cross-section clipping and the density colormap can re-add the
         # mesh without re-running the whole DICOM -> mesh pipeline.
         self._bone_mesh = meshset.bone_mesh
+        self._original_mesh = meshset.bone_mesh
+        self._clipped_mesh = None
         self._meshset = meshset
         self._voice_zoom_level = 1.0
         self._clip_active = False
+        self._clip_axis = "y"
+        self._clip_fraction = 0.5
+        self._clip_inverted = False
         self._density_active = False
         self._spin_timer.stop()
+
+        if hasattr(self, "combo_bone_mode"):
+            self.combo_bone_mode.blockSignals(True)
+            self.combo_bone_mode.setCurrentIndex(0)
+            self.combo_bone_mode.blockSignals(False)
+        if hasattr(self, "legend_card"):
+            self.legend_card.setVisible(False)
+            self._reposition_legend()
+
+        if hasattr(self, "btn_clip_toggle"):
+            self.btn_clip_toggle.blockSignals(True)
+            self.btn_clip_toggle.setChecked(False)
+            self.btn_clip_toggle.setText("Enable")
+            self.btn_clip_toggle.blockSignals(False)
+        if hasattr(self, "combo_clip_axis"):
+            self.combo_clip_axis.blockSignals(True)
+            self.combo_clip_axis.setCurrentIndex(1)
+            self.combo_clip_axis.blockSignals(False)
+        if hasattr(self, "slider_clip_pos"):
+            self.slider_clip_pos.blockSignals(True)
+            self.slider_clip_pos.setValue(50)
+            self.slider_clip_pos.blockSignals(False)
+        if hasattr(self, "lbl_clip_pos"):
+            self.lbl_clip_pos.setText("Position: 50%")
+        self._sync_clip_controls_enabled()
+
+        self._bone_opacity = 1.0
+        if hasattr(self, "slider_opacity"):
+            self.slider_opacity.blockSignals(True)
+            self.slider_opacity.setValue(100)
+            self.slider_opacity.blockSignals(False)
+        if hasattr(self, "lbl_opacity"):
+            self.lbl_opacity.setText("100%")
 
         # Establish and remember the clean default camera position.
         self.plotter.reset_camera()
@@ -569,11 +1551,16 @@ class Viewer3D(QWidget):
         except Exception as exc:
             print(f"[Viewer3D] Point picking setup error: {exc}")
 
+        iso = getattr(meshset, "bone_isovalue", 400.0)
+        hu_info = f"HU={iso:.0f}"
+        if meshset.has_hu_density():
+            lo, hi = meshset.get_hu_range()
+            hu_info += f" (HU range {lo:.0f}–{hi:.0f})"
         self.info_bar.setText(
             f"  {self.scan_label.text()}  ·  "
             f"Bone {meshset.bone_mesh.n_points:,} pts  "
             f"{meshset.bone_mesh.n_cells:,} tris  ·  "
-            f"HU={meshset.bone_isovalue:.0f}"
+            f"{hu_info}"
         )
 
         self._rebuild_sidebar(active_path=getattr(self, "_active_path", ""))
@@ -587,6 +1574,26 @@ class Viewer3D(QWidget):
                     self._update_ghost_plane(self.mpr_view.idx_z * self.mpr_view.slice_thickness)
         except Exception as exc:
             print(f"[Viewer3D] Warning: could not load MPR slices: {exc}")
+
+        # Initialize 2D slice viewer panel from loaded volume
+        try:
+            if hasattr(self, "panel_2d") and hasattr(self, "mpr_view"):
+                if getattr(self.mpr_view, "vol_data", None) is not None:
+                    self.panel_2d.load_volume(
+                        self.mpr_view.vol_data,
+                        self.mpr_view.pixel_spacing,
+                        self.mpr_view.slice_thickness
+                    )
+                    if getattr(self, "_sync_2d_3d_enabled", False):
+                        pos = self.panel_2d.get_current_physical_position()
+                        self._reference_pos = pos
+                        if getattr(self, "_sync_show_marker", True):
+                            self._update_3d_marker(pos[0], pos[1], pos[2])
+        except Exception as exc:
+            print(f"[Viewer3D] Warning: could not load 2D slice panel: {exc}")
+
+        self._safe_dicom_headers = None
+        self._notify_metadata_changed()
 
     def _toggle_ghost_plane(self):
         self._ghost_active = self.btn_ghost_plane.isChecked()
@@ -633,10 +1640,40 @@ class Viewer3D(QWidget):
             print(f"[Viewer3D] Ghost plane error: {exc}")
 
     def _on_3d_point_picked(self, point):
-        """Raycasts 3D surface click directly into MPR slices and synchronizes ghost plane."""
+        """Raycasts 3D surface click directly into MPR slices, 2D slice viewer, and synchronizes ghost plane."""
         if point is None:
             return
         x_mm, y_mm, z_mm = float(point[0]), float(point[1]), float(point[2])
+
+        if getattr(self, "_measuring_3d", False):
+            if self._pending_3d_point is None:
+                self._pending_3d_point = (x_mm, y_mm, z_mm)
+                try:
+                    if hasattr(self, "plotter") and self.plotter is not None:
+                        temp_s = pv.Sphere(radius=2.5, center=(x_mm, y_mm, z_mm))
+                        self.plotter.add_mesh(temp_s, name="measure_3d_temp_pt", color="#ffea00")
+                        self.plotter.render()
+                except Exception as exc:
+                    print(f"[Viewer3D] Temp point add warning: {exc}")
+                if hasattr(self, "info_bar") and self.info_bar:
+                    self.info_bar.setText(
+                        f"  📏 3D Point 1: ({x_mm:.1f}, {y_mm:.1f}, {z_mm:.1f}) mm · Select second point"
+                    )
+            else:
+                pt1 = self._pending_3d_point
+                pt2 = (x_mm, y_mm, z_mm)
+                self._pending_3d_point = None
+                try:
+                    if hasattr(self, "plotter") and self.plotter is not None:
+                        self.plotter.remove_actor("measure_3d_temp_pt")
+                except Exception:
+                    pass
+                m_rec = self._add_3d_measurement(pt1, pt2, source="3D")
+                dist = m_rec["distance_mm"]
+                if hasattr(self, "info_bar") and self.info_bar:
+                    self.info_bar.setText(f"  📏 3D Distance: {dist:.1f} mm  ·  P1 to P2")
+            return
+
         if hasattr(self, "mpr_view") and self.mpr_view:
             self.mpr_view.snap_to_volume_point(x_mm, y_mm, z_mm)
             if hasattr(self, "info_bar") and self.info_bar:
@@ -646,6 +1683,18 @@ class Viewer3D(QWidget):
                 )
         if getattr(self, "_ghost_active", False):
             self._update_ghost_plane(z_mm)
+
+        if getattr(self, "_sync_2d_3d_enabled", False):
+            if not getattr(self, "_sync_in_progress", False):
+                self._sync_in_progress = True
+                try:
+                    if hasattr(self, "panel_2d"):
+                        self.panel_2d.set_physical_position(x_mm, y_mm, z_mm)
+                    self._reference_pos = (x_mm, y_mm, z_mm)
+                    if getattr(self, "_sync_show_marker", True):
+                        self._update_3d_marker(x_mm, y_mm, z_mm)
+                finally:
+                    self._sync_in_progress = False
 
     def _on_mpr_axial_changed(self, z_mm: float):
         if getattr(self, "_ghost_active", False):
@@ -879,9 +1928,375 @@ class Viewer3D(QWidget):
 
             "reset camera": "reset",
             "reset the view": "reset view",
+
+            # Bone density heatmap voice aliases
+            "show density map": "show density",
+            "hide density map": "hide density",
+            "density map": "show density",
+            "bone heatmap": "show density",
+            "bone density": "show density",
+            "hounsfield heatmap": "show density",
+            "show heatmap": "show density",
+            "density heatmap": "show density",
+            "normal bone view": "normal view",
+            "normal bone": "normal view",
+            "bone view": "normal view",
+            "hide heatmap": "normal view",
+            "hide density": "normal view",
+
+            # Interactive clipping plane voice aliases
+            "enable clipping": "enable clipping",
+            "clip model": "enable clipping",
+            "start clipping": "enable clipping",
+            "show cross section": "enable clipping",
+            "cross section": "enable clipping",
+            "disable clipping": "disable clipping",
+            "remove clipping": "disable clipping",
+            "stop clipping": "disable clipping",
+            "hide cross section": "disable clipping",
+            "clip along x": "clip along x",
+            "clip x": "clip along x",
+            "clip on x": "clip along x",
+            "x axis clip": "clip along x",
+            "clip along y": "clip along y",
+            "clip y": "clip along y",
+            "clip on y": "clip along y",
+            "y axis clip": "clip along y",
+            "clip along z": "clip along z",
+            "clip z": "clip along z",
+            "clip on z": "clip along z",
+            "z axis clip": "clip along z",
+            "reverse clipping": "reverse clipping",
+            "reverse clip direction": "reverse clipping",
+            "invert clipping": "reverse clipping",
+            "flip clipping": "reverse clipping",
+            "flip direction": "reverse clipping",
+
+            # Bone transparency / opacity voice aliases
+            "make bone transparent": "half opacity",
+            "make transparent": "half opacity",
+            "semi transparent": "half opacity",
+            "medium transparency": "half opacity",
+            "50 percent opacity": "half opacity",
+            "50% opacity": "half opacity",
+            "half opacity": "half opacity",
+            "high transparency": "high transparency",
+            "transparent bone": "high transparency",
+            "transparent": "high transparency",
+            "25 percent opacity": "high transparency",
+            "25% opacity": "high transparency",
+            "opaque": "full opacity",
+            "opaque bone": "full opacity",
+            "100 percent opacity": "full opacity",
+            "100% opacity": "full opacity",
+            "full opacity": "full opacity",
+            "reset opacity": "full opacity",
+            "increase transparency": "increase transparency",
+            "more transparent": "increase transparency",
+            "decrease transparency": "decrease transparency",
+            "more opaque": "decrease transparency",
+            "increase opacity": "decrease transparency",
+            "decrease opacity": "increase transparency",
+            "less transparent": "decrease transparency",
+            "less opaque": "increase transparency",
+
+            # 2D CT slice viewer voice aliases
+            "show 2d": "show 2d",
+            "show 2d viewer": "show 2d",
+            "open 2d": "show 2d",
+            "open 2d viewer": "show 2d",
+            "2d viewer": "show 2d",
+            "2d slice": "show 2d",
+            "show slice": "show 2d",
+            "hide 2d": "hide 2d",
+            "hide 2d viewer": "hide 2d",
+            "close 2d": "hide 2d",
+            "close 2d viewer": "hide 2d",
+            "toggle 2d": "toggle 2d",
+            "show axial": "show axial",
+            "axial view": "show axial",
+            "axial": "show axial",
+            "axial slice": "show axial",
+            "show coronal": "show coronal",
+            "coronal view": "show coronal",
+            "coronal": "show coronal",
+            "coronal slice": "show coronal",
+            "show sagittal": "show sagittal",
+            "sagittal view": "show sagittal",
+            "sagittal": "show sagittal",
+            "sagittal slice": "show sagittal",
+            "next slice": "next slice",
+            "previous slice": "previous slice",
+            "prev slice": "previous slice",
+            "bone window": "bone window",
+            "soft tissue window": "soft tissue window",
+            "soft tissue": "soft tissue window",
+            "lung window": "lung window",
+            "lung": "lung window",
+
+            # Distance measurement voice aliases
+            "start measurement": "start measurement",
+            "measure distance": "start measurement",
+            "take measurement": "start measurement",
+            "start measuring": "start measurement",
+            "finish measurement": "finish measurement",
+            "complete measurement": "finish measurement",
+            "stop measuring": "finish measurement",
+            "stop measurement": "finish measurement",
+            "clear measurements": "clear measurements",
+            "remove measurements": "clear measurements",
+            "delete measurements": "clear measurements",
+            "show measurements": "show measurements",
+            "display measurements": "show measurements",
+            "hide measurements": "hide measurements",
+
+            # Study information & scan metadata voice aliases
+            "show study information": "show study info",
+            "show study info": "show study info",
+            "open scan metadata": "show study info",
+            "show scan details": "show study info",
+            "show metadata": "show study info",
+            "study information": "show study info",
+            "study info": "show study info",
+            "scan metadata": "show study info",
+            "scan details": "show study info",
+            "hide study information": "hide study info",
+            "hide study info": "hide study info",
+            "close scan metadata": "hide study info",
+            "hide scan details": "hide study info",
+            "close study info": "hide study info",
+            "toggle study info": "toggle study info",
+            "toggle scan metadata": "toggle study info",
+            "toggle study information": "toggle study info",
         }
 
         command = aliases.get(command, command)
+
+        # Density heatmap commands
+        if command in ("show density", "density"):
+            self.set_density_colormap(True)
+            return
+
+        if command in ("normal view", "hide density"):
+            self.set_density_colormap(False)
+            return
+
+        # Interactive clipping plane commands
+        if command in ("enable clipping", "clip model"):
+            self.set_clipping(True)
+            return
+
+        if command in ("disable clipping", "remove clipping"):
+            self.set_clipping(False)
+            return
+
+        if command == "clip along x":
+            self.set_clip_axis("x")
+            return
+
+        if command == "clip along y":
+            self.set_clip_axis("y")
+            return
+
+        if command == "clip along z":
+            self.set_clip_axis("z")
+            return
+
+        if command in ("reverse clipping", "reverse clip direction"):
+            self.reverse_clip_direction()
+            return
+
+        # Bone transparency / opacity commands
+        if command in ("full opacity", "opaque", "opaque bone"):
+            self.set_bone_opacity(1.0)
+            return
+
+        if command in ("half opacity", "semi transparent", "medium transparency"):
+            self.set_bone_opacity(0.5)
+            return
+
+        if command in ("high transparency", "transparent bone", "transparent"):
+            self.set_bone_opacity(0.25)
+            return
+
+        if command in ("increase transparency", "more transparent"):
+            self.set_bone_opacity(getattr(self, "_bone_opacity", 1.0) - 0.2)
+            return
+
+        if command in ("decrease transparency", "increase opacity", "more opaque", "less transparent"):
+            self.set_bone_opacity(getattr(self, "_bone_opacity", 1.0) + 0.2)
+            return
+
+        import re
+        m_op = re.search(r"(\d+)\s*(?:percent|%)\s*opacity", command)
+        if m_op:
+            val = float(m_op.group(1)) / 100.0
+            self.set_bone_opacity(val)
+            return
+
+        # 2D CT slice viewer commands
+        if command in ("show 2d", "open 2d viewer"):
+            self.set_2d_panel_visible(True)
+            return
+
+        if command in ("hide 2d", "close 2d viewer"):
+            self.set_2d_panel_visible(False)
+            return
+
+        if command == "toggle 2d":
+            cur = self.panel_2d.isVisible() if hasattr(self, "panel_2d") else False
+            self.set_2d_panel_visible(not cur)
+            return
+
+        if command == "show axial":
+            self.set_2d_panel_visible(True)
+            if hasattr(self, "panel_2d"):
+                self.panel_2d.set_orientation("axial")
+            return
+
+        if command == "show coronal":
+            self.set_2d_panel_visible(True)
+            if hasattr(self, "panel_2d"):
+                self.panel_2d.set_orientation("coronal")
+            return
+
+        if command == "show sagittal":
+            self.set_2d_panel_visible(True)
+            if hasattr(self, "panel_2d"):
+                self.panel_2d.set_orientation("sagittal")
+            return
+
+        if command == "next slice":
+            if hasattr(self, "panel_2d") and (not self.panel_2d.isHidden() or (hasattr(self, "btn_toggle_2d") and self.btn_toggle_2d.isChecked())):
+                self.panel_2d.step_slice(1)
+                return
+            elif hasattr(self, "mpr_view"):
+                if hasattr(self.mpr_view, "step_axial"):
+                    self.mpr_view.step_axial(1)
+                elif hasattr(self.mpr_view, "slider_axial"):
+                    self.mpr_view.slider_axial.setValue(self.mpr_view.slider_axial.value() + 1)
+                return
+
+        if command == "previous slice":
+            if hasattr(self, "panel_2d") and (not self.panel_2d.isHidden() or (hasattr(self, "btn_toggle_2d") and self.btn_toggle_2d.isChecked())):
+                self.panel_2d.step_slice(-1)
+                return
+            elif hasattr(self, "mpr_view"):
+                if hasattr(self.mpr_view, "step_axial"):
+                    self.mpr_view.step_axial(-1)
+                elif hasattr(self.mpr_view, "slider_axial"):
+                    self.mpr_view.slider_axial.setValue(self.mpr_view.slider_axial.value() - 1)
+                return
+
+        if command == "bone window":
+            if hasattr(self, "panel_2d"):
+                self.panel_2d.set_window_preset("Bone")
+            if hasattr(self, "mpr_view"):
+                self.mpr_view.set_window_preset("Bone")
+            return
+
+        if command == "soft tissue window":
+            if hasattr(self, "panel_2d"):
+                self.panel_2d.set_window_preset("Soft Tissue")
+            if hasattr(self, "mpr_view"):
+                self.mpr_view.set_window_preset("Soft Tissue")
+            return
+
+        if command == "lung window":
+            if hasattr(self, "panel_2d"):
+                self.panel_2d.set_window_preset("Lung")
+            if hasattr(self, "mpr_view"):
+                self.mpr_view.set_window_preset("Lung")
+            return
+
+        # Numeric slice command: e.g. "go to slice 40" or "slice 40"
+        m_slice = re.search(r"(?:go\s+to\s+)?slice\s+(\d+)", command)
+        if m_slice:
+            num = int(m_slice.group(1))
+            if hasattr(self, "panel_2d"):
+                self.panel_2d.go_to_slice(num)
+            return
+
+        # ── Synchronized 2D ↔ 3D Linking Voice Commands ───────────────────────
+        if command in ("enable 2d 3d sync", "enable 2d-3d sync", "enable sync", "sync 2d and 3d", "sync on"):
+            self.set_sync_2d_3d(True)
+            return
+
+        if command in ("disable 2d 3d sync", "disable 2d-3d sync", "disable sync", "unsync 2d and 3d", "sync off"):
+            self.set_sync_2d_3d(False)
+            return
+
+        if command in ("toggle sync", "toggle 2d 3d sync", "toggle 2d-3d sync"):
+            self.set_sync_2d_3d(not getattr(self, "_sync_2d_3d_enabled", False))
+            return
+
+        if command in ("show crosshair", "enable crosshair"):
+            self.set_crosshair_visible(True)
+            return
+
+        if command in ("hide crosshair", "disable crosshair"):
+            self.set_crosshair_visible(False)
+            return
+
+        if command in ("show 3d marker", "show marker", "enable marker"):
+            self.set_marker_visible(True)
+            return
+
+        if command in ("hide 3d marker", "hide marker", "disable marker"):
+            self.set_marker_visible(False)
+            return
+
+        if command in ("link clipping plane", "link clipping", "link clip", "link plane"):
+            self.set_link_clipping(True)
+            return
+
+        if command in ("unlink clipping plane", "unlink clipping", "unlink clip", "unlink plane"):
+            self.set_link_clipping(False)
+            return
+
+        # ── Distance Measurement Voice Commands ───────────────────────────────
+        if command in ("start measurement", "measure distance", "take measurement", "start measuring"):
+            self.start_measurement()
+            if hasattr(self, "panel_2d") and self.panel_2d.isVisible():
+                self.panel_2d.start_measurement()
+            return
+
+        if command in ("finish measurement", "complete measurement", "stop measuring", "stop measurement"):
+            self.finish_measurement()
+            if hasattr(self, "panel_2d"):
+                self.panel_2d.finish_measurement()
+            return
+
+        if command in ("clear measurements", "remove measurements", "delete measurements"):
+            self.clear_measurements_3d()
+            if hasattr(self, "panel_2d"):
+                self.panel_2d.clear_measurements()
+            return
+
+        if command in ("show measurements", "display measurements"):
+            self.set_measurements_3d_visible(True)
+            if hasattr(self, "panel_2d"):
+                self.panel_2d.set_measurements_visible(True)
+            return
+
+        if command == "hide measurements":
+            self.set_measurements_3d_visible(False)
+            if hasattr(self, "panel_2d"):
+                self.panel_2d.set_measurements_visible(False)
+            return
+
+        # ── Study Information & Scan Metadata Voice Commands ──────────────────
+        if command in ("show study info", "open scan metadata", "show scan details"):
+            self.show_study_info()
+            return
+
+        if command in ("hide study info", "close scan metadata", "hide scan details"):
+            self.hide_study_info()
+            return
+
+        if command in ("toggle study info", "toggle scan metadata"):
+            self.toggle_study_info()
+            return
 
     # Anatomical views.
         anatomical_commands = {
@@ -1114,77 +2529,366 @@ class Viewer3D(QWidget):
 
     # \u2500\u2500 Cross-section / density / capture \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 
-    def set_clipping(self, active: bool):
-        """Cross-section view: clip the bone mesh with a plane through its centre
-        so internal structure is visible. Voice: 'show/hide cross section'."""
-        mesh = getattr(self, "_bone_mesh", None)
-        if mesh is None:
-            return
-        try:
-            if active:
-                cx, cy, cz = mesh.center
-                clipped = mesh.clip(normal="y", origin=(cx, cy, cz), invert=True)
-                if self.bone_actor is not None:
-                    self.plotter.remove_actor(self.bone_actor, render=False)
-                self.bone_actor = self.plotter.add_mesh(
-                    clipped, color=(0.98, 0.96, 0.92), smooth_shading=True,
-                    specular=0.25, specular_power=18, name="bone",
-                )
-                self._clip_active = True
-            else:
-                if self.bone_actor is not None:
-                    self.plotter.remove_actor(self.bone_actor, render=False)
-                self.bone_actor = self.plotter.add_mesh(
-                    mesh, color=(0.98, 0.96, 0.92), smooth_shading=True,
-                    specular=0.25, specular_power=18, name="bone",
-                )
-                self._clip_active = False
-                self._density_active = False
-            self.plotter.render()
-        except Exception as exc:
-            print(f"[Viewer3D] Clipping failed: {exc}")
+    # ── Interactive Clipping Plane & Rendering Pipeline ──────────────────────────
 
-    def set_density_colormap(self, active: bool):
-        """Colour the bone surface by local density (distance-from-centre proxy for
-        HU sampled at the surface), so thin or low-density regions read differently from
-        dense cortical bone. Voice: 'show/hide density'.
+    def _sync_clip_controls_enabled(self):
+        """Synchronize the enabled state and appearance of clipping sub-controls."""
+        enabled = getattr(self, "_clip_active", False)
+        if hasattr(self, "combo_clip_axis"):
+            self.combo_clip_axis.setEnabled(enabled)
+        if hasattr(self, "slider_clip_pos"):
+            self.slider_clip_pos.setEnabled(enabled)
+        if hasattr(self, "btn_clip_reverse"):
+            self.btn_clip_reverse.setEnabled(enabled)
+        if hasattr(self, "lbl_clip_pos"):
+            self.lbl_clip_pos.setStyleSheet(
+                f"color: {'#00e5ff' if enabled else '#444'}; font-size: 9px; font-weight: 600; min-width: 95px;"
+            )
 
-        NOTE for your mentor: this is a density-derived *visualization*, not a
-        trained anomaly detector -- be explicit about that distinction.
+    def _on_clip_toggle_clicked(self, checked: bool):
+        self.set_clipping(checked)
+
+    def _on_clip_axis_changed(self, index: int):
+        axis = ["x", "y", "z"][index] if 0 <= index < 3 else "y"
+        self.set_clip_axis(axis)
+        if getattr(self, "_sync_2d_3d_enabled", False) and getattr(self, "_sync_link_clipping", False):
+            if hasattr(self, "slider_clip_pos"):
+                self._sync_clip_to_2d(self.slider_clip_pos.value() / 100.0)
+
+    def _on_clip_slider_changed(self, value: int):
+        self.set_clip_position(value / 100.0)
+        if getattr(self, "_sync_2d_3d_enabled", False) and getattr(self, "_sync_link_clipping", False):
+            self._sync_clip_to_2d(value / 100.0)
+
+    def _on_opacity_slider_changed(self, value: int):
+        self.set_bone_opacity(value / 100.0)
+
+    def _update_clipped_mesh(self) -> bool:
+        """Generates the clipped mesh from the unmodified original master mesh.
+        Returns True if successful, False if clipping produced an empty mesh or failed.
         """
         mesh = getattr(self, "_bone_mesh", None)
         if mesh is None:
-            return
+            return False
+
+        axis = getattr(self, "_clip_axis", "y").lower().strip()
+        if axis not in ("x", "y", "z"):
+            axis = "y"
+
+        bounds = mesh.bounds  # (xmin, xmax, ymin, ymax, zmin, zmax)
+        if axis == "x":
+            lo, hi = bounds[0], bounds[1]
+        elif axis == "y":
+            lo, hi = bounds[2], bounds[3]
+        else:
+            lo, hi = bounds[4], bounds[5]
+
+        # Clamp fraction slightly inside bounds to prevent clipping plane disappearing
+        fraction = float(np.clip(self._clip_fraction, 0.005, 0.995))
+        pos = lo + fraction * (hi - lo)
+
+        if hasattr(self, "lbl_clip_pos"):
+            pct = int(round(fraction * 100))
+            self.lbl_clip_pos.setText(f"Pos: {pct}% ({pos:+.1f}mm)")
+
+        cx, cy, cz = mesh.center
+        if axis == "x":
+            origin = (pos, cy, cz)
+        elif axis == "y":
+            origin = (cx, pos, cz)
+        else:
+            origin = (cx, cy, pos)
+
         try:
-            if active:
-                sampled = mesh
-                scalars = None
-                raw = getattr(getattr(self, "_meshset", None), "raw_data", None)
-                if raw is not None:
-                    # sample the HU volume at each surface vertex
-                    import numpy as _np
-                    pts = _np.asarray(mesh.points)
-                    ps = getattr(self._meshset, "pixel_spacing", (1.0, 1.0))
-                    st = getattr(self._meshset, "slice_thickness", 1.0)
-                    ix = _np.clip((pts[:, 0] / max(ps[0], 1e-6)).astype(int), 0, raw.shape[0] - 1)
-                    iy = _np.clip((pts[:, 1] / max(ps[1], 1e-6)).astype(int), 0, raw.shape[1] - 1)
-                    iz = _np.clip((pts[:, 2] / max(st, 1e-6)).astype(int), 0, raw.shape[2] - 1)
-                    scalars = raw[ix, iy, iz]
-                if scalars is None:
-                    scalars = mesh.points[:, 2]
-                if self.bone_actor is not None:
-                    self.plotter.remove_actor(self.bone_actor, render=False)
-                self.bone_actor = self.plotter.add_mesh(
-                    mesh, scalars=scalars, cmap="inferno", smooth_shading=True,
-                    name="bone", scalar_bar_args={"title": "Density (HU)"},
-                )
-                self._density_active = True
+            clipped = mesh.clip(
+                normal=axis,
+                origin=origin,
+                invert=getattr(self, "_clip_inverted", False),
+            )
+            if clipped.n_points == 0 or clipped.n_cells == 0:
+                print(f"[Viewer3D] Warning: Clipping plane at {axis}={pos:.1f} produced an empty mesh.")
+                p = self.window()
+                if hasattr(p, "flash_status"):
+                    p.flash_status(f"Empty mesh on {axis.upper()} axis clipping")
+                return False
+
+            self._clipped_mesh = clipped
+            return True
+        except Exception as exc:
+            print(f"[Viewer3D] Mesh clip calculation failed: {exc}")
+            return False
+
+    def _get_current_display_mesh(self) -> pv.PolyData | None:
+        """Returns the active mesh for display:
+        - If clipping is enabled and a valid clipped mesh exists, returns self._clipped_mesh.
+        - Otherwise returns the complete unmodified self._bone_mesh.
+        """
+        orig = getattr(self, "_bone_mesh", None)
+        if getattr(self, "_clip_active", False) and getattr(self, "_clipped_mesh", None) is not None:
+            return self._clipped_mesh
+        return orig
+
+    def _apply_bone_rendering(self):
+        """Renders the current display mesh (clipped or unclipped) using either
+        the Hounsfield Heatmap colormap or warm natural cortical bone shading,
+        depending on self._density_active.
+        """
+        mesh = self._get_current_display_mesh()
+        if mesh is None or not hasattr(self, "plotter"):
+            return
+
+        try:
+            if self.bone_actor is not None:
+                self.plotter.remove_actor(self.bone_actor, render=False)
+
+            if getattr(self, "_density_active", False):
+                # Heatmap mode: verify presence of HU_density scalars
+                has_hu = "HU_density" in mesh.point_data
+                if not has_hu:
+                    orig = getattr(self, "_bone_mesh", None)
+                    if orig is not None and "HU_density" in orig.point_data:
+                        self._update_clipped_mesh()
+                        mesh = self._get_current_display_mesh()
+                        has_hu = mesh is not None and "HU_density" in mesh.point_data
+
+                if has_hu:
+                    meshset = getattr(self, "_meshset", None)
+                    if meshset is not None and hasattr(meshset, "get_hu_range"):
+                        lo, hi = meshset.get_hu_range()
+                    else:
+                        arr = np.asarray(mesh.point_data["HU_density"])
+                        lo = float(max(150.0, np.percentile(arr, 5)))
+                        hi = float(max(lo + 300.0, min(2200.0, np.percentile(arr, 98))))
+
+                    self.bone_actor = self.plotter.add_mesh(
+                        mesh,
+                        scalars="HU_density",
+                        cmap="turbo",
+                        clim=(lo, hi),
+                        smooth_shading=True,
+                        ambient=0.35,
+                        diffuse=0.75,
+                        specular=0.15,
+                        specular_power=10,
+                        opacity=getattr(self, "_bone_opacity", 1.0),
+                        name="bone",
+                        scalar_bar_args={
+                            "title": "Density (HU)",
+                            "color": "#e0e0e0",
+                            "title_font_size": 11,
+                            "label_font_size": 9,
+                            "shadow": False,
+                            "n_labels": 5,
+                            "fmt": "%.0f",
+                            "position_x": 0.84,
+                            "position_y": 0.05,
+                            "width": 0.12,
+                            "height": 0.38,
+                        },
+                    )
+                    if hasattr(self, "legend_card"):
+                        self.legend_card.setVisible(True)
+                        self._reposition_legend()
+                else:
+                    self._density_active = False
+                    if hasattr(self, "combo_bone_mode"):
+                        self.combo_bone_mode.blockSignals(True)
+                        self.combo_bone_mode.setCurrentIndex(0)
+                        self.combo_bone_mode.blockSignals(False)
+                    if hasattr(self, "legend_card"):
+                        self.legend_card.setVisible(False)
+                    self._render_normal_bone(mesh)
             else:
-                self.set_clipping(self._clip_active)
-                self._density_active = False
+                # Normal bone view: warm natural cortical bone shading
+                try:
+                    self.plotter.remove_scalar_bar("Density (HU)")
+                except Exception:
+                    pass
+                if hasattr(self, "legend_card"):
+                    self.legend_card.setVisible(False)
+                self._render_normal_bone(mesh)
+
             self.plotter.render()
         except Exception as exc:
-            print(f"[Viewer3D] Density colormap failed: {exc}")
+            print(f"[Viewer3D] _apply_bone_rendering failed: {exc}")
+
+    def _render_normal_bone(self, mesh: pv.PolyData):
+        """Helper to add mesh with warm natural cortical bone shading."""
+        from dicom_engine import (
+            _BONE_COLOUR, _BONE_AMBIENT, _BONE_DIFFUSE,
+            _BONE_SPECULAR, _BONE_SPECULAR_PWR,
+        )
+        self.bone_actor = self.plotter.add_mesh(
+            mesh,
+            color=_BONE_COLOUR,
+            smooth_shading=True,
+            ambient=_BONE_AMBIENT,
+            diffuse=_BONE_DIFFUSE,
+            specular=_BONE_SPECULAR,
+            specular_power=_BONE_SPECULAR_PWR,
+            opacity=getattr(self, "_bone_opacity", 1.0),
+            name="bone",
+        )
+
+    def set_clipping(self, active: bool):
+        """Enable or disable interactive clipping plane.
+        - When active=True: generates clipped mesh and renders with current mode.
+        - When active=False: restores the complete original bone mesh without permanently modifying geometry.
+        """
+        orig = getattr(self, "_original_mesh", None) or getattr(self, "_bone_mesh", None)
+        if orig is None:
+            self._clip_active = False
+            return
+
+        self._clip_active = bool(active)
+
+        if hasattr(self, "btn_clip_toggle"):
+            self.btn_clip_toggle.blockSignals(True)
+            self.btn_clip_toggle.setChecked(self._clip_active)
+            self.btn_clip_toggle.setText("Active" if self._clip_active else "Enable")
+            self.btn_clip_toggle.blockSignals(False)
+
+        self._sync_clip_controls_enabled()
+
+        if self._clip_active:
+            self._update_clipped_mesh()
+        else:
+            self._clipped_mesh = None
+
+        self._apply_bone_rendering()
+        self._notify_metadata_changed()
+
+    def set_clip_axis(self, axis: str):
+        """Sets the clipping plane axis ('x', 'y', or 'z') and updates the mesh."""
+        axis = str(axis).lower().strip()
+        if axis not in ("x", "y", "z"):
+            axis = "y"
+        self._clip_axis = axis
+
+        if hasattr(self, "combo_clip_axis"):
+            axis_indices = {"x": 0, "y": 1, "z": 2}
+            idx = axis_indices.get(axis, 1)
+            if self.combo_clip_axis.currentIndex() != idx:
+                self.combo_clip_axis.blockSignals(True)
+                self.combo_clip_axis.setCurrentIndex(idx)
+                self.combo_clip_axis.blockSignals(False)
+
+        if self._clip_active:
+            self._update_clipped_mesh()
+            self._apply_bone_rendering()
+            self._notify_metadata_changed()
+        else:
+            # Auto-enable when an axis is explicitly chosen
+            self.set_clipping(True)
+
+    def set_clip_position(self, fraction: float):
+        """Sets clipping position as a fraction of the model bounds (0.0 to 1.0)."""
+        self._clip_fraction = float(np.clip(fraction, 0.0, 1.0))
+
+        if hasattr(self, "slider_clip_pos"):
+            slider_val = int(round(self._clip_fraction * 100))
+            if self.slider_clip_pos.value() != slider_val:
+                self.slider_clip_pos.blockSignals(True)
+                self.slider_clip_pos.setValue(slider_val)
+                self.slider_clip_pos.blockSignals(False)
+
+        if self._clip_active:
+            self._update_clipped_mesh()
+            self._apply_bone_rendering()
+            self._notify_metadata_changed()
+
+    def reverse_clip_direction(self):
+        """Inverts which side of the clipping plane is retained."""
+        self._clip_inverted = not getattr(self, "_clip_inverted", False)
+        if self._clip_active:
+            self._update_clipped_mesh()
+            self._apply_bone_rendering()
+            self._notify_metadata_changed()
+
+    def set_bone_opacity(self, opacity: float):
+        """Sets the bone model opacity interactively.
+        - Clamped between 0.1 (10% almost invisible) and 1.0 (100% fully opaque).
+        - Changes the VTK actor's opacity property directly in <1ms without rebuilding geometry.
+        - Preserves clipping, heatmap colors, scalars, lighting, and camera.
+        """
+        self._bone_opacity = float(np.clip(opacity, 0.1, 1.0))
+
+        # Synchronize UI slider and label
+        pct = int(round(self._bone_opacity * 100))
+        if hasattr(self, "lbl_opacity"):
+            self.lbl_opacity.setText(f"{pct}%")
+
+        if hasattr(self, "slider_opacity"):
+            if self.slider_opacity.value() != pct:
+                self.slider_opacity.blockSignals(True)
+                self.slider_opacity.setValue(pct)
+                self.slider_opacity.blockSignals(False)
+
+        # Update active VTK actor directly without recreating mesh
+        if getattr(self, "bone_actor", None) is not None:
+            try:
+                self.bone_actor.prop.opacity = self._bone_opacity
+            except Exception:
+                try:
+                    self.bone_actor.GetProperty().SetOpacity(self._bone_opacity)
+                except Exception as exc:
+                    print(f"[Viewer3D] Setting actor opacity failed: {exc}")
+            if hasattr(self, "plotter"):
+                self.plotter.render()
+        self._notify_metadata_changed()
+
+    def set_density_colormap(self, active: bool):
+        """Toggle density-based heatmap coloring using genuine CT Hounsfield Units (HU).
+        - When active=False (Normal Bone View): restores warm cortical bone shading.
+        - When active=True (Hounsfield Heatmap): renders bone with a continuous HU color gradient.
+        - Preserves clipping state seamlessly!
+        """
+        mesh = self._get_current_display_mesh()
+        if mesh is None:
+            return
+
+        # Synchronize UI dropdown if it exists and differs
+        if hasattr(self, "combo_bone_mode"):
+            target_idx = 1 if active else 0
+            if self.combo_bone_mode.currentIndex() != target_idx:
+                self.combo_bone_mode.blockSignals(True)
+                self.combo_bone_mode.setCurrentIndex(target_idx)
+                self.combo_bone_mode.blockSignals(False)
+
+        if active:
+            has_hu = "HU_density" in mesh.point_data
+            if not has_hu:
+                # Attempt to populate from cached volume if available
+                meshset = getattr(self, "_meshset", None)
+                active_path = getattr(self, "_active_path", "")
+                if meshset is not None and hasattr(meshset, "_try_attach_hu_from_volume") and active_path:
+                    meshset._try_attach_hu_from_volume(active_path)
+                    if getattr(self, "_clip_active", False):
+                        self._update_clipped_mesh()
+                    mesh = self._get_current_display_mesh()
+                    has_hu = mesh is not None and "HU_density" in mesh.point_data
+
+            if not has_hu:
+                print("[Viewer3D] Genuine HU density data is unavailable for this scan. No fake HU values will be displayed.")
+                if hasattr(self, "combo_bone_mode"):
+                    self.combo_bone_mode.blockSignals(True)
+                    self.combo_bone_mode.setCurrentIndex(0)
+                    self.combo_bone_mode.blockSignals(False)
+                self._density_active = False
+                if hasattr(self, "legend_card"):
+                    self.legend_card.setVisible(False)
+                p = self.window()
+                if hasattr(p, "flash_status"):
+                    p.flash_status("HU density unavailable for this scan")
+                self._apply_bone_rendering()
+                return
+
+            self._density_active = True
+        else:
+            self._density_active = False
+
+        self._apply_bone_rendering()
+        self._notify_metadata_changed()
 
     def save_screenshot(self) -> str:
         """Capture the current 3D viewport to captures/. Voice: 'take screenshot'."""

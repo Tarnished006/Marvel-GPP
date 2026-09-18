@@ -355,7 +355,7 @@ class StudyInfoDialog(QDialog):
             }
             QPushButton:hover { background: #222; color: #00e5ff; border-color: #00b4d8; }
         """)
-        btn_refresh.clicked.connect(self.update_metadata)
+        btn_refresh.clicked.connect(lambda: self.update_metadata())
         header_row.addWidget(btn_refresh)
 
         btn_close_top = QPushButton("✕")
@@ -536,9 +536,9 @@ class StudyInfoDialog(QDialog):
 
         return grp
 
-    def update_metadata(self, metadata: dict = None):
+    def update_metadata(self, metadata: dict = None, *args):
         """Refreshes all displayed fields with latest safe metadata."""
-        if metadata is None:
+        if not isinstance(metadata, dict):
             metadata = extract_safe_metadata(self.viewer)
 
         self._cached_meta = metadata

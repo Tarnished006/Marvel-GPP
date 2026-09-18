@@ -288,7 +288,13 @@ class MainWindow(QMainWindow):
         """Finds the interactive Qt widget under pos, ignoring overlays like CameraHUD."""
         w = QApplication.widgetAt(pos)
         if w is None:
-            return None
+            for top in QApplication.topLevelWidgets():
+                if top.isVisible() and top.geometry().contains(pos):
+                    child = top.childAt(top.mapFromGlobal(pos))
+                    w = child if child is not None else top
+                    break
+            if w is None:
+                return None
 
         # Ignore CameraHUD and its children so clicks pass through to underlying content
         if getattr(self, "cam_hud", None) is not None:
@@ -427,7 +433,9 @@ class MainWindow(QMainWindow):
             if target.focusPolicy() != Qt.FocusPolicy.NoFocus:
                 target.setFocus(Qt.FocusReason.MouseFocusReason)
 
-            local_pos = target.mapFromGlobal(pos)
+            from PyQt6.QtWidgets import QAbstractScrollArea, QComboBox
+            actual_target = target.viewport() if isinstance(target, QAbstractScrollArea) else target
+            local_pos = actual_target.mapFromGlobal(pos)
             press_ev = QMouseEvent(
                 QMouseEvent.Type.MouseButtonPress,
                 QPointF(local_pos),
@@ -436,7 +444,7 @@ class MainWindow(QMainWindow):
                 Qt.MouseButton.LeftButton,
                 Qt.KeyboardModifier.NoModifier,
             )
-            QApplication.sendEvent(target, press_ev)
+            QApplication.sendEvent(actual_target, press_ev)
 
             if is_double_click:
                 dbl_ev = QMouseEvent(
@@ -447,9 +455,8 @@ class MainWindow(QMainWindow):
                     Qt.MouseButton.LeftButton,
                     Qt.KeyboardModifier.NoModifier,
                 )
-                QApplication.sendEvent(target, dbl_ev)
+                QApplication.sendEvent(actual_target, dbl_ev)
 
-            from PyQt6.QtWidgets import QComboBox
             if isinstance(target, QComboBox):
                 target.showPopup()
         else:
@@ -478,7 +485,9 @@ class MainWindow(QMainWindow):
         target_pos = QPoint(target_x, target_y)
 
         if target is not None:
-            local_pos = target.mapFromGlobal(target_pos)
+            from PyQt6.QtWidgets import QAbstractScrollArea, QAbstractItemView, QComboBox
+            actual_target = target.viewport() if isinstance(target, QAbstractScrollArea) else target
+            local_pos = actual_target.mapFromGlobal(target_pos)
             release_ev = QMouseEvent(
                 QMouseEvent.Type.MouseButtonRelease,
                 QPointF(local_pos),
@@ -487,7 +496,32 @@ class MainWindow(QMainWindow):
                 Qt.MouseButton.NoButton,
                 Qt.KeyboardModifier.NoModifier,
             )
-            QApplication.sendEvent(target, release_ev)
+            QApplication.sendEvent(actual_target, release_ev)
+
+            # Air mouse support for QComboBox / QAbstractItemView:
+            # 1. If user pinches directly on a QComboBox, cycle to next option
+            if isinstance(target, QComboBox) and not getattr(self, "_is_dragging", False):
+                if target.count() > 0:
+                    next_idx = (target.currentIndex() + 1) % target.count()
+                    target.setCurrentIndex(next_idx)
+                    target.activated.emit(next_idx)
+                    target.hidePopup()
+
+            # 2. If user pinches on an item view popup (e.g. combo popup list)
+            elif isinstance(target, QAbstractItemView):
+                vp_pos = target.viewport().mapFromGlobal(target_pos)
+                idx = target.indexAt(vp_pos)
+                if idx.isValid():
+                    for top in QApplication.topLevelWidgets():
+                        for c in top.findChildren(QComboBox):
+                            if c.view() is target:
+                                c.setCurrentIndex(idx.row())
+                                c.activated.emit(idx.row())
+                                c.hidePopup()
+                                break
+                    target.setCurrentIndex(idx)
+                    target.activated.emit(idx)
+
             self._clicked_widget = None
         else:
             self._send_mouse_event(0x0004, target_x, target_y)

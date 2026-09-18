@@ -484,22 +484,38 @@ class Viewer3D(QWidget):
         bone_mode_lbl.setStyleSheet("color: #555; font-size: 9px; font-weight: 600; text-transform: uppercase;")
         snap_bar.addWidget(bone_mode_lbl)
 
+        # Segmented buttons for Bone Mode (Touchless & Air-Mouse Optimized)
+        self.btn_bone_normal = QPushButton("🦴 Normal")
+        self.btn_bone_normal.setCheckable(True)
+        self.btn_bone_normal.setChecked(True)
+        self.btn_bone_normal.setFixedHeight(22)
+        self.btn_bone_normal.setStyleSheet(
+            "QPushButton { background: #141414; color: #888; border: 1px solid #282828; "
+            "border-radius: 3px; font-size: 9px; padding: 0 8px; font-weight: 600; }"
+            "QPushButton:checked { background: #00222a; color: #00e5ff; border: 1px solid #00b4d8; font-weight: bold; }"
+            "QPushButton:hover { background: #222; color: #eee; }"
+        )
+        self.btn_bone_normal.clicked.connect(lambda: self._set_bone_mode_index(0))
+        snap_bar.addWidget(self.btn_bone_normal)
+
+        self.btn_bone_heatmap = QPushButton("🌡 Heatmap")
+        self.btn_bone_heatmap.setCheckable(True)
+        self.btn_bone_heatmap.setChecked(False)
+        self.btn_bone_heatmap.setFixedHeight(22)
+        self.btn_bone_heatmap.setStyleSheet(
+            "QPushButton { background: #141414; color: #888; border: 1px solid #282828; "
+            "border-radius: 3px; font-size: 9px; padding: 0 8px; font-weight: 600; }"
+            "QPushButton:checked { background: #00222a; color: #00e5ff; border: 1px solid #00b4d8; font-weight: bold; }"
+            "QPushButton:hover { background: #222; color: #eee; }"
+        )
+        self.btn_bone_heatmap.clicked.connect(lambda: self._set_bone_mode_index(1))
+        snap_bar.addWidget(self.btn_bone_heatmap)
+
         self.combo_bone_mode = QComboBox()
         self.combo_bone_mode.addItem("🦴 Normal Bone View")
         self.combo_bone_mode.addItem("🌡 Hounsfield Heatmap")
         self.combo_bone_mode.setFixedHeight(22)
-        self.combo_bone_mode.setStyleSheet(
-            "QComboBox {"
-            "  background: #141414; color: #00e5ff; border: 1px solid #282828;"
-            "  border-radius: 3px; font-size: 9px; font-weight: 600; padding: 0 8px;"
-            "}"
-            "QComboBox:hover { background: #1c1c1c; border-color: #00b4d8; }"
-            "QComboBox::drop-down { border: none; width: 14px; }"
-            "QComboBox QAbstractItemView {"
-            "  background: #111; color: #ddd; selection-background-color: #003344;"
-            "  selection-color: #00e5ff; border: 1px solid #333;"
-            "}"
-        )
+        self.combo_bone_mode.setVisible(False)
         self.combo_bone_mode.currentIndexChanged.connect(self._on_bone_mode_changed)
         snap_bar.addWidget(self.combo_bone_mode)
 
@@ -534,8 +550,54 @@ class Viewer3D(QWidget):
 
         clip_bar.addSpacing(10)
         axis_lbl = QLabel("Axis:")
-        axis_lbl.setStyleSheet("color: #555; font-size: 9px; font-weight: 600;")
+        axis_lbl.setStyleSheet("color: #555; font-size: 9px; font-weight: 600; text-transform: uppercase;")
         clip_bar.addWidget(axis_lbl)
+
+        # Segmented buttons for Axis (Touchless & Air-Mouse Optimized)
+        self.btn_axis_x = QPushButton("X")
+        self.btn_axis_x.setCheckable(True)
+        self.btn_axis_x.setChecked(False)
+        self.btn_axis_x.setEnabled(False)
+        self.btn_axis_x.setFixedSize(24, 22)
+        self.btn_axis_x.setStyleSheet(
+            "QPushButton { background: #141414; color: #888; border: 1px solid #282828; "
+            "border-radius: 3px; font-size: 9px; font-weight: bold; }"
+            "QPushButton:checked { background: #00222a; color: #00e5ff; border: 1px solid #00b4d8; }"
+            "QPushButton:disabled { color: #333; border-color: #1a1a1a; background: #0e0e0e; }"
+            "QPushButton:hover:!disabled { background: #222; color: #eee; }"
+        )
+        self.btn_axis_x.clicked.connect(lambda: self._set_clip_axis_index(0))
+        clip_bar.addWidget(self.btn_axis_x)
+
+        self.btn_axis_y = QPushButton("Y")
+        self.btn_axis_y.setCheckable(True)
+        self.btn_axis_y.setChecked(True)  # Default Y
+        self.btn_axis_y.setEnabled(False)
+        self.btn_axis_y.setFixedSize(24, 22)
+        self.btn_axis_y.setStyleSheet(
+            "QPushButton { background: #141414; color: #888; border: 1px solid #282828; "
+            "border-radius: 3px; font-size: 9px; font-weight: bold; }"
+            "QPushButton:checked { background: #00222a; color: #00e5ff; border: 1px solid #00b4d8; }"
+            "QPushButton:disabled { color: #333; border-color: #1a1a1a; background: #0e0e0e; }"
+            "QPushButton:hover:!disabled { background: #222; color: #eee; }"
+        )
+        self.btn_axis_y.clicked.connect(lambda: self._set_clip_axis_index(1))
+        clip_bar.addWidget(self.btn_axis_y)
+
+        self.btn_axis_z = QPushButton("Z")
+        self.btn_axis_z.setCheckable(True)
+        self.btn_axis_z.setChecked(False)
+        self.btn_axis_z.setEnabled(False)
+        self.btn_axis_z.setFixedSize(24, 22)
+        self.btn_axis_z.setStyleSheet(
+            "QPushButton { background: #141414; color: #888; border: 1px solid #282828; "
+            "border-radius: 3px; font-size: 9px; font-weight: bold; }"
+            "QPushButton:checked { background: #00222a; color: #00e5ff; border: 1px solid #00b4d8; }"
+            "QPushButton:disabled { color: #333; border-color: #1a1a1a; background: #0e0e0e; }"
+            "QPushButton:hover:!disabled { background: #222; color: #eee; }"
+        )
+        self.btn_axis_z.clicked.connect(lambda: self._set_clip_axis_index(2))
+        clip_bar.addWidget(self.btn_axis_z)
 
         self.combo_clip_axis = QComboBox()
         self.combo_clip_axis.addItem("X")
@@ -544,19 +606,7 @@ class Viewer3D(QWidget):
         self.combo_clip_axis.setCurrentIndex(1)  # Default Y
         self.combo_clip_axis.setFixedHeight(22)
         self.combo_clip_axis.setEnabled(False)
-        self.combo_clip_axis.setStyleSheet(
-            "QComboBox {"
-            "  background: #141414; color: #bbb; border: 1px solid #282828;"
-            "  border-radius: 3px; font-size: 9px; font-weight: 600; padding: 0 6px;"
-            "}"
-            "QComboBox:hover { border-color: #444; }"
-            "QComboBox:disabled { color: #444; border-color: #1a1a1a; }"
-            "QComboBox::drop-down { border: none; width: 14px; }"
-            "QComboBox QAbstractItemView {"
-            "  background: #111; color: #ddd; selection-background-color: #003344;"
-            "  selection-color: #00e5ff; border: 1px solid #333;"
-            "}"
-        )
+        self.combo_clip_axis.setVisible(False)
         self.combo_clip_axis.currentIndexChanged.connect(self._on_clip_axis_changed)
         clip_bar.addWidget(self.combo_clip_axis)
 
@@ -1337,7 +1387,25 @@ class Viewer3D(QWidget):
 
     def _on_bone_mode_changed(self, index: int):
         """Slot for Bone Mode dropdown: 0 = Normal Bone View, 1 = Hounsfield Heatmap."""
+        self._sync_bone_mode_buttons(index == 1)
         self.set_density_colormap(index == 1)
+
+    def _set_bone_mode_index(self, idx: int):
+        if hasattr(self, "combo_bone_mode"):
+            self.combo_bone_mode.blockSignals(True)
+            self.combo_bone_mode.setCurrentIndex(idx)
+            self.combo_bone_mode.blockSignals(False)
+        self._sync_bone_mode_buttons(idx == 1)
+        self.set_density_colormap(idx == 1)
+
+    def _sync_bone_mode_buttons(self, active: bool):
+        if hasattr(self, "btn_bone_normal") and hasattr(self, "btn_bone_heatmap"):
+            self.btn_bone_normal.blockSignals(True)
+            self.btn_bone_heatmap.blockSignals(True)
+            self.btn_bone_normal.setChecked(not active)
+            self.btn_bone_heatmap.setChecked(active)
+            self.btn_bone_normal.blockSignals(False)
+            self.btn_bone_heatmap.blockSignals(False)
 
     def _switch_view_mode(self, idx: int):
         self.view_mode_stack.setCurrentIndex(idx)
@@ -1486,6 +1554,7 @@ class Viewer3D(QWidget):
             self.combo_bone_mode.blockSignals(True)
             self.combo_bone_mode.setCurrentIndex(0)
             self.combo_bone_mode.blockSignals(False)
+        self._sync_bone_mode_buttons(False)
         if hasattr(self, "legend_card"):
             self.legend_card.setVisible(False)
             self._reposition_legend()
@@ -1499,6 +1568,7 @@ class Viewer3D(QWidget):
             self.combo_clip_axis.blockSignals(True)
             self.combo_clip_axis.setCurrentIndex(1)
             self.combo_clip_axis.blockSignals(False)
+        self._sync_axis_buttons(1)
         if hasattr(self, "slider_clip_pos"):
             self.slider_clip_pos.blockSignals(True)
             self.slider_clip_pos.setValue(50)
@@ -2532,6 +2602,9 @@ class Viewer3D(QWidget):
         enabled = getattr(self, "_clip_active", False)
         if hasattr(self, "combo_clip_axis"):
             self.combo_clip_axis.setEnabled(enabled)
+        for btn in (getattr(self, "btn_axis_x", None), getattr(self, "btn_axis_y", None), getattr(self, "btn_axis_z", None)):
+            if btn is not None:
+                btn.setEnabled(enabled)
         if hasattr(self, "slider_clip_pos"):
             self.slider_clip_pos.setEnabled(enabled)
         if hasattr(self, "btn_clip_reverse"):
@@ -2545,11 +2618,29 @@ class Viewer3D(QWidget):
         self.set_clipping(checked)
 
     def _on_clip_axis_changed(self, index: int):
+        self._sync_axis_buttons(index)
         axis = ["x", "y", "z"][index] if 0 <= index < 3 else "y"
         self.set_clip_axis(axis)
         if getattr(self, "_sync_2d_3d_enabled", False) and getattr(self, "_sync_link_clipping", False):
             if hasattr(self, "slider_clip_pos"):
                 self._sync_clip_to_2d(self.slider_clip_pos.value() / 100.0)
+
+    def _set_clip_axis_index(self, idx: int):
+        if hasattr(self, "combo_clip_axis"):
+            self.combo_clip_axis.blockSignals(True)
+            self.combo_clip_axis.setCurrentIndex(idx)
+            self.combo_clip_axis.blockSignals(False)
+        self._sync_axis_buttons(idx)
+        axis = ["x", "y", "z"][idx] if 0 <= idx < 3 else "y"
+        self.set_clip_axis(axis)
+
+    def _sync_axis_buttons(self, idx: int):
+        btns = [getattr(self, "btn_axis_x", None), getattr(self, "btn_axis_y", None), getattr(self, "btn_axis_z", None)]
+        for i, b in enumerate(btns):
+            if b is not None:
+                b.blockSignals(True)
+                b.setChecked(i == idx)
+                b.blockSignals(False)
 
     def _on_clip_slider_changed(self, value: int):
         self.set_clip_position(value / 100.0)
@@ -2691,6 +2782,7 @@ class Viewer3D(QWidget):
                         self.combo_bone_mode.blockSignals(True)
                         self.combo_bone_mode.setCurrentIndex(0)
                         self.combo_bone_mode.blockSignals(False)
+                    self._sync_bone_mode_buttons(False)
                     if hasattr(self, "legend_card"):
                         self.legend_card.setVisible(False)
                     self._render_normal_bone(mesh)
@@ -2768,6 +2860,7 @@ class Viewer3D(QWidget):
                 self.combo_clip_axis.blockSignals(True)
                 self.combo_clip_axis.setCurrentIndex(idx)
                 self.combo_clip_axis.blockSignals(False)
+            self._sync_axis_buttons(idx)
 
         if self._clip_active:
             self._update_clipped_mesh()
@@ -2843,7 +2936,8 @@ class Viewer3D(QWidget):
         if mesh is None:
             return
 
-        # Synchronize UI dropdown if it exists and differs
+        # Synchronize UI dropdown and buttons
+        self._sync_bone_mode_buttons(active)
         if hasattr(self, "combo_bone_mode"):
             target_idx = 1 if active else 0
             if self.combo_bone_mode.currentIndex() != target_idx:
@@ -2870,6 +2964,7 @@ class Viewer3D(QWidget):
                     self.combo_bone_mode.blockSignals(True)
                     self.combo_bone_mode.setCurrentIndex(0)
                     self.combo_bone_mode.blockSignals(False)
+                self._sync_bone_mode_buttons(False)
                 self._density_active = False
                 if hasattr(self, "legend_card"):
                     self.legend_card.setVisible(False)

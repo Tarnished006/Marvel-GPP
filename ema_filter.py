@@ -84,19 +84,23 @@ class OneEuroFilter:
             return x
 
         if timestamp is not None and timestamp > self.last_time:
-            dt = max(1e-4, timestamp - self.last_time)
+            # Clamp dt to physically plausible frame time (10 FPS to 125 FPS)
+            # Clamping prevents derivative division explosions when timestamps jitter
+            dt = max(0.008, min(0.10, timestamp - self.last_time))
             self.last_time = timestamp
         else:
             dt = 1.0 / self.freq
+            if timestamp is not None:
+                self.last_time = timestamp
 
         # Estimate derivative (speed of movement)
         prev_x = self.x_filter.last_value()
         dx = (x - prev_x) / dt if prev_x is not None else np.zeros_like(x)
         edx = self.dx_filter.filter(dx, self._calc_alpha(self.dcutoff, dt))
 
-        # Dynamic cutoff frequency based on movement velocity
+        # Dynamic cutoff frequency based on movement velocity (clamped to prevent runaway oscillation)
         speed = float(np.linalg.norm(edx))
-        cutoff = self.mincutoff + self.beta * speed
+        cutoff = min(25.0, self.mincutoff + self.beta * speed)
 
         # Filter the position signal
         alpha = self._calc_alpha(cutoff, dt)

@@ -234,17 +234,23 @@ class MainWindow(QMainWindow):
 
         # Resolve up to interactive button/control parent if clicked on child label/icon
         from PyQt6.QtWidgets import (
-            QAbstractButton, QSlider, QLineEdit, QComboBox,
-            QAbstractSpinBox, QTabBar, QAbstractItemView
+            QAbstractButton, QAbstractSlider, QLineEdit, QTextEdit,
+            QPlainTextEdit, QComboBox, QAbstractSpinBox, QTabBar,
+            QAbstractItemView, QMenu, QMenuBar
         )
         curr = w
         while curr is not None:
-            if isinstance(curr, (QAbstractButton, QSlider, QLineEdit, QComboBox,
-                                 QAbstractSpinBox, QTabBar, QAbstractItemView)):
+            if isinstance(curr, (QAbstractButton, QAbstractSlider, QLineEdit, QTextEdit,
+                                 QPlainTextEdit, QComboBox, QAbstractSpinBox, QTabBar,
+                                 QAbstractItemView, QMenu, QMenuBar)):
+                return curr
+            if curr.__class__.__name__ in ("MPRSliceWidget", "QtInteractor", "QVTKRenderWindowInteractor"):
                 return curr
             curr = curr.parentWidget()
 
-        return w
+        # Non-interactive background containers (MainWindow, QStackedWidget, panels)
+        # return None so OS native mouse events are dispatched cleanly everywhere.
+        return None
 
     def move_os_cursor(self, norm_x: float, norm_y: float):
         """Moves the OS cursor from the UI thread via QCursor (no OS throttling)."""
@@ -337,6 +343,19 @@ class MainWindow(QMainWindow):
         target = self._resolve_clickable_widget(pos)
         self._clicked_widget = target
 
+        now = time.time()
+        is_double_click = False
+        last_down = getattr(self, "_last_press_time", 0.0)
+        last_pos = getattr(self, "_last_press_pos", None)
+        if last_pos is not None and (now - last_down <= 0.45):
+            dx = cx - last_pos.x()
+            dy = cy - last_pos.y()
+            if dx * dx + dy * dy <= 20 * 20:
+                is_double_click = True
+
+        self._last_press_time = now
+        self._last_press_pos = pos
+
         if target is not None:
             win = target.window()
             if win and not win.isActiveWindow():
@@ -355,6 +374,17 @@ class MainWindow(QMainWindow):
                 Qt.KeyboardModifier.NoModifier,
             )
             QApplication.sendEvent(target, press_ev)
+
+            if is_double_click:
+                dbl_ev = QMouseEvent(
+                    QMouseEvent.Type.MouseButtonDblClick,
+                    QPointF(local_pos),
+                    QPointF(pos),
+                    Qt.MouseButton.LeftButton,
+                    Qt.MouseButton.LeftButton,
+                    Qt.KeyboardModifier.NoModifier,
+                )
+                QApplication.sendEvent(target, dbl_ev)
 
             from PyQt6.QtWidgets import QComboBox
             if isinstance(target, QComboBox):

@@ -58,11 +58,13 @@ class CameraStream:
 
     def read(self, timeout=0.04):
         """Returns the newest fresh camera frame without DirectShow queue lag."""
-        self.frame_ready.wait(timeout=timeout)
+        signaled = self.frame_ready.wait(timeout=timeout)
         self.frame_ready.clear()
         with self.lock:
-            if self.latest_frame is not None:
-                return True, self.latest_frame.copy()
+            if signaled and self.latest_frame is not None:
+                frame = self.latest_frame
+                self.latest_frame = None  # Consume frame so duplicate is never re-processed
+                return True, frame
             return False, None
 
     def release(self):
@@ -81,8 +83,8 @@ class GestureWorker(QThread):
     #   PINCH_TRIGGER  = 0.14 → requires actual physical touching of thumb and index pads
     #   PINCH_RELEASE  = 0.19 → immediate, crisp release as soon as fingers separate
     #   CLICK_COOLDOWN = 0.10 → highly responsive clicking & double-clicking
-    PINCH_TRIGGER  = 0.165
-    PINCH_RELEASE  = 0.205
+    PINCH_TRIGGER  = 0.190
+    PINCH_RELEASE  = 0.220
     CLICK_COOLDOWN = 0.10
 
     def __init__(self):
@@ -101,6 +103,7 @@ class GestureWorker(QThread):
         )
         self._last_cursor = None
         self._pinch_lock_pos = None
+        self._pinch_locked = False
         self.single_hand_filter = EMAFilter(alpha=0.75)
 
         self.is_pinching   = False
@@ -109,6 +112,11 @@ class GestureWorker(QThread):
         self.cam           = None
         self._last_mouse_palm_pos = None
         self._last_mouse_time     = 0.0
+
+        # Precomputed gamma lookup table for dark background / low-light contrast boost (gamma=0.70)
+        # Lifts dark shadows between fingers so MediaPipe clearly distinguishes finger edges against black backdrops
+        gamma = 0.70
+        self._dark_bg_lut = np.array([np.clip(((i / 255.0) ** gamma) * 255.0, 0, 255) for i in range(256)], dtype=np.uint8)
 
         # ── Directional thumb gestures → Air Mouse ON / OFF ───────────────────
         # 👍 Thumbs-up  (held 0.65s) → turn Air Mouse ON
@@ -152,8 +160,8 @@ class GestureWorker(QThread):
         opts = vision.HandLandmarkerOptions(
             base_options=base_opts,
             num_hands=2,
-            min_hand_detection_confidence=0.55,
-            min_tracking_confidence=0.55,
+            min_hand_detection_confidence=0.45,
+            min_tracking_confidence=0.45,
             running_mode=vision.RunningMode.VIDEO,
         )
         self.detector = vision.HandLandmarker.create_from_options(opts)
@@ -286,9 +294,20 @@ class GestureWorker(QThread):
             ts = max(self._last_ts_ms + 1, now_ms)
             self._last_ts_ms = ts
 
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+            # Adaptive low-light / dark-background contrast enhancement:
+            # If the background is dark (mean frame brightness < 135), apply a precomputed
+            # gamma-boost LUT (0.08 ms) to reveal skin silhouettes and eliminate finger-shadow blending.
+            mean_lum = float(np.mean(rgb_frame))
+            if mean_lum < 135.0:
+                mp_rgb = cv2.LUT(rgb_frame, self._dark_bg_lut)
+            else:
+                mp_rgb = rgb_frame
+
             mp_img = mp.Image(
                 image_format=mp.ImageFormat.SRGB,
-                data=cv2.cvtColor(frame, cv2.COLOR_BGR2RGB),
+                data=mp_rgb,
             )
 
             # Synchronous per-frame detection: 100% synchronized with camera feed
@@ -396,18 +415,20 @@ class GestureWorker(QThread):
 
                     index_px = np.array(px[8],  dtype=float)
                     index_pad = 0.75 * index_px + 0.25 * np.array(px[7], dtype=float)
+                    index_distal = 0.50 * index_px + 0.50 * np.array(px[7], dtype=float)
                     mid_px   = np.array(px[12], dtype=float)
                     ring_px  = np.array(px[16], dtype=float)
                     pinky_px = np.array(px[20], dtype=float)
 
                     # Pure physical fingertip contact distance:
                     # Measures true flesh-to-flesh contact between thumb pad and index pad.
-                    # Eliminates shaft-segment projections so hovering close never registers as a click.
+                    # Robust against dark backgrounds where shadow boundaries can slightly retract the tip landmark.
                     d_2d = min(
                         float(np.linalg.norm(thumb_px - index_px)),
                         float(np.linalg.norm(thumb_pad - index_px)),
                         float(np.linalg.norm(thumb_px - index_pad)),
                         float(np.linalg.norm(thumb_pad - index_pad)),
+                        float(np.linalg.norm(thumb_pad - index_distal)),
                     )
 
                     # Rigid skeletal palm scale (invariant to finger curling or reach)
@@ -429,11 +450,13 @@ class GestureWorker(QThread):
                     d_pinky_3d = float(np.linalg.norm(sm[4] - sm[20]))
 
                     # ── Multi-Finger Exclusivity with Natural Pinch Physics ──
-                    # Strictly ensure ONLY index and thumb are tracked; reject middle/ring/pinky pinches
+                    # Strictly ensure ONLY index and thumb are tracked; reject middle/ring/pinky pinches.
+                    # Allows a small tolerance margin (+ ref_2d * 0.04) for dark backgrounds where shadow
+                    # gradients can slightly shift index fingertip landmark or cause middle knuckle to drift.
                     is_index_closest = (
-                        (d_2d <= d_mid_2d or d_3d <= d_mid_3d) and
-                        (d_2d <= d_ring_2d) and
-                        (d_2d <= d_pinky_2d)
+                        (d_2d <= d_mid_2d + ref_2d * 0.04 or d_3d <= d_mid_3d + 0.03) and
+                        (d_2d <= d_ring_2d + ref_2d * 0.05) and
+                        (d_2d <= d_pinky_2d + ref_2d * 0.05)
                     )
                     # Reject fist / bunched hand (where middle/ring/pinky are all bunched touching thumb)
                     is_not_fist = (d_pinky_2d > ref_2d * 0.10 or d_ring_2d > ref_2d * 0.10)
@@ -474,25 +497,28 @@ class GestureWorker(QThread):
                             raw_y = float(np.clip((track_pt[1] - y_min) / (y_max - y_min), 0.0, 1.0))
 
                             # Pinch Lock Damping:
-                            # Suppresses micro-tremor when clicking buttons, but enables fluid dragging
-                            # for sliders, crosshairs, and digital calipers once deliberate motion occurs.
+                            # Suppresses micro-tremor when clicking stationary buttons or calipers,
+                            # but enables completely fluid dragging once deliberate motion occurs.
                             if self.is_pinching:
                                 if self._pinch_lock_pos is None:
                                     self._pinch_lock_pos = (raw_x, raw_y)
-                                ddx = raw_x - self._pinch_lock_pos[0]
-                                ddy = raw_y - self._pinch_lock_pos[1]
-                                if (ddx * ddx + ddy * ddy) > (0.025 * 0.025):
-                                    # Deliberate drag motion: unlock and track hand fluidly
-                                    self._pinch_lock_pos = (raw_x, raw_y)
-                                else:
-                                    # Stationary click: damp micro-tremor
-                                    raw_x = self._pinch_lock_pos[0]
-                                    raw_y = self._pinch_lock_pos[1]
+                                    self._pinch_locked = True
+                                if self._pinch_locked:
+                                    ddx = raw_x - self._pinch_lock_pos[0]
+                                    ddy = raw_y - self._pinch_lock_pos[1]
+                                    if (ddx * ddx + ddy * ddy) > (0.018 * 0.018):
+                                        # Deliberate drag motion: unlock permanently for this pinch
+                                        self._pinch_locked = False
+                                    else:
+                                        # Stationary click: damp micro-tremor
+                                        raw_x = self._pinch_lock_pos[0]
+                                        raw_y = self._pinch_lock_pos[1]
                             else:
                                 self._pinch_lock_pos = None
+                                self._pinch_locked = False
 
-                            # 1€ Filter: zero lag, fluid tracking
-                            cur_t = time.time()
+                            # 1€ Filter: zero lag, fluid tracking with high-precision monotonic clock
+                            cur_t = time.perf_counter()
                             smoothed = self.mouse_filter.filter(
                                 np.array([raw_x, raw_y]), timestamp=cur_t
                             )
@@ -509,7 +535,7 @@ class GestureWorker(QThread):
                                     self.is_pinching = True
                                     self.last_click_ts = now
                                     signal_bus.pinch_started.emit()
-                            elif idx_ratio > self.PINCH_RELEASE:
+                            elif (idx_ratio > self.PINCH_RELEASE) or (not is_clean_index_pinch and idx_ratio > self.PINCH_TRIGGER):
                                 if self.is_pinching:
                                     self.is_pinching = False
                                     signal_bus.pinch_ended.emit()

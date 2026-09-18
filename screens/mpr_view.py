@@ -1204,3 +1204,21 @@ class MPRView(QWidget):
                 })
         return summary
 
+    def step_axial(self, steps: int):
+        """Step axial slice by delta steps (used by hand gestures or keyboard)."""
+        if hasattr(self, "slider_axial") and self.slider_axial.maximum() > self.slider_axial.minimum():
+            new_val = int(np.clip(self.slider_axial.value() + steps, self.slider_axial.minimum(), self.slider_axial.maximum()))
+            self.slider_axial.setValue(new_val)
+
+    def step_coronal(self, steps: int):
+        """Step coronal slice by delta steps."""
+        if hasattr(self, "slider_coronal") and self.slider_coronal.maximum() > self.slider_coronal.minimum():
+            new_val = int(np.clip(self.slider_coronal.value() + steps, self.slider_coronal.minimum(), self.slider_coronal.maximum()))
+            self.slider_coronal.setValue(new_val)
+
+    def step_sagittal(self, steps: int):
+        """Step sagittal slice by delta steps."""
+        if hasattr(self, "slider_sagittal") and self.slider_sagittal.maximum() > self.slider_sagittal.minimum():
+            new_val = int(np.clip(self.slider_sagittal.value() + steps, self.slider_sagittal.minimum(), self.slider_sagittal.maximum()))
+            self.slider_sagittal.setValue(new_val)
+

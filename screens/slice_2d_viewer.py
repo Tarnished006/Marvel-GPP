@@ -468,7 +468,7 @@ class Slice2DViewerWidget(QWidget):
         top_bar.setSpacing(6)
 
         title = QLabel("🖼 2D CT SLICE")
-        title.setStyleSheet("color: #00e5ff; font-size: 11px; font-weight: 700; letter-spacing: 0.5px;")
+        title.setStyleSheet("color: #00e5ff; font-size: 11px; font-weight: 700;")
         top_bar.addWidget(title)
         top_bar.addSpacing(6)
 

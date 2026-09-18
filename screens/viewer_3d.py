@@ -204,7 +204,7 @@ class Viewer3D(QWidget):
         self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.status_label.setWordWrap(True)
         self.status_label.setStyleSheet(
-            "color: #666; font-size: 11px; padding: 0 60px; line-height: 1.6;"
+            "color: #666; font-size: 11px; padding: 0 60px;"
         )
         v.addWidget(self.status_label)
 
@@ -1358,7 +1358,7 @@ class Viewer3D(QWidget):
 
         hdr = QLabel("LOCAL SCANS")
         hdr.setStyleSheet(
-            "color: #444; font-size: 9px; font-weight: 700; letter-spacing: 1px;"
+            "color: #444; font-size: 9px; font-weight: 700;"
         )
         self.sidebar_layout.addWidget(hdr)
 

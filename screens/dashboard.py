@@ -71,7 +71,7 @@ class PatientCard(QFrame):
         badge_color = "#00e5ff" if is_imported else ("#5a9" if is_local else "#777")
         badge = QLabel(badge_text)
         badge.setStyleSheet(
-            f"color: {badge_color}; font-size: 9px; font-weight: 700; letter-spacing: 0.8px;"
+            f"color: {badge_color}; font-size: 9px; font-weight: 700;"
         )
         layout.addWidget(badge)
 
@@ -145,7 +145,7 @@ class Dashboard(QWidget):
 
         title_row = QHBoxLayout()
         lbl_ingest_title = QLabel("📥 CLINICAL DICOM INGESTION & 3D/MPR GENERATION")
-        lbl_ingest_title.setStyleSheet("color: #7cfc00; font-size: 11px; font-weight: 700; letter-spacing: 0.8px;")
+        lbl_ingest_title.setStyleSheet("color: #7cfc00; font-size: 11px; font-weight: 700;")
         title_row.addWidget(lbl_ingest_title)
         title_row.addStretch()
 

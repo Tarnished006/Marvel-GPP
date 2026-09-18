@@ -187,7 +187,20 @@ def main():
             except queue.Empty:
                 break
 
-    print("STOPPED", flush=True)
+    try:
+        print("STOPPED", flush=True)
+    except (OSError, BrokenPipeError):
+        pass
+    except Exception:
+        pass
+
+    try:
+        sys.stdout.flush()
+        # Redirect stdout to devnull to avoid OSError during interpreter finalization
+        import os
+        sys.stdout = open(os.devnull, "w")
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":

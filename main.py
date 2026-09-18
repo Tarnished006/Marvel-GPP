@@ -70,7 +70,6 @@ class CameraHUD(QWidget):
         header.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         header.setStyleSheet(
             "color: #8a8a8a; font-size: 10px; font-weight: 600;"
-            " letter-spacing: 0.5px;"
         )
         header.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         inner.addWidget(header)
@@ -212,7 +211,7 @@ class MainWindow(QMainWindow):
         lock_layout.addStretch()
         lock_title = QLabel("SESSION LOCKED")
         lock_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lock_title.setStyleSheet("color: #00e5ff; font-size: 22px; font-weight: 700; letter-spacing: 2px;")
+        lock_title.setStyleSheet("color: #00e5ff; font-size: 22px; font-weight: 700;")
         lock_msg = QLabel("Patient data hidden after inactivity.")
         lock_msg.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lock_msg.setStyleSheet("color: #666; font-size: 11px;")

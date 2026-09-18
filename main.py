@@ -6,7 +6,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout,
     QHBoxLayout, QPushButton, QStackedWidget, QLabel, QSizePolicy
 )
-from PyQt6.QtCore import Qt, QPoint, QPointF
+from PyQt6.QtCore import Qt, QPoint, QPointF, QTimer
 
 # Apply global PyAutoGUI speed overrides
 pyautogui.FAILSAFE = False
@@ -23,6 +23,8 @@ from signal_bus import signal_bus
 
 from gesture import GestureWorker  # Background AI & Air Mouse Engine
 from voice_commands import VoiceCommandWorker  # Offline Voice Recognition Engine
+from database import touch_patient, log_action, get_patient, get_notes_for_patient
+from report_export import build_case_report
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -124,6 +126,7 @@ class CameraHUD(QWidget):
 
 
 class MainWindow(QMainWindow):
+    AUTO_LOCK_MS = 5 * 60 * 1000   # 5 minutes of no gesture activity
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Aegis-Touch")
@@ -176,11 +179,57 @@ class MainWindow(QMainWindow):
         nav_bar.addWidget(self.cam_btn)
         nav_bar.addWidget(self.air_mouse_btn)
         nav_bar.addWidget(self.voice_btn)
+
+        # Command-confirmation toast (hidden until flash_status() is called)
+        self.status_toast = QLabel("")
+        self.status_toast.setVisible(False)
+        self.status_toast.setStyleSheet(
+            "QLabel { color: #00e5ff; background: #06232b; border: 1px solid #0d4a5c; "
+            "border-radius: 4px; padding: 3px 10px; font-size: 10px; font-weight: 600; }"
+        )
+        nav_bar.addWidget(self.status_toast)
+        self._toast_timer = QTimer(self)
+        self._toast_timer.setSingleShot(True)
+        self._toast_timer.timeout.connect(lambda: self.status_toast.setVisible(False))
+
+        # PDF case-summary export
+        self.export_btn = QPushButton("Export Report")
+        self.export_btn.setStyleSheet(
+            "QPushButton { color: #aaa; border: 1px solid #444; padding: 4px 10px; }"
+        )
+        self.export_btn.clicked.connect(self.export_case_report)
+        nav_bar.addWidget(self.export_btn)
         outer_layout.addLayout(nav_bar)
 
         # --- Stacked screens ---
         self.stack = QStackedWidget()
         outer_layout.addWidget(self.stack)
+
+        # Lock overlay (hidden until the inactivity timer fires)
+        self.lock_screen = QWidget()
+        self.lock_screen.setVisible(False)
+        lock_layout = QVBoxLayout(self.lock_screen)
+        lock_layout.addStretch()
+        lock_title = QLabel("SESSION LOCKED")
+        lock_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lock_title.setStyleSheet("color: #00e5ff; font-size: 22px; font-weight: 700; letter-spacing: 2px;")
+        lock_msg = QLabel("Patient data hidden after inactivity.")
+        lock_msg.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lock_msg.setStyleSheet("color: #666; font-size: 11px;")
+        unlock_btn = QPushButton("Resume Session")
+        unlock_btn.setFixedWidth(180)
+        unlock_btn.setStyleSheet(
+            "QPushButton { color: #00e5ff; border: 1px solid #00e5ff; padding: 8px 14px; "
+            "border-radius: 4px; font-weight: 600; }"
+        )
+        unlock_btn.clicked.connect(self._release_lock)
+        lock_layout.addWidget(lock_title)
+        lock_layout.addWidget(lock_msg)
+        btn_row = QHBoxLayout()
+        btn_row.addStretch(); btn_row.addWidget(unlock_btn); btn_row.addStretch()
+        lock_layout.addLayout(btn_row)
+        lock_layout.addStretch()
+        outer_layout.addWidget(self.lock_screen)
 
         self.dashboard = Dashboard()
         self.viewer_3d = Viewer3D()
@@ -217,9 +266,24 @@ class MainWindow(QMainWindow):
         self.worker.start()
 
         # --- Start Voice Command Process Thread ---
+        # --- Start Voice Command Process Thread ---
         self.voice_worker = VoiceCommandWorker()
-        self.voice_worker.start()
-        self.voice_worker.voice_result.connect(self._handle_voice_command)
+
+        self.voice_worker.voice_result.connect(
+            self._handle_voice_command
+        )
+
+        self.voice_worker.start()  
+
+        # --- Privacy auto-lock: blank patient data after inactivity ---
+        self._locked = False
+        self._lock_timer = QTimer(self)
+        self._lock_timer.setSingleShot(True)
+        self._lock_timer.timeout.connect(self._engage_lock)
+        self._lock_timer.start(self.AUTO_LOCK_MS)
+        # Any gesture activity counts as presence and defers the lock
+        signal_bus.cursor_moved.connect(lambda *_: self._reset_lock_timer())
+        signal_bus.pinch_started.connect(self._reset_lock_timer)
 
     def _resolve_clickable_widget(self, pos: QPoint):
         """Finds the interactive Qt widget under pos, ignoring overlays like CameraHUD."""
@@ -455,42 +519,180 @@ class MainWindow(QMainWindow):
             )
 
     def _toggle_voice(self):
+        """
+        Enable or disable voice recognition.
+        Uses the same visual style as Air Mouse.
+        """
         self._voice_on = not self._voice_on
+
         self.voice_worker.set_armed(self._voice_on)
+
         if self._voice_on:
             self.voice_btn.setText("Voice: ON")
+
             self.voice_btn.setStyleSheet(
-                "QPushButton { color: #00e5ff; border: 1px solid #00e5ff; "
-                "padding: 4px 10px; font-weight: bold; }"
+                "QPushButton { "
+                "color: #00e5ff; "
+                "border: 1px solid #00e5ff; "
+                "padding: 4px 10px; "
+                "font-weight: bold; "
+                "}"
             )
+
+            print(
+                "[MainWindow] Voice recognition enabled.",
+                flush=True,
+            )
+
         else:
             self.voice_btn.setText("Voice: OFF")
+
             self.voice_btn.setStyleSheet(
-                "QPushButton { color: #888; border: 1px solid #555; padding: 4px 10px; }"
+                "QPushButton { "
+                "color: #888; "
+                "border: 1px solid #555; "
+                "padding: 4px 10px; "
+                "}"
             )
 
+            print(
+                "[MainWindow] Voice recognition disabled.",
+                flush=True,
+            )
+    
     def _handle_voice_command(self, phrase: str):
-        """Forward recognized voice commands to the 3D viewer."""
+        """Forward recognized voice commands to the 3D viewer and confirm on screen.
+
+        Touchless UX needs feedback: without it the surgeon can't tell whether a
+        command was heard, misheard, or ignored.
+        """
         self.viewer_3d.handle_voice_command(phrase)
+        self.flash_status(f"Voice: {phrase}")
+
+    def flash_status(self, message: str, msec: int = 1800):
+        """Briefly show a confirmation banner over the nav bar."""
+        if not hasattr(self, "status_toast"):
+            return
+        self.status_toast.setText(message)
+        self.status_toast.setVisible(True)
+        self._toast_timer.start(msec)
+
+    def _audit_view(self, patient: dict, action: str):
+        """Record access + stamp last-viewed, for real DB patients only.
+        Local/imported cards use synthetic MRNs that aren't rows in patients."""
+        try:
+            if not patient.get("_is_local"):
+                touch_patient(patient["mrn"])
+            log_action(action, patient.get("mrn"), patient.get("name", ""))
+        except Exception as exc:
+            print(f"[main] audit/touch failed: {exc}")
+
+    def export_case_report(self):
+        """One-click PDF case summary for the patient currently in the viewer."""
+        patient = getattr(self.viewer_3d, "current_patient", None) or getattr(self, "_last_patient", None)
+        if not patient:
+            self.flash_status("No patient loaded to export")
+            return
+        scan = getattr(self.viewer_3d, "current_scan", None)
+
+        measurements = []
+        try:
+            mpr = getattr(self.viewer_3d, "mpr_view", None)
+            if mpr is not None:
+                measurements = mpr.get_measurement_summary()
+        except Exception as exc:
+            print(f"[main] could not collect measurements: {exc}")
+
+        try:
+            if patient.get("_is_local"):
+                notes = []
+            else:
+                notes = get_notes_for_patient(
+                    patient["mrn"]
+                )
+        except Exception:
+            notes = []
+
+        shot = ""
+        try:
+            shot = self.viewer_3d.save_screenshot()
+        except Exception:
+            pass
+
+        record = None
+        try:
+            if not patient.get("_is_local"):
+                record = get_patient(
+                    patient["mrn"]
+                )
+        except Exception:
+            pass
+
+        try:
+            path = build_case_report(
+                patient=record or patient,
+                scan=scan,
+                measurements=measurements,
+                notes=notes,
+                screenshot_path=shot,
+            )
+            log_action("export_report", patient.get("mrn"), path)
+            self.flash_status(f"Report saved: {path}")
+        except Exception as exc:
+            print(f"[main] report export failed: {exc}")
+            self.flash_status("Report export failed - see console")
 
     def show_record(self, patient: dict):
+        self._last_patient = patient
+        self._audit_view(patient, "view_record")
         record_screen = PatientRecord(patient)
         record_screen.view_scans_clicked.connect(self.show_scans)
         self._push_screen(record_screen)
 
     def show_scans(self, patient: dict):
+        self._last_patient = patient
+        self._audit_view(patient, "view_scans")
         scans_screen = ScanGallery(patient)
         scans_screen.view_in_3d_clicked.connect(self.show_3d_viewer)
         self._push_screen(scans_screen)
 
     def show_3d_viewer(self, patient: dict, scan: dict):
+        self._last_patient = patient
+        self._audit_view(patient, "view_3d")
         self.viewer_3d.load_scan(patient, scan)
         self._push_screen(self.viewer_3d)
 
     def show_3d_direct(self, patient: dict, scan: dict):
         """Called by local-scan cards on the dashboard — skip gallery, go straight to 3D."""
+        self._last_patient = patient
+        self._audit_view(patient, "view_3d_direct")
         self.viewer_3d.load_scan(patient, scan)
         self._go_root(self.viewer_3d)
+
+    # \u2500\u2500 Privacy auto-lock \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+    # A workstation left open in an OR/ICU is exposed PHI. After
+    # AUTO_LOCK_MS of no gesture activity, blank the screen until dismissed.
+
+    def _reset_lock_timer(self, *_):
+        if self._locked:
+            return
+        self._lock_timer.start(self.AUTO_LOCK_MS)
+
+    def _engage_lock(self):
+        if self._locked:
+            return
+        self._locked = True
+        self._pre_lock_index = self.stack.currentIndex()
+        self.lock_screen.setVisible(True)
+        self.stack.setVisible(False)
+        log_action("auto_lock", None, "inactivity lock engaged")
+
+    def _release_lock(self):
+        self._locked = False
+        self.lock_screen.setVisible(False)
+        self.stack.setVisible(True)
+        self._lock_timer.start(self.AUTO_LOCK_MS)
+        log_action("auto_unlock", None, "unlocked by user")
 
     def _toggle_camera_hud(self):
         self.cam_hud.toggle_visibility()

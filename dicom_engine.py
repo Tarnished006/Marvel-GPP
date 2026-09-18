@@ -69,7 +69,7 @@ _CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache")
 def get_cache_path(folder_path: str, preset: str = "body") -> str:
     """Returns deterministic path to cached .vtp mesh for a DICOM folder."""
     abs_path = os.path.abspath(folder_path)
-    key = f"{abs_path}_{preset}_{JETSON_OPTIMIZED}_{_DECIMATE}"
+    key = f"{abs_path}_{preset}_{JETSON_OPTIMIZED}_{_DECIMATE}_hu_v1"
     h = hashlib.md5(key.encode("utf-8")).hexdigest()[:12]
     safe_name = os.path.basename(os.path.normpath(folder_path)) or "scan"
     os.makedirs(_CACHE_DIR, exist_ok=True)
@@ -227,6 +227,43 @@ class DicomVolume:
 class MeshSet:
     """Bone-only isosurface generated from a DicomVolume or loaded from disk cache."""
 
+    def _sample_hu_density(self, mesh: pv.PolyData) -> pv.PolyData:
+        """Sample true Hounsfield Unit (HU) volumetric density onto the bone mesh vertices.
+        Samples at the surface vertices and along the inward surface normal into the bone cortex,
+        computing the representative cortical bone density.
+        Values are clipped to non-negative (background/air set to 0 HU).
+        """
+        if not hasattr(self, "volume") or self.volume is None or getattr(self.volume, "volume_data", None) is None:
+            return mesh
+
+        try:
+            vol_data = self.volume.volume_data
+            mesh_with_normals = mesh.compute_normals(
+                point_normals=True, cell_normals=False, auto_orient_normals=True
+            )
+            normals = np.asarray(mesh_with_normals.point_data.get("Normals"))
+            pts = np.asarray(mesh.points)
+
+            # 1. Direct surface vertex sampling
+            s_surf = pv.PolyData(pts).sample(vol_data)
+            v_surf = np.asarray(s_surf.point_data.get("values", np.zeros(len(pts))))
+
+            # 2. Inward cortical probe (depth 1.2mm into bone cortex)
+            if normals is not None and len(normals) == len(pts):
+                pts_inward = pts - normals * 1.2
+                s_inward = pv.PolyData(pts_inward).sample(vol_data)
+                v_inward = np.asarray(s_inward.point_data.get("values", v_surf))
+                hu_density = np.maximum(v_surf, v_inward)
+            else:
+                hu_density = v_surf
+
+            hu_density = np.clip(hu_density, 0.0, None).astype(np.float32)
+            mesh.point_data["HU_density"] = hu_density
+        except Exception as exc:
+            print(f"[dicom_engine] Warning: Could not sample HU density onto mesh: {exc}")
+
+        return mesh
+
     def _build_bone(self, isovalue: float) -> pv.PolyData:
         mesh = self.volume.volume_data.contour(isosurfaces=[isovalue], method="flying_edges")
 
@@ -241,6 +278,9 @@ class MeshSet:
         mesh = mesh.decimate(_DECIMATE)
         mesh = mesh.clean()
         mesh = mesh.extract_largest()
+
+        # Sample true volumetric HU density onto vertices before caching
+        mesh = self._sample_hu_density(mesh)
         return mesh
 
     def __init__(
@@ -254,27 +294,113 @@ class MeshSet:
         self.bone_mesh: pv.PolyData = self._build_bone(self.bone_isovalue)
 
     @classmethod
-    def load_from_cache(cls, cache_path: str, preset: str = "body") -> "MeshSet":
+    def load_from_cache(
+        cls,
+        cache_path: str,
+        preset: str = "body",
+        folder_path: str = "",
+    ) -> "MeshSet":
         """Ultra-fast (0.15s) load of pre-computed mesh directly from disk cache."""
         meshset = cls.__new__(cls)
         meshset.volume = None
         p = PRESETS.get(preset, PRESETS["body"])
         meshset.bone_isovalue = p["bone"]
         meshset.bone_mesh = pv.read(cache_path)
+
+        # If cache is from an earlier version without HU_density, attempt to populate
+        # from cached volume if available; otherwise leave absent (do NOT invent fake HU).
+        if "HU_density" not in meshset.bone_mesh.point_data and folder_path:
+            meshset._try_attach_hu_from_volume(folder_path)
+
         return meshset
 
-    def add_to_plotter(self, plotter: pv.Plotter):
-        """Adds the bone mesh to an existing plotter with warm cortical bone shading."""
-        bone_actor = plotter.add_mesh(
-            self.bone_mesh,
-            color=_BONE_COLOUR,
-            smooth_shading=True,
-            ambient=_BONE_AMBIENT,
-            diffuse=_BONE_DIFFUSE,
-            specular=_BONE_SPECULAR,
-            specular_power=_BONE_SPECULAR_PWR,
-            opacity=1.0,
-        )
+    def _try_attach_hu_from_volume(self, folder_path: str):
+        """Attaches HU density from cached volume .npz if available."""
+        try:
+            cache_npz = get_volume_cache_path(folder_path)
+            if is_cache_valid(cache_npz, folder_path):
+                with np.load(cache_npz) as data:
+                    vol_data = data["vol_data"].astype(np.float32)
+                    ps = tuple(data["pixel_spacing"])
+                    st = float(data["slice_thickness"])
+                    vol = pv.wrap(vol_data)
+                    vol.spacing = (ps[0], ps[1], st)
+                    dummy_vol = type("DummyVol", (), {"volume_data": vol})()
+                    self.volume = dummy_vol
+                    self.bone_mesh = self._sample_hu_density(self.bone_mesh)
+                    self.volume = None
+        except Exception as exc:
+            print(f"[dicom_engine] Could not attach HU density from volume cache: {exc}")
+
+    def has_hu_density(self) -> bool:
+        """Returns True if genuine HU density scalars are attached to the bone mesh."""
+        return self.bone_mesh is not None and "HU_density" in self.bone_mesh.point_data
+
+    def get_hu_range(self) -> tuple[float, float]:
+        """Returns the (min, max) display range for the HU colormap.
+        Standard CT bone window spans ~200 HU (trabecular) to ~1800 HU (dense cortical).
+        """
+        if not self.has_hu_density():
+            return (200.0, 1800.0)
+        arr = np.asarray(self.bone_mesh.point_data["HU_density"])
+        if len(arr) == 0:
+            return (200.0, 1800.0)
+        p5 = float(np.percentile(arr, 5))
+        p98 = float(np.percentile(arr, 98))
+        lo = max(150.0, p5)
+        hi = max(lo + 300.0, min(2200.0, p98))
+        return (lo, hi)
+
+    def add_to_plotter(
+        self,
+        plotter: pv.Plotter,
+        density_mode: bool = False,
+        cmap: str = "turbo",
+    ):
+        """Adds the bone mesh to an existing plotter.
+        If density_mode is True and HU density is available, renders with continuous HU colormap.
+        Otherwise renders with warm natural cortical bone shading.
+        """
+        if density_mode and self.has_hu_density():
+            lo, hi = self.get_hu_range()
+            bone_actor = plotter.add_mesh(
+                self.bone_mesh,
+                scalars="HU_density",
+                cmap=cmap,
+                clim=(lo, hi),
+                smooth_shading=True,
+                ambient=0.35,
+                diffuse=0.75,
+                specular=0.15,
+                specular_power=10,
+                opacity=1.0,
+                name="bone",
+                scalar_bar_args={
+                    "title": "Density (HU)",
+                    "color": "#e0e0e0",
+                    "title_font_size": 11,
+                    "label_font_size": 9,
+                    "shadow": False,
+                    "n_labels": 5,
+                    "fmt": "%.0f",
+                    "position_x": 0.84,
+                    "position_y": 0.05,
+                    "width": 0.12,
+                    "height": 0.38,
+                },
+            )
+        else:
+            bone_actor = plotter.add_mesh(
+                self.bone_mesh,
+                color=_BONE_COLOUR,
+                smooth_shading=True,
+                ambient=_BONE_AMBIENT,
+                diffuse=_BONE_DIFFUSE,
+                specular=_BONE_SPECULAR,
+                specular_power=_BONE_SPECULAR_PWR,
+                opacity=1.0,
+                name="bone",
+            )
         return bone_actor, None
 
 
@@ -285,7 +411,7 @@ def build_meshes_from_folder(
     """Convenience one-shot: checks cache first, builds and caches if missing."""
     cache_path = get_cache_path(folder_path, preset)
     if is_cache_valid(cache_path, folder_path):
-        return MeshSet.load_from_cache(cache_path, preset=preset)
+        return MeshSet.load_from_cache(cache_path, preset=preset, folder_path=folder_path)
 
     volume = DicomVolume(folder_path)
     meshset = MeshSet(volume, preset=preset)
@@ -375,7 +501,7 @@ class DicomLoader(QThread):
             cache_path = get_cache_path(self.folder_path, self.preset)
             if is_cache_valid(cache_path, self.folder_path):
                 self.progress.emit("Loading 3D model from fast cache…")
-                meshset = MeshSet.load_from_cache(cache_path, preset=self.preset)
+                meshset = MeshSet.load_from_cache(cache_path, preset=self.preset, folder_path=self.folder_path)
                 self.finished.emit(meshset)
                 return
 

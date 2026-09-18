@@ -28,8 +28,9 @@ from pyvistaqt import QtInteractor
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QStackedWidget, QSizePolicy, QScrollArea,
+    QComboBox, QFrame,
 )
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 from signal_bus import signal_bus
 from dicom_engine import DicomLoader, MeshSet
 from screens.mpr_view import MPRView
@@ -59,6 +60,10 @@ LOCAL_DATASETS = _discover_local_datasets()
 
 
 class Viewer3D(QWidget):
+    # Very slow, smooth automatic rotation
+    VOICE_SPIN_STEP_DEG = 0.35
+    VOICE_SPIN_INTERVAL_MS = 40
+
     # Page indices inside self.state_stack
     _PAGE_SELECT  = 0   # scan picker (shown when no scan is loaded)
     _PAGE_LOADING = 1   # progress text while DicomLoader runs
@@ -90,8 +95,17 @@ class Viewer3D(QWidget):
         self._ghost_active      = False
         self.mesh_bounds        = None
 
-        # Wire gesture & voice signals
-        signal_bus.voice_command.connect(self.handle_voice_command)
+        # Voice/feature state
+        self._voice_zoom_level = 1.0      # bookkeeping for "zoom to X percent"
+        self._clip_active      = False    # cross-section clipping plane
+        self._density_active   = False    # HU density colormap
+        self._spin_timer       = QTimer(self)
+        self._spin_timer.timeout.connect(self._spin_tick)
+
+        # Voice commands arrive via MainWindow._handle_voice_command(), which calls
+        # handle_voice_command() directly -- do NOT also connect signal_bus.voice_command
+        # here or every command would fire twice.
+        # Wire gesture signals
         signal_bus.hand_rotation.connect(self.rotate_camera)
         signal_bus.zoom_command.connect(self.zoom_camera)
         signal_bus.tissue_melt.connect(self.set_tissue_melt)
@@ -246,7 +260,9 @@ class Viewer3D(QWidget):
         self.view_mode_stack = QStackedWidget()
 
         # 1. 3D View Container
-        container_3d = QWidget()
+        self.container_3d = QWidget()
+        self.container_3d.resizeEvent = self._on_container_3d_resized
+        container_3d = self.container_3d
         layout_3d = QVBoxLayout(container_3d)
         layout_3d.setContentsMargins(0, 0, 0, 0)
         layout_3d.setSpacing(0)
@@ -279,6 +295,31 @@ class Viewer3D(QWidget):
             s_btn.clicked.connect(lambda checked, c=cmd: self.snap_to_view(c))
             snap_bar.addWidget(s_btn)
 
+        # Slow automatic rotation controls
+        self.btn_start_spin = QPushButton("▶ Start Spin")
+        self.btn_start_spin.setFixedHeight(22)
+        self.btn_start_spin.setStyleSheet(
+            "QPushButton { background: #141414; color: #888; "
+            "border: 1px solid #282828; border-radius: 3px; "
+            "font-size: 9px; padding: 0 7px; }"
+            "QPushButton:hover { background: #202020; color: #00e5ff; "
+            "border-color: #00e5ff; }"
+        )
+        self.btn_start_spin.clicked.connect(self.start_spin)
+        snap_bar.addWidget(self.btn_start_spin)
+
+        self.btn_stop_spin = QPushButton("■ Stop Spin")
+        self.btn_stop_spin.setFixedHeight(22)
+        self.btn_stop_spin.setStyleSheet(
+            "QPushButton { background: #141414; color: #888; "
+            "border: 1px solid #282828; border-radius: 3px; "
+            "font-size: 9px; padding: 0 7px; }"
+            "QPushButton:hover { background: #202020; color: #ff7777; "
+            "border-color: #ff7777; }"
+        )
+        self.btn_stop_spin.clicked.connect(self.stop_spin)
+        snap_bar.addWidget(self.btn_stop_spin)
+
         snap_bar.addSpacing(14)
         self.btn_ghost_plane = QPushButton("👁 3D Ghost Slice: OFF")
         self.btn_ghost_plane.setCheckable(True)
@@ -292,6 +333,30 @@ class Viewer3D(QWidget):
         self.btn_ghost_plane.clicked.connect(self._toggle_ghost_plane)
         snap_bar.addWidget(self.btn_ghost_plane)
 
+        snap_bar.addSpacing(14)
+        bone_mode_lbl = QLabel("Bone Mode:")
+        bone_mode_lbl.setStyleSheet("color: #555; font-size: 9px; font-weight: 600; text-transform: uppercase;")
+        snap_bar.addWidget(bone_mode_lbl)
+
+        self.combo_bone_mode = QComboBox()
+        self.combo_bone_mode.addItem("🦴 Normal Bone View")
+        self.combo_bone_mode.addItem("🌡 Hounsfield Heatmap")
+        self.combo_bone_mode.setFixedHeight(22)
+        self.combo_bone_mode.setStyleSheet(
+            "QComboBox {"
+            "  background: #141414; color: #00e5ff; border: 1px solid #282828;"
+            "  border-radius: 3px; font-size: 9px; font-weight: 600; padding: 0 8px;"
+            "}"
+            "QComboBox:hover { background: #1c1c1c; border-color: #00b4d8; }"
+            "QComboBox::drop-down { border: none; width: 14px; }"
+            "QComboBox QAbstractItemView {"
+            "  background: #111; color: #ddd; selection-background-color: #003344;"
+            "  selection-color: #00e5ff; border: 1px solid #333;"
+            "}"
+        )
+        self.combo_bone_mode.currentIndexChanged.connect(self._on_bone_mode_changed)
+        snap_bar.addWidget(self.combo_bone_mode)
+
         snap_bar.addStretch()
 
         snap_bar_widget = QWidget()
@@ -302,6 +367,9 @@ class Viewer3D(QWidget):
         self.plotter = QtInteractor(container_3d, auto_update=False)
         self.plotter.set_background("#090909")
         layout_3d.addWidget(self.plotter.interactor, stretch=1)
+
+        # Floating HUD card explaining HU density scale
+        self.legend_card = self._build_legend_card(container_3d)
 
         self.view_mode_stack.addWidget(container_3d)  # Index 0: 3D
 
@@ -387,6 +455,35 @@ class Viewer3D(QWidget):
 
     def _start_load(self, folder_path: str, preset: str = "body", label: str = ""):
         """Cancel any running load, show progress screen, start background thread."""
+
+        # Local datasets opened directly from the viewer do not come
+        # through MainWindow.show_3d_direct(), so create a synthetic
+        # patient/scan context for report export.
+        if not getattr(self, "current_patient", None):
+            folder_name = os.path.basename(
+                os.path.normpath(folder_path)
+            )
+
+            self.current_patient = {
+                "_is_local": True,
+                "name": label or folder_name,
+                "mrn": f"LOCAL-{folder_name.upper()}",
+                "age": "—",
+                "sex": "—",
+                "scans": 1,
+            }
+
+        self.current_scan = {
+            "type": "CT",
+            "date": "Local dataset",
+            "description": label or os.path.basename(folder_path),
+            "file_path": folder_path,
+            "slice_count": sum(
+                1
+                for f in os.listdir(folder_path)
+                if f.lower().endswith((".dcm", ".ima"))
+            ),
+        }
         if self._loader and self._loader.isRunning():
             try:
                 self._loader.finished.disconnect()
@@ -431,7 +528,32 @@ class Viewer3D(QWidget):
 
         self.bone_actor, _skin = meshset.add_to_plotter(self.plotter)
         self.mesh_bounds = meshset.bone_mesh.bounds
+        # Kept so cross-section clipping and the density colormap can re-add the
+        # mesh without re-running the whole DICOM -> mesh pipeline.
+        self._bone_mesh = meshset.bone_mesh
+        self._meshset = meshset
+        self._voice_zoom_level = 1.0
+        self._clip_active = False
+        self._density_active = False
+        self._spin_timer.stop()
+
+        # Establish and remember the clean default camera position.
         self.plotter.reset_camera()
+
+        default_cam = self.plotter.renderer.GetActiveCamera()
+
+        self._default_camera_position = tuple(
+            default_cam.GetPosition()
+        )
+
+        self._default_camera_focal_point = tuple(
+            default_cam.GetFocalPoint()
+                ) 
+
+        self._default_camera_view_up = tuple(
+    default_cam.GetViewUp()
+)
+
         self.plotter.render()
 
         # Enable targeted 3D-to-2D raycast snapping
@@ -537,6 +659,9 @@ class Viewer3D(QWidget):
 
     def load_scan(self, patient: dict, scan: dict):
         """Load a specific patient scan from the DB-backed gallery."""
+        # Kept so MainWindow.export_case_report() knows what is on screen
+        self.current_patient = patient
+        self.current_scan = scan
         label = (
             f"{patient.get('name', 'Patient')} — "
             f"{scan.get('type', 'CT')} ({scan.get('slice_count', 1)} slices)"
@@ -556,59 +681,359 @@ class Viewer3D(QWidget):
     # ── Discrete 90° Anatomical Snap Turns & Voice Routing ───────────────────
 
     def snap_to_view(self, command: str):
-        """Discrete 90-degree anatomical camera snap turns."""
-        cmd = command.lower().strip()
+        """
+        Move the 3D camera to a standard anatomical view.
+        """
+
+        cmd = " ".join(
+            command.lower().strip().split()
+        )
+
+    # Normalize aliases.
+        aliases = {
+            "left lateral": "left_lateral",
+            "left side": "left_lateral",
+            "left lat": "left_lateral",
+            "left": "left_lateral",
+
+            "right lateral": "right_lateral",
+            "right side": "right_lateral",
+            "right lat": "right_lateral",
+            "right": "right_lateral",
+
+            "front": "anterior",
+            "front view": "anterior",
+
+            "back": "posterior",
+            "back view": "posterior",
+
+            "top view": "superior",
+            "top": "superior",
+
+            "bottom view": "inferior",
+            "bottom": "inferior",
+
+            "reset camera": "reset",
+            "reset the view": "reset view",
+        }
+
+        cmd = aliases.get(cmd, cmd)
+
         cam = self.plotter.renderer.GetActiveCamera()
-        focal = np.array(cam.GetFocalPoint(), dtype=float)
-        pos = np.array(cam.GetPosition(), dtype=float)
-        distance = float(np.linalg.norm(pos - focal))
+
+        focal = np.array(
+            cam.GetFocalPoint(),
+            dtype=float,
+        )
+
+        pos = np.array(
+            cam.GetPosition(),
+            dtype=float,
+        )
+
+        distance = float(
+            np.linalg.norm(pos - focal)
+        )
+
         if distance <= 0:
             distance = 1.0
 
         positions = {
-            "anterior":      (0, -distance, 0),
-            "posterior":     (0, distance, 0),
-            "left_lateral":  (distance, 0, 0),
-            "lateral":       (distance, 0, 0),
-            "right_lateral": (-distance, 0, 0),
-            "top":           (0, 0, distance),
-            "superior":      (0, 0, distance),
-            "bottom":        (0, 0, -distance),
-            "inferior":      (0, 0, -distance),
+            "anterior": np.array(
+                [0.0, -distance, 0.0]
+            ),
+
+            "posterior": np.array(
+                [0.0, distance, 0.0]
+            ),
+
+            "left_lateral": np.array(
+                [distance, 0.0, 0.0]
+            ),
+
+            "right_lateral": np.array(
+            [-distance, 0.0, 0.0]
+            ),
+
+            "superior": np.array(
+                [0.0, 0.0, distance]
+            ),
+
+            "inferior": np.array(
+                [0.0, 0.0, -distance]
+            ),
         }
 
         if cmd in ("reset", "reset view"):
-            self.plotter.reset_camera()
-            self.plotter.renderer.ResetCameraClippingRange()
-            self.plotter.render()
-            return
+            # Stop automatic rotation when resetting.
+            self._spin_timer.stop()
 
-        if cmd in positions:
-            new_pos = focal + np.array(positions[cmd], dtype=float)
-            cam.SetPosition(*new_pos)
-            cam.SetFocalPoint(*focal)
+            cam = self.plotter.renderer.GetActiveCamera()
 
-            if cmd in ("top", "superior"):
-                cam.SetViewUp(0, 1, 0)
-            elif cmd in ("bottom", "inferior"):
-                cam.SetViewUp(0, -1, 0)
+            if hasattr(self, "_default_camera_position"):
+                cam.SetPosition(
+                    *self._default_camera_position
+                )
+
+                cam.SetFocalPoint(
+                    *self._default_camera_focal_point
+                )
+
+                cam.SetViewUp(
+                    *self._default_camera_view_up
+                )
+
+                cam.OrthogonalizeViewUp()
+
             else:
-                cam.SetViewUp(0, 0, 1)
+                # Fallback if no stored camera exists yet.
+                self.plotter.reset_camera()
 
-            cam.OrthogonalizeViewUp()
             self.plotter.renderer.ResetCameraClippingRange()
             self.plotter.render()
 
-    def handle_voice_command(self, phrase: str):
-        """Execute a recognized voice command on the active view."""
-        command = " ".join(phrase.lower().strip().split())
-        print(f"[Viewer3D] Received voice command: {command!r}", flush=True)
+            print(
+                "[Viewer3D] Camera reset to default view.",
+                flush=True,
+            )
 
-        if self.state_stack.currentIndex() != self._PAGE_SCENE:
             return
 
-        # Discrete anatomical snap views
-        self.snap_to_view(command)
+        if cmd not in positions:
+            print(
+                f"[Viewer3D] Unknown camera view: {cmd}",
+                flush=True,
+            )
+            return
+
+        new_position = focal + positions[cmd]
+
+        cam.SetPosition(*new_position)
+        cam.SetFocalPoint(*focal)
+
+    # Keep the model upright.
+        if cmd in ("superior", "inferior"):
+            cam.SetViewUp(0.0, 1.0, 0.0)
+        else:
+            cam.SetViewUp(0.0, 0.0, 1.0)
+
+        cam.OrthogonalizeViewUp()
+
+        self.plotter.renderer.ResetCameraClippingRange()
+        self.plotter.render()
+
+        print(
+            f"[Viewer3D] Camera moved to: {cmd}",
+            flush=True,
+        )   
+    def handle_voice_command(self, phrase: str):
+        """
+        Execute recognized voice commands on the active 3D viewer.
+        """
+
+        command = " ".join(
+            phrase.lower().strip().split()
+        )
+
+        print(
+            f"[Viewer3D] Received voice command: {command!r}",
+            flush=True,
+        )
+
+    # Only respond while the 3D scene is visible.
+        if self.state_stack.currentIndex() != self._PAGE_SCENE:
+            print(
+                "[Viewer3D] Ignoring command because 3D scene is not active.",
+                flush=True,
+            )
+            return
+
+        aliases = {
+            "show anterior": "anterior",
+            "go anterior": "anterior",
+            "anterior view": "anterior",
+
+            "show posterior": "posterior",
+            "go posterior": "posterior",
+            "posterior view": "posterior",
+
+            "show left lateral": "left lateral",
+            "go left lateral": "left lateral",
+            "left side": "left lateral",
+            "left": "left lateral",
+
+            "show right lateral": "right lateral",
+            "go right lateral": "right lateral",
+            "right side": "right lateral",
+            "right": "right lateral",
+
+            "show top": "superior",
+            "go top": "superior",
+            "top view": "superior",
+            "top": "superior",
+
+            "show bottom": "inferior",
+            "go bottom": "inferior",
+            "bottom view": "inferior",
+            "bottom": "inferior",
+
+            "reset camera": "reset",
+            "reset the view": "reset view",
+        }
+
+        command = aliases.get(command, command)
+
+    # Anatomical views.
+        anatomical_commands = {
+            "anterior",
+            "posterior",
+            "left lateral",
+            "right lateral",
+            "superior",
+            "inferior",
+            "reset",
+            "reset view",
+        }
+
+        if command in anatomical_commands:
+            self.snap_to_view(command)
+            return
+
+    # Existing spin commands.
+        if command == "start spin":
+            if hasattr(self, "start_spin"):
+                self.start_spin()
+            elif hasattr(self, "toggle_spin"):
+                self.toggle_spin(True)
+            return
+
+        if command == "stop spin":
+            if hasattr(self, "stop_spin"):
+                self.stop_spin()
+            elif hasattr(self, "toggle_spin"):
+                self.toggle_spin(False)
+            return
+
+    # Existing zoom commands.
+        if command == "zoom in":
+            self.zoom_camera(1)
+            return
+
+        if command == "zoom out":
+            self.zoom_camera(-1)
+            return
+
+    # Existing rotation commands.
+        if command == "turn left":
+            self.rotate_camera(-0.08, 0.0, 0.0)
+            return
+
+        if command == "turn right":
+            self.rotate_camera(0.08, 0.0, 0.0)
+            return
+
+        print(
+            f"[Viewer3D] Unsupported voice command: {command!r}",
+            flush=True,
+        )
+
+    def _handle_mpr_voice_command(self, command: str):
+        """Voice control for the 2D MPR stack (slices, windowing, measurement)."""
+        mpr = getattr(self, "mpr_view", None)
+        if mpr is None:
+            return
+
+        if command in ("next slice", "previous slice", "jump forward", "jump back"):
+            step = self.MPR_JUMP_SLICES if command.startswith("jump") else 1
+            if command in ("previous slice", "jump back"):
+                step = -step
+            mpr.step_axial(step)
+        elif command == "first slice":
+            mpr.goto_axial(0)
+        elif command == "last slice":
+            mpr.goto_axial(10 ** 9)   # clamped to the last slice internally
+        elif command == "middle slice":
+            mpr.goto_axial_fraction(0.5)
+        elif command == "bone window":
+            mpr.set_window_preset("Bone")
+        elif command == "soft tissue window":
+            mpr.set_window_preset_contains("soft")
+        elif command == "next window":
+            mpr.cycle_window_preset()
+        elif command == "measure":
+            mpr._toggle_caliper()
+        elif command == "measure angle":
+            mpr._toggle_cobb()
+        elif command == "undo measurement":
+            mpr.undo_measurement()
+        elif command == "clear measurements":
+            mpr.clear_measurements()
+        elif command == "flashlight":
+            mpr._toggle_flashlight()
+
+    def _tilt_camera(self, el_deg: float):
+        """Elevation nudge with the same +/-80 degree gimbal clamp rotate_camera uses."""
+        cam = self.plotter.renderer.GetActiveCamera()
+        try:
+            pos   = np.array(cam.GetPosition(), dtype=float)
+            focal = np.array(cam.GetFocalPoint(), dtype=float)
+            vec   = pos - focal
+            r     = float(np.linalg.norm(vec))
+            if r > 0:
+                cur_el = float(np.degrees(np.arcsin(np.clip(vec[2] / r, -1.0, 1.0))))
+                if cur_el + el_deg > 80.0:
+                    el_deg = max(0.0, 80.0 - cur_el)
+                elif cur_el + el_deg < -80.0:
+                    el_deg = min(0.0, -80.0 - cur_el)
+        except Exception:
+            pass
+        cam.Elevation(el_deg)
+        cam.OrthogonalizeViewUp()
+
+    def start_spin(self):
+        """
+        Start very slow continuous 360-degree model rotation.
+        Only works in 3D mode.
+        """
+        if (
+            self.state_stack.currentIndex() != self._PAGE_SCENE
+            or self.view_mode_stack.currentIndex() != 0
+        ):
+            return
+
+        if not self._spin_timer.isActive():
+            self._spin_timer.start(
+                self.VOICE_SPIN_INTERVAL_MS
+            )
+
+        print(
+            "[Viewer3D] Slow spin started.",
+            flush=True,
+        )
+
+    def stop_spin(self):
+        """
+        Stop continuous model rotation.
+        """
+        self._spin_timer.stop()
+
+        print(
+            "[Viewer3D] Slow spin stopped.",
+            flush=True,
+        )
+
+    def _spin_tick(self):
+        """One frame of hands-free 360-degree auto-rotation ('start spin')."""
+        if not self.isVisible() or self.state_stack.currentIndex() != self._PAGE_SCENE:
+            self._spin_timer.stop()
+            return
+        if hasattr(self, "view_mode_stack") and self.view_mode_stack.currentIndex() != 0:
+            self._spin_timer.stop()
+            return
+        cam = self.plotter.renderer.GetActiveCamera()
+        cam.Azimuth(self.VOICE_SPIN_STEP_DEG)
+        cam.OrthogonalizeViewUp()
+        self.plotter.render()
 
     # ── Pure Gesture Camera Control ──────────────────────────────────────────
 
@@ -620,8 +1045,11 @@ class Viewer3D(QWidget):
         if not self.isVisible() or self.state_stack.currentIndex() != self._PAGE_SCENE:
             return
 
-        # Only apply gesture rotation when in 3D mode
+        # In MPR mode, repurpose vertical hand movement as slice scrolling rather
+        # than doing nothing -- otherwise half the app is mouse-only, which defeats
+        # the point of a touchless workstation.
         if hasattr(self, "view_mode_stack") and self.view_mode_stack.currentIndex() != 0:
+            self._gesture_scroll_slices(delta_y)
             return
 
         # Throttle continuous rotation renders to 40 FPS (~25ms) to prevent UI event queue starvation
@@ -662,7 +1090,11 @@ class Viewer3D(QWidget):
         if not self.isVisible() or self.state_stack.currentIndex() != self._PAGE_SCENE:
             return
 
+        # Pinch-zoom in MPR mode jumps through slices in larger steps
         if hasattr(self, "view_mode_stack") and self.view_mode_stack.currentIndex() != 0:
+            mpr = getattr(self, "mpr_view", None)
+            if mpr is not None:
+                mpr.step_axial(1 if direction > 0 else -1)
             return
 
         cam    = self.plotter.renderer.GetActiveCamera()
@@ -679,6 +1111,115 @@ class Viewer3D(QWidget):
 
         cam.Dolly(factor)
         self.plotter.render()
+
+    # \u2500\u2500 Cross-section / density / capture \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+
+    def set_clipping(self, active: bool):
+        """Cross-section view: clip the bone mesh with a plane through its centre
+        so internal structure is visible. Voice: 'show/hide cross section'."""
+        mesh = getattr(self, "_bone_mesh", None)
+        if mesh is None:
+            return
+        try:
+            if active:
+                cx, cy, cz = mesh.center
+                clipped = mesh.clip(normal="y", origin=(cx, cy, cz), invert=True)
+                if self.bone_actor is not None:
+                    self.plotter.remove_actor(self.bone_actor, render=False)
+                self.bone_actor = self.plotter.add_mesh(
+                    clipped, color=(0.98, 0.96, 0.92), smooth_shading=True,
+                    specular=0.25, specular_power=18, name="bone",
+                )
+                self._clip_active = True
+            else:
+                if self.bone_actor is not None:
+                    self.plotter.remove_actor(self.bone_actor, render=False)
+                self.bone_actor = self.plotter.add_mesh(
+                    mesh, color=(0.98, 0.96, 0.92), smooth_shading=True,
+                    specular=0.25, specular_power=18, name="bone",
+                )
+                self._clip_active = False
+                self._density_active = False
+            self.plotter.render()
+        except Exception as exc:
+            print(f"[Viewer3D] Clipping failed: {exc}")
+
+    def set_density_colormap(self, active: bool):
+        """Colour the bone surface by local density (distance-from-centre proxy for
+        HU sampled at the surface), so thin or low-density regions read differently from
+        dense cortical bone. Voice: 'show/hide density'.
+
+        NOTE for your mentor: this is a density-derived *visualization*, not a
+        trained anomaly detector -- be explicit about that distinction.
+        """
+        mesh = getattr(self, "_bone_mesh", None)
+        if mesh is None:
+            return
+        try:
+            if active:
+                sampled = mesh
+                scalars = None
+                raw = getattr(getattr(self, "_meshset", None), "raw_data", None)
+                if raw is not None:
+                    # sample the HU volume at each surface vertex
+                    import numpy as _np
+                    pts = _np.asarray(mesh.points)
+                    ps = getattr(self._meshset, "pixel_spacing", (1.0, 1.0))
+                    st = getattr(self._meshset, "slice_thickness", 1.0)
+                    ix = _np.clip((pts[:, 0] / max(ps[0], 1e-6)).astype(int), 0, raw.shape[0] - 1)
+                    iy = _np.clip((pts[:, 1] / max(ps[1], 1e-6)).astype(int), 0, raw.shape[1] - 1)
+                    iz = _np.clip((pts[:, 2] / max(st, 1e-6)).astype(int), 0, raw.shape[2] - 1)
+                    scalars = raw[ix, iy, iz]
+                if scalars is None:
+                    scalars = mesh.points[:, 2]
+                if self.bone_actor is not None:
+                    self.plotter.remove_actor(self.bone_actor, render=False)
+                self.bone_actor = self.plotter.add_mesh(
+                    mesh, scalars=scalars, cmap="inferno", smooth_shading=True,
+                    name="bone", scalar_bar_args={"title": "Density (HU)"},
+                )
+                self._density_active = True
+            else:
+                self.set_clipping(self._clip_active)
+                self._density_active = False
+            self.plotter.render()
+        except Exception as exc:
+            print(f"[Viewer3D] Density colormap failed: {exc}")
+
+    def save_screenshot(self) -> str:
+        """Capture the current 3D viewport to captures/. Voice: 'take screenshot'."""
+        import datetime, os as _os
+        try:
+            out_dir = _os.path.join(
+                _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), "captures"
+            )
+            _os.makedirs(out_dir, exist_ok=True)
+            stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+            path = _os.path.join(out_dir, f"aegis-capture-{stamp}.png")
+            self.plotter.screenshot(path)
+            print(f"[Viewer3D] Screenshot saved: {path}")
+            return path
+        except Exception as exc:
+            print(f"[Viewer3D] Screenshot failed: {exc}")
+            return ""
+
+    _GESTURE_SLICE_SENSITIVITY = 0.04   # hand travel needed per slice step
+
+    def _gesture_scroll_slices(self, delta_y: float):
+        """Open-palm vertical movement scrolls the MPR axial stack.
+
+        Movement is accumulated so sub-threshold jitter doesn't fire a step --
+        without this, MediaPipe noise would flip through slices uncontrollably.
+        """
+        mpr = getattr(self, "mpr_view", None)
+        if mpr is None or getattr(mpr, "vol_data", None) is None:
+            return
+        self._slice_scroll_accum = getattr(self, "_slice_scroll_accum", 0.0) + float(delta_y)
+        if abs(self._slice_scroll_accum) < self._GESTURE_SLICE_SENSITIVITY:
+            return
+        steps = int(self._slice_scroll_accum / self._GESTURE_SLICE_SENSITIVITY)
+        self._slice_scroll_accum -= steps * self._GESTURE_SLICE_SENSITIVITY
+        mpr.step_axial(steps)
 
     def set_tissue_melt(self, melt_factor: float):
         """No-op: skin mesh removed. Signal still connected to avoid errors."""

@@ -1,4 +1,13 @@
+import os
 import sys
+import site
+if "QT_QPA_PLATFORM_PLUGIN_PATH" not in os.environ:
+    for _sp in site.getsitepackages():
+        _p = os.path.join(_sp, "PyQt6", "Qt6", "plugins", "platforms")
+        if os.path.isdir(_p):
+            os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = _p
+            break
+
 import time
 import pyautogui
 from PyQt6.QtGui import QCursor, QPixmap, QMouseEvent
@@ -652,6 +661,15 @@ class MainWindow(QMainWindow):
 
     def export_case_report(self):
         """One-click PDF case summary for the patient currently in the viewer."""
+        if hasattr(self, "viewer_3d") and self.viewer_3d is not None and hasattr(self.viewer_3d, "export_case_report"):
+            try:
+                path = self.viewer_3d.export_case_report()
+                if path:
+                    self.flash_status(f"Report saved: {path}")
+                    return
+            except Exception as exc:
+                print(f"[main] viewer_3d.export_case_report failed, falling back: {exc}")
+
         patient = getattr(self.viewer_3d, "current_patient", None) or getattr(self, "_last_patient", None)
         if not patient:
             self.flash_status("No patient loaded to export")

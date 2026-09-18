@@ -114,7 +114,7 @@ def extract_safe_metadata(viewer) -> dict:
     headers = getattr(viewer, "_safe_dicom_headers", None)
     active_path = getattr(viewer, "_active_path", "")
 
-    if headers is None and active_path and os.path.isdir(active_path):
+    if (headers is None or not isinstance(headers, dict)) and active_path and os.path.isdir(active_path):
         try:
             dcm_files = [f for f in os.listdir(active_path) if f.lower().endswith(".dcm")]
             if dcm_files:
@@ -139,7 +139,7 @@ def extract_safe_metadata(viewer) -> dict:
             pass
 
     # Populate Scan Information from safe headers
-    if headers:
+    if headers and isinstance(headers, dict):
         meta["modality"] = str(headers.get("Modality") or "CT").strip()
         meta["study_date"] = _format_dicom_date(str(headers.get("StudyDate") or ""))
         meta["study_time"] = _format_dicom_time(str(headers.get("StudyTime") or ""))
@@ -279,7 +279,7 @@ def extract_safe_metadata(viewer) -> dict:
     if hasattr(viewer, "panel_2d"):
         cnt_2d = len(viewer.panel_2d.get_measurements())
     if hasattr(viewer, "get_measurements_3d"):
-        cnt_3d = len(viewer.get_measurements_3d())
+        cnt_3d = len([m for m in viewer.get_measurements_3d() if m.get("source") != "2D_synced"])
     total_m = cnt_2d + cnt_3d
     if total_m > 0:
         meta["measurement_count"] = f"2D: {cnt_2d} · 3D: {cnt_3d} (Total: {total_m})"
@@ -346,29 +346,30 @@ class StudyInfoDialog(QDialog):
         header_row.addWidget(header_title)
         header_row.addStretch()
 
-        btn_refresh = QPushButton("⟳ Refresh")
-        btn_refresh.setFixedHeight(22)
-        btn_refresh.setStyleSheet("""
+        self.btn_refresh = QPushButton("⟳ Refresh")
+        self.btn_refresh.setToolTip("Refresh and scan metadata from active scan")
+        self.btn_refresh.setFixedHeight(22)
+        self.btn_refresh.setStyleSheet("""
             QPushButton {
                 background: #181818; color: #aaa; border: 1px solid #333;
                 border-radius: 3px; font-size: 9px; font-weight: 600; padding: 0 8px;
             }
             QPushButton:hover { background: #222; color: #00e5ff; border-color: #00b4d8; }
         """)
-        btn_refresh.clicked.connect(lambda: self.update_metadata())
-        header_row.addWidget(btn_refresh)
+        self.btn_refresh.clicked.connect(self.refresh_metadata)
+        header_row.addWidget(self.btn_refresh)
 
-        btn_close_top = QPushButton("✕")
-        btn_close_top.setFixedSize(22, 22)
-        btn_close_top.setStyleSheet("""
+        self.btn_close_top = QPushButton("✕")
+        self.btn_close_top.setFixedSize(22, 22)
+        self.btn_close_top.setStyleSheet("""
             QPushButton {
                 background: #181818; color: #888; border: 1px solid #333;
                 border-radius: 3px; font-size: 10px; font-weight: bold;
             }
             QPushButton:hover { background: #331111; color: #ff5555; border-color: #aa2222; }
         """)
-        btn_close_top.clicked.connect(self.hide)
-        header_row.addWidget(btn_close_top)
+        self.btn_close_top.clicked.connect(self.hide)
+        header_row.addWidget(self.btn_close_top)
         main_layout.addLayout(header_row)
 
         # Privacy Badge Banner
@@ -536,10 +537,28 @@ class StudyInfoDialog(QDialog):
 
         return grp
 
+    def refresh_metadata(self, *args):
+        """Action handler to safely scan and refresh metadata from the viewer."""
+        try:
+            if hasattr(self.viewer, "_safe_dicom_headers"):
+                self.viewer._safe_dicom_headers = None
+            metadata = extract_safe_metadata(self.viewer)
+            self.update_metadata(metadata)
+        except Exception as exc:
+            print(f"[StudyInfoPanel] Error scanning metadata: {exc}")
+            self.update_metadata({})
+
     def update_metadata(self, metadata: dict = None, *args):
         """Refreshes all displayed fields with latest safe metadata."""
+        if metadata is None or isinstance(metadata, bool) or not isinstance(metadata, dict):
+            try:
+                metadata = extract_safe_metadata(self.viewer)
+            except Exception as exc:
+                print(f"[StudyInfoPanel] Exception during metadata extraction: {exc}")
+                metadata = {}
+
         if not isinstance(metadata, dict):
-            metadata = extract_safe_metadata(self.viewer)
+            metadata = {}
 
         self._cached_meta = metadata
         for key, lbl in self.field_labels.items():

@@ -60,6 +60,7 @@ class CTSliceCanvas(QWidget):
     pixel_hovered = pyqtSignal(int, int, float)   # pixel_x, pixel_y, hu_val
     crosshair_moved = pyqtSignal(float, float)     # normalized (u, v) in [0, 1]
     measurement_point_selected = pyqtSignal(int, float, float)  # point_num (1 or 2), u, v
+    physical_point_selected = pyqtSignal(int, float, float, float)  # point_num (1 or 2), x_mm, y_mm, z_mm
     measurement_added = pyqtSignal(object)         # Measurement2D
     measurement_state_changed = pyqtSignal(str)    # status string
 
@@ -85,7 +86,9 @@ class CTSliceCanvas(QWidget):
         self.measuring_active: bool = False
         self.show_measurements: bool = True
         self.measurements: list[Measurement2D] = []
+        self.measurements_3d_synced: list[Measurement2D] = []
         self.pending_point: tuple[float, float] | None = None
+        self.pending_point_phys: tuple[float, float, float] | None = None
         self.current_hover_u_v: tuple[float, float] | None = None
 
         self._hover_pixel: tuple[int, int] | None = None
@@ -94,8 +97,8 @@ class CTSliceCanvas(QWidget):
     def set_measuring(self, active: bool):
         """Enable or disable distance measurement mode."""
         self.measuring_active = bool(active)
+        self.cancel_pending_measurement()
         if not self.measuring_active:
-            self.cancel_pending_measurement()
             self.measurement_state_changed.emit("Idle")
         else:
             self.measurement_state_changed.emit("Select first point")
@@ -113,8 +116,9 @@ class CTSliceCanvas(QWidget):
 
     def cancel_pending_measurement(self):
         """Cancels an in-progress first point selection."""
-        if self.pending_point is not None:
+        if self.pending_point is not None or self.pending_point_phys is not None:
             self.pending_point = None
+            self.pending_point_phys = None
             self.current_hover_u_v = None
             if self.measuring_active:
                 self.measurement_state_changed.emit("Select first point")
@@ -123,9 +127,20 @@ class CTSliceCanvas(QWidget):
     def clear_measurements(self):
         """Removes all completed measurements and active pending points."""
         self.measurements.clear()
+        if hasattr(self, "measurements_3d_synced"):
+            self.measurements_3d_synced.clear()
         self.pending_point = None
+        self.pending_point_phys = None
         self.current_hover_u_v = None
         self.measurement_state_changed.emit("Idle" if not self.measuring_active else "Select first point")
+        self.update()
+
+    def set_pending_physical_point(self, x_mm: float, y_mm: float, z_mm: float, u: float, v: float):
+        """Anchors Point 1 from an external source (such as 3D surface pick)."""
+        self.pending_point_phys = (float(x_mm), float(y_mm), float(z_mm))
+        self.pending_point = (float(u), float(v))
+        self.measuring_active = True
+        self.measurement_state_changed.emit("Select second point")
         self.update()
 
     def get_measurements(self) -> list[Measurement2D]:
@@ -221,40 +236,60 @@ class CTSliceCanvas(QWidget):
         if getattr(self, "show_measurements", True):
             cur_orient = self.plane_name.lower()
             cur_slice = getattr(self, "current_slice_idx", None)
-            for m in getattr(self, "measurements", []):
-                if m.orientation == cur_orient:
-                    if cur_slice is not None and m.slice_idx is not None and m.slice_idx != cur_slice:
-                        continue
+            all_m = list(getattr(self, "measurements", [])) + list(getattr(self, "measurements_3d_synced", []))
+            for m in all_m:
+                should_draw = False
+                if m.orientation == cur_orient and (cur_slice is None or m.slice_idx is None or m.slice_idx == cur_slice):
+                    should_draw = True
+                elif m.physical_start and m.physical_end and self._raw_slice is not None:
+                    p1 = m.physical_start
+                    p2 = m.physical_end
+                    dz = getattr(self.parent(), "slice_thickness", 1.0) if hasattr(self, "parent") and self.parent() else 1.0
+                    dy = getattr(self.parent(), "pixel_spacing", (1.0, 1.0))[0] if hasattr(self, "parent") and self.parent() else 1.0
+                    dx = getattr(self.parent(), "pixel_spacing", (1.0, 1.0))[1] if hasattr(self, "parent") and self.parent() else 1.0
+                    if cur_orient == "axial":
+                        z_cur = cur_slice * dz if cur_slice is not None else p1[2]
+                        if min(p1[2], p2[2]) - 2.0 * dz <= z_cur <= max(p1[2], p2[2]) + 2.0 * dz:
+                            should_draw = True
+                    elif cur_orient == "coronal":
+                        y_cur = cur_slice * dy if cur_slice is not None else p1[1]
+                        if min(p1[1], p2[1]) - 2.0 * dy <= y_cur <= max(p1[1], p2[1]) + 2.0 * dy:
+                            should_draw = True
+                    else:
+                        x_cur = cur_slice * dx if cur_slice is not None else p1[0]
+                        if min(p1[0], p2[0]) - 2.0 * dx <= x_cur <= max(p1[0], p2[0]) + 2.0 * dx:
+                            should_draw = True
 
+                if should_draw:
                     x1 = rect.left() + m.start_u * rect.width()
                     y1 = rect.top()  + m.start_v * rect.height()
                     x2 = rect.left() + m.end_u   * rect.width()
                     y2 = rect.top()  + m.end_v   * rect.height()
 
-                    # Measurement line
-                    pen_meas = QPen(QColor(255, 234, 0, 220), 2, Qt.PenStyle.SolidLine)
+                    # High-visibility measurement line
+                    pen_meas = QPen(QColor(255, 234, 0, 240), 2.5, Qt.PenStyle.SolidLine)
                     painter.setPen(pen_meas)
                     painter.drawLine(QPointF(x1, y1), QPointF(x2, y2))
 
-                    # Endpoint markers
-                    painter.setPen(QPen(QColor(255, 214, 0), 1))
+                    # Endpoint markers - clearly distinguishable P1 and P2
+                    painter.setPen(QPen(QColor(0, 0, 0, 220), 1.5))
                     painter.setBrush(QBrush(QColor(255, 234, 0)))
-                    painter.drawEllipse(QPointF(x1, y1), 3.5, 3.5)
-                    painter.drawEllipse(QPointF(x2, y2), 3.5, 3.5)
+                    painter.drawEllipse(QPointF(x1, y1), 4.5, 4.5)
+                    painter.drawEllipse(QPointF(x2, y2), 4.5, 4.5)
 
                     # Distance label badge
                     mx = (x1 + x2) / 2.0
                     my = (y1 + y2) / 2.0
-                    lbl_str = f"{m.distance_mm:.1f} mm"
+                    lbl_str = f"Distance: {m.distance_mm:.1f} mm"
                     font_lbl = QFont("sans-serif", 8, QFont.Weight.Bold)
                     painter.setFont(font_lbl)
                     fm = painter.fontMetrics()
-                    tw = fm.horizontalAdvance(lbl_str) + 8
+                    tw = fm.horizontalAdvance(lbl_str) + 10
                     th = fm.height() + 4
 
                     badge_rect = QRectF(mx - tw / 2.0, my - th / 2.0, tw, th)
-                    painter.setPen(QPen(QColor(255, 234, 0, 180), 1))
-                    painter.setBrush(QBrush(QColor(15, 15, 15, 220)))
+                    painter.setPen(QPen(QColor(255, 234, 0, 200), 1))
+                    painter.setBrush(QBrush(QColor(10, 10, 10, 230)))
                     painter.drawRoundedRect(badge_rect, 3, 3)
 
                     painter.setPen(QColor(255, 255, 255))
@@ -266,19 +301,26 @@ class CTSliceCanvas(QWidget):
                 x1 = rect.left() + u1 * rect.width()
                 y1 = rect.top()  + v1 * rect.height()
 
-                painter.setPen(QPen(QColor(255, 234, 0), 1))
+                # Glowing Point 1 marker
+                painter.setPen(QPen(QColor(255, 255, 255), 1.5))
                 painter.setBrush(QBrush(QColor(255, 234, 0)))
-                painter.drawEllipse(QPointF(x1, y1), 4, 4)
+                painter.drawEllipse(QPointF(x1, y1), 5.0, 5.0)
+
+                painter.setFont(QFont("sans-serif", 7, QFont.Weight.Bold))
+                painter.setPen(QColor(255, 234, 0))
+                painter.drawText(QRectF(x1 + 6, y1 - 10, 30, 14), Qt.AlignmentFlag.AlignLeft, "P1")
 
                 if self.current_hover_u_v is not None:
                     u2, v2 = self.current_hover_u_v
                     x2 = rect.left() + u2 * rect.width()
                     y2 = rect.top()  + v2 * rect.height()
 
-                    pen_dash = QPen(QColor(255, 234, 0, 180), 1.5, Qt.PenStyle.DashLine)
+                    pen_dash = QPen(QColor(255, 234, 0, 200), 2, Qt.PenStyle.DashLine)
                     painter.setPen(pen_dash)
                     painter.drawLine(QPointF(x1, y1), QPointF(x2, y2))
-                    painter.drawEllipse(QPointF(x2, y2), 3, 3)
+                    painter.setPen(QPen(QColor(255, 255, 255), 1))
+                    painter.setBrush(QBrush(QColor(255, 234, 0, 180)))
+                    painter.drawEllipse(QPointF(x2, y2), 3.5, 3.5)
 
                     if self._raw_slice is not None:
                         sh = self._raw_slice.shape
@@ -294,11 +336,11 @@ class CTSliceCanvas(QWidget):
                         pmx = (x1 + x2) / 2.0
                         pmy = (y1 + y2) / 2.0
                         pfm = painter.fontMetrics()
-                        ptw = pfm.horizontalAdvance(p_str) + 6
-                        pth = pfm.height() + 2
+                        ptw = pfm.horizontalAdvance(p_str) + 8
+                        pth = pfm.height() + 4
                         p_badge = QRectF(pmx - ptw / 2.0, pmy - pth / 2.0, ptw, pth)
-                        painter.setPen(QPen(QColor(255, 234, 0, 140), 1))
-                        painter.setBrush(QBrush(QColor(10, 10, 10, 200)))
+                        painter.setPen(QPen(QColor(255, 234, 0, 160), 1))
+                        painter.setBrush(QBrush(QColor(10, 10, 10, 220)))
                         painter.drawRoundedRect(p_badge, 2, 2)
                         painter.setPen(QColor(255, 255, 255))
                         painter.drawText(p_badge, Qt.AlignmentFlag.AlignCenter, p_str)
@@ -327,15 +369,28 @@ class CTSliceCanvas(QWidget):
         self._hover_hu = hu
         self.pixel_hovered.emit(px, py, hu)
 
-        if self.measuring_active and self.pending_point is not None:
+        if self.measuring_active and (self.pending_point is not None or getattr(self, "pending_point_phys", None) is not None):
             self.current_hover_u_v = (u, v)
             if self._raw_slice is not None:
-                px1 = int(round(self.pending_point[0] * (sh[1] - 1)))
-                py1 = int(round(self.pending_point[1] * (sh[0] - 1)))
-                dx_mm = (px - px1) * self.mm_per_pixel_x
-                dy_mm = (py - py1) * self.mm_per_pixel_y
-                live_dist = float(np.sqrt(dx_mm ** 2 + dy_mm ** 2))
-                self.measurement_state_changed.emit(f"Select second point ({live_dist:.1f} mm)")
+                parent_w = self.parent()
+                p1_phys = getattr(self, "pending_point_phys", None)
+                if p1_phys is None and self.pending_point is not None and hasattr(parent_w, "calc_physical_coords"):
+                    p1_phys = parent_w.calc_physical_coords(self.plane_name, getattr(self, "current_slice_idx", 0), self.pending_point[0], self.pending_point[1])
+                if hasattr(parent_w, "calc_physical_coords") and p1_phys is not None:
+                    p2_phys = parent_w.calc_physical_coords(self.plane_name, getattr(self, "current_slice_idx", 0), u, v)
+                    live_dist = float(np.sqrt(
+                        (p2_phys[0] - p1_phys[0]) ** 2 +
+                        (p2_phys[1] - p1_phys[1]) ** 2 +
+                        (p2_phys[2] - p1_phys[2]) ** 2
+                    ))
+                    self.measurement_state_changed.emit(f"Select second point ({live_dist:.1f} mm)")
+                else:
+                    px1 = int(round(self.pending_point[0] * (sh[1] - 1)))
+                    py1 = int(round(self.pending_point[1] * (sh[0] - 1)))
+                    dx_mm = (px - px1) * self.mm_per_pixel_x
+                    dy_mm = (py - py1) * self.mm_per_pixel_y
+                    live_dist = float(np.sqrt(dx_mm ** 2 + dy_mm ** 2))
+                    self.measurement_state_changed.emit(f"Select second point ({live_dist:.1f} mm)")
             self.update()
             return
 
@@ -356,15 +411,22 @@ class CTSliceCanvas(QWidget):
             v = float(np.clip((event.position().y() - rect.top()) / rect.height(), 0.0, 1.0))
 
             if self.measuring_active and self._raw_slice is not None:
-                if self.pending_point is None:
+                parent_w = self.parent()
+                if self.pending_point is None and getattr(self, "pending_point_phys", None) is None:
                     # Select first point
                     self.pending_point = (u, v)
+                    if hasattr(parent_w, "calc_physical_coords"):
+                        phys = parent_w.calc_physical_coords(self.plane_name, getattr(self, "current_slice_idx", 0), u, v)
+                    else:
+                        phys = (u, v, 0.0)
+                    self.pending_point_phys = phys
                     self.measurement_point_selected.emit(1, u, v)
+                    self.physical_point_selected.emit(1, phys[0], phys[1], phys[2])
                     self.measurement_state_changed.emit("Select second point")
                     self.update()
                 else:
                     # Select second point & complete measurement
-                    u1, v1 = self.pending_point
+                    u1, v1 = self.pending_point if self.pending_point is not None else (0.5, 0.5)
                     u2, v2 = u, v
                     sh = self._raw_slice.shape
                     px1 = int(round(u1 * (sh[1] - 1)))
@@ -372,9 +434,23 @@ class CTSliceCanvas(QWidget):
                     px2 = int(round(u2 * (sh[1] - 1)))
                     py2 = int(round(v2 * (sh[0] - 1)))
 
-                    dx_mm = (px2 - px1) * self.mm_per_pixel_x
-                    dy_mm = (py2 - py1) * self.mm_per_pixel_y
-                    dist_mm = float(np.sqrt(dx_mm ** 2 + dy_mm ** 2))
+                    if hasattr(parent_w, "calc_physical_coords"):
+                        p2_phys = parent_w.calc_physical_coords(self.plane_name, getattr(self, "current_slice_idx", 0), u2, v2)
+                    else:
+                        p2_phys = (u2, v2, 0.0)
+
+                    p1_phys = getattr(self, "pending_point_phys", None)
+                    if p1_phys is None:
+                        if hasattr(parent_w, "calc_physical_coords"):
+                            p1_phys = parent_w.calc_physical_coords(self.plane_name, getattr(self, "current_slice_idx", 0), u1, v1)
+                        else:
+                            p1_phys = (u1, v1, 0.0)
+
+                    dist_mm = float(np.sqrt(
+                        (p2_phys[0] - p1_phys[0]) ** 2 +
+                        (p2_phys[1] - p1_phys[1]) ** 2 +
+                        (p2_phys[2] - p1_phys[2]) ** 2
+                    ))
 
                     m = Measurement2D(
                         id=str(uuid.uuid4())[:8],
@@ -388,12 +464,16 @@ class CTSliceCanvas(QWidget):
                         end_py=py2,
                         distance_mm=dist_mm,
                         orientation=self.plane_name.lower(),
-                        slice_idx=getattr(self, "current_slice_idx", 0)
+                        slice_idx=getattr(self, "current_slice_idx", 0),
+                        physical_start=p1_phys,
+                        physical_end=p2_phys
                     )
                     self.measurements.append(m)
                     self.pending_point = None
+                    self.pending_point_phys = None
                     self.current_hover_u_v = None
                     self.measurement_point_selected.emit(2, u2, v2)
+                    self.physical_point_selected.emit(2, p2_phys[0], p2_phys[1], p2_phys[2])
                     self.measurement_added.emit(m)
                     self.measurement_state_changed.emit(f"Distance: {dist_mm:.1f} mm")
                     self.update()
@@ -405,7 +485,7 @@ class CTSliceCanvas(QWidget):
             self.update()
 
         elif event.button() == Qt.MouseButton.RightButton:
-            if self.measuring_active and self.pending_point is not None:
+            if self.measuring_active and (self.pending_point is not None or getattr(self, "pending_point_phys", None) is not None):
                 self.cancel_pending_measurement()
 
     def leaveEvent(self, event):
@@ -422,6 +502,7 @@ class Slice2DViewerWidget(QWidget):
     reference_position_changed = pyqtSignal(float, float, float)  # physical x_mm, y_mm, z_mm
     closed = pyqtSignal()
     measurement_added = pyqtSignal(object)  # Measurement2D
+    physical_point_selected = pyqtSignal(int, float, float, float)  # point_num (1 or 2), x_mm, y_mm, z_mm
     measurement_cleared = pyqtSignal()
     measurement_state_changed = pyqtSignal(str)
     window_level_changed = pyqtSignal(float, float)  # window_width, window_level
@@ -620,6 +701,7 @@ class Slice2DViewerWidget(QWidget):
         self.canvas.pixel_hovered.connect(self._on_canvas_hover)
         self.canvas.crosshair_moved.connect(self._on_canvas_crosshair)
         self.canvas.measurement_added.connect(self._on_canvas_measurement_added)
+        self.canvas.physical_point_selected.connect(self.physical_point_selected.emit)
         self.canvas.measurement_state_changed.connect(self._on_canvas_measurement_state_changed)
         layout.addWidget(self.canvas, stretch=1)
 
@@ -728,9 +810,78 @@ class Slice2DViewerWidget(QWidget):
         self.measurement_state_changed.emit(status)
 
     def _on_canvas_measurement_added(self, m: Measurement2D):
-        m.physical_start = self.calc_physical_coords(m.orientation, m.slice_idx, m.start_u, m.start_v)
-        m.physical_end = self.calc_physical_coords(m.orientation, m.slice_idx, m.end_u, m.end_v)
+        if not m.physical_start or m.physical_start == (0.0, 0.0, 0.0):
+            m.physical_start = self.calc_physical_coords(m.orientation, m.slice_idx, m.start_u, m.start_v)
+        if not m.physical_end or m.physical_end == (0.0, 0.0, 0.0):
+            m.physical_end = self.calc_physical_coords(m.orientation, m.slice_idx, m.end_u, m.end_v)
         self.measurement_added.emit(m)
+
+    def set_pending_physical_point(self, x_mm: float, y_mm: float, z_mm: float):
+        """Called when Point 1 is selected in 3D view to mirror into 2D view."""
+        self.set_measurement_mode(True)
+        self.set_physical_position(x_mm, y_mm, z_mm, update_orientation_slice=True)
+        u = getattr(self.canvas, "cross_u", 0.5)
+        v = getattr(self.canvas, "cross_v", 0.5)
+        self.canvas.set_pending_physical_point(x_mm, y_mm, z_mm, u, v)
+        if hasattr(self, "lbl_measure_status"):
+            self.lbl_measure_status.setText("Select second point")
+
+    def add_measurement_from_3d(self, pt1: tuple[float, float, float], pt2: tuple[float, float, float], dist_mm: float):
+        """Called when a 3D measurement completes to mirror it onto the 2D slice view."""
+        for existing in self.canvas.measurements:
+            if existing.physical_start == pt1 and existing.physical_end == pt2:
+                return
+
+        H, W, D = self.vol_data.shape if self.vol_data is not None else (100, 100, 100)
+        dy = max(1e-4, float(self.pixel_spacing[0]))
+        dx = max(1e-4, float(self.pixel_spacing[1]))
+        dz = max(1e-4, float(self.slice_thickness))
+
+        orient = self.current_orientation
+        cur_slice = self.get_current_slice_index()
+
+        if orient == "axial":
+            u1 = np.clip(pt1[0] / max(1e-4, (W - 1) * dx), 0.0, 1.0)
+            v1 = np.clip(pt1[1] / max(1e-4, (H - 1) * dy), 0.0, 1.0)
+            u2 = np.clip(pt2[0] / max(1e-4, (W - 1) * dx), 0.0, 1.0)
+            v2 = np.clip(pt2[1] / max(1e-4, (H - 1) * dy), 0.0, 1.0)
+        elif orient == "coronal":
+            u1 = np.clip(pt1[0] / max(1e-4, (W - 1) * dx), 0.0, 1.0)
+            v1 = np.clip(1.0 - (pt1[2] / max(1e-4, (D - 1) * dz)), 0.0, 1.0)
+            u2 = np.clip(pt2[0] / max(1e-4, (W - 1) * dx), 0.0, 1.0)
+            v2 = np.clip(1.0 - (pt2[2] / max(1e-4, (D - 1) * dz)), 0.0, 1.0)
+        else:
+            u1 = np.clip(pt1[1] / max(1e-4, (H - 1) * dy), 0.0, 1.0)
+            v1 = np.clip(1.0 - (pt1[2] / max(1e-4, (D - 1) * dz)), 0.0, 1.0)
+            u2 = np.clip(pt2[1] / max(1e-4, (H - 1) * dy), 0.0, 1.0)
+            v2 = np.clip(1.0 - (pt2[2] / max(1e-4, (D - 1) * dz)), 0.0, 1.0)
+
+        m = Measurement2D(
+            id=str(uuid.uuid4())[:8],
+            start_u=float(u1),
+            start_v=float(v1),
+            end_u=float(u2),
+            end_v=float(v2),
+            start_px=int(round(u1 * (W - 1))),
+            start_py=int(round(v1 * (H - 1))),
+            end_px=int(round(u2 * (W - 1))),
+            end_py=int(round(v2 * (H - 1))),
+            distance_mm=float(dist_mm),
+            orientation=orient,
+            slice_idx=cur_slice,
+            physical_start=pt1,
+            physical_end=pt2
+        )
+        if hasattr(self.canvas, "measurements_3d_synced"):
+            self.canvas.measurements_3d_synced.append(m)
+        else:
+            self.canvas.measurements.append(m)
+        self.canvas.pending_point = None
+        self.canvas.pending_point_phys = None
+        self.canvas.current_hover_u_v = None
+        self.canvas.update()
+        if hasattr(self, "lbl_measure_status"):
+            self.lbl_measure_status.setText(f"Distance: {dist_mm:.1f} mm")
 
     def start_measurement(self):
         self.set_measurement_mode(True)
@@ -777,6 +928,164 @@ class Slice2DViewerWidget(QWidget):
         if hasattr(self, "canvas"):
             return self.canvas.get_measurements()
         return []
+
+    def save_screenshot(self, out_path: str = None) -> str:
+        """Captures the current 2D CT slice directly from loaded volumetric data (with calibrated
+        windowing, crosshairs, physical aspect ratio, and measurements) to a PNG file.
+        Operates reliably whether the widget is currently visible, hidden, or running headlessly.
+        """
+        import datetime, os as _os
+        try:
+            if not out_path:
+                out_dir = _os.path.join(
+                    _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), "captures"
+                )
+                _os.makedirs(out_dir, exist_ok=True)
+                stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+                out_path = _os.path.join(out_dir, f"aegis-2d-slice-{stamp}.png")
+
+            # 1. Ensure volume data is loaded (fallback to parent MPR or active path if needed)
+            if self.vol_data is None or self.vol_data.ndim != 3:
+                parent = self.parent()
+                if parent is not None:
+                    mpr = getattr(parent, "mpr_view", None)
+                    if mpr is not None and getattr(mpr, "vol_data", None) is not None:
+                        self.load_volume(mpr.vol_data, mpr.pixel_spacing, mpr.slice_thickness)
+                    elif hasattr(parent, "_active_path") and parent._active_path and _os.path.isdir(parent._active_path):
+                        from dicom_engine import load_volume_for_mpr
+                        vol, sp, z_sp, _ = load_volume_for_mpr(parent._active_path)
+                        self.load_volume(vol, sp, z_sp)
+                if self.vol_data is None or self.vol_data.ndim != 3:
+                    ws_dir = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+                    skull_dir = _os.path.join(ws_dir, "skull")
+                    if _os.path.isdir(skull_dir):
+                        from dicom_engine import load_volume_for_mpr
+                        vol, sp, z_sp, _ = load_volume_for_mpr(skull_dir)
+                        self.load_volume(vol, sp, z_sp)
+
+            # 2. Extract raw calibrated HU slice
+            raw, mm_x, mm_y = self._extract_raw_slice()
+            if raw is None:
+                if hasattr(self, "canvas") and self.canvas is not None and self.canvas._pixmap and not self.canvas._pixmap.isNull():
+                    pix = self.canvas.grab()
+                    pix.save(out_path, "PNG")
+                    return out_path
+                return ""
+
+            if self._wl_lut is None:
+                self._update_wl_lut()
+
+            # 3. Map HU [-1024..3071] to 8-bit using active WL LUT
+            indices = np.clip(raw.astype(np.int32) + 1024, 0, 4095)
+            arr_8bit = np.ascontiguousarray(self._wl_lut[indices], dtype=np.uint8)
+            sh = arr_8bit.shape
+            slice_img = QImage(arr_8bit.data, sh[1], sh[0], sh[1], QImage.Format.Format_Grayscale8).copy()
+
+            # 4. Create high-resolution output target canvas (512x512)
+            out_w, out_h = 512, 512
+            target_img = QImage(out_w, out_h, QImage.Format.Format_RGB32)
+            target_img.fill(QColor("#090d16"))  # Deep clinical slate-black
+
+            # 5. Calculate aspect-ratio preserved target rect
+            phys_w = sh[1] * mm_x
+            phys_h = sh[0] * mm_y
+            scale = min((out_w - 24) / max(1e-4, phys_w), (out_h - 24) / max(1e-4, phys_h))
+            rw = phys_w * scale
+            rh = phys_h * scale
+            rx = (out_w - rw) / 2.0
+            ry = (out_h - rh) / 2.0
+            rect = QRectF(rx, ry, rw, rh)
+
+            # 6. Paint slice and clinical overlays
+            painter = QPainter(target_img)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+
+            # Slice Pixmap
+            painter.drawImage(rect, slice_img)
+
+            # Subtle boundary border around image
+            painter.setPen(QPen(QColor(40, 50, 70), 1))
+            painter.drawRect(rect)
+
+            # Crosshair (if enabled)
+            if self.is_crosshair_visible() and hasattr(self, "canvas"):
+                cu = getattr(self.canvas, "cross_u", 0.5)
+                cv = getattr(self.canvas, "cross_v", 0.5)
+                cx = rect.left() + cu * rect.width()
+                cy = rect.top()  + cv * rect.height()
+                pen_cross = QPen(QColor(0, 229, 255, 140), 1, Qt.PenStyle.DashLine)
+                painter.setPen(pen_cross)
+                painter.drawLine(int(rect.left()), int(cy), int(rect.right()), int(cy))
+                painter.drawLine(int(cx), int(rect.top()), int(cx), int(rect.bottom()))
+
+            # Orientation Badge (top-left)
+            orient_str = self.current_orientation.upper()
+            painter.setPen(QColor(0, 229, 255))
+            painter.setFont(QFont("sans-serif", 10, QFont.Weight.Bold))
+            painter.drawText(int(rect.left() + 10), int(rect.top() + 20), orient_str)
+
+            # Readout: Slice & Window/Level (bottom-left)
+            cur_idx = self.get_current_slice_index()
+            tot_cnt = self.get_slice_count()
+            readout = f"Slice {cur_idx + 1} / {tot_cnt}  ·  W: {self.window_width:.0f}  L: {self.window_level:.0f} HU"
+            painter.setFont(QFont("sans-serif", 8))
+            painter.setPen(QColor(180, 200, 220))
+            painter.drawText(int(rect.left() + 10), int(rect.bottom() - 10), readout)
+
+            # Measurements for this slice & orientation
+            all_m = []
+            if hasattr(self, "canvas"):
+                all_m = list(getattr(self.canvas, "measurements", [])) + list(getattr(self.canvas, "measurements_3d_synced", []))
+            for m in all_m:
+                should_draw = False
+                if getattr(m, "orientation", "").lower() == self.current_orientation.lower():
+                    if getattr(m, "slice_idx", None) is None or m.slice_idx == cur_idx:
+                        should_draw = True
+                elif getattr(m, "physical_start", None) and getattr(m, "physical_end", None):
+                    p1 = m.physical_start
+                    p2 = m.physical_end
+                    dz = float(self.slice_thickness)
+                    dy = float(self.pixel_spacing[0])
+                    dx = float(self.pixel_spacing[1])
+                    if self.current_orientation == "axial":
+                        z_cur = cur_idx * dz
+                        if min(p1[2], p2[2]) - 2.0 * dz <= z_cur <= max(p1[2], p2[2]) + 2.0 * dz:
+                            should_draw = True
+                    elif self.current_orientation == "coronal":
+                        y_cur = cur_idx * dy
+                        if min(p1[1], p2[1]) - 2.0 * dy <= y_cur <= max(p1[1], p2[1]) + 2.0 * dy:
+                            should_draw = True
+                    else:
+                        x_cur = cur_idx * dx
+                        if min(p1[0], p2[0]) - 2.0 * dx <= x_cur <= max(p1[0], p2[0]) + 2.0 * dx:
+                            should_draw = True
+
+                if should_draw:
+                    x1 = rect.left() + m.start_u * rect.width()
+                    y1 = rect.top()  + m.start_v * rect.height()
+                    x2 = rect.left() + m.end_u   * rect.width()
+                    y2 = rect.top()  + m.end_v   * rect.height()
+
+                    painter.setPen(QPen(QColor(255, 234, 0, 240), 2.5, Qt.PenStyle.SolidLine))
+                    painter.drawLine(QPointF(x1, y1), QPointF(x2, y2))
+
+                    painter.setPen(QPen(QColor(0, 0, 0, 220), 1.5))
+                    painter.setBrush(QBrush(QColor(255, 234, 0)))
+                    painter.drawEllipse(QPointF(x1, y1), 4.5, 4.5)
+                    painter.drawEllipse(QPointF(x2, y2), 4.5, 4.5)
+
+                    lbl_str = f"{m.distance_mm:.1f} mm"
+                    painter.setFont(QFont("sans-serif", 8, QFont.Weight.Bold))
+                    painter.setPen(QColor(255, 234, 0))
+                    painter.drawText(int((x1 + x2) / 2.0 + 6), int((y1 + y2) / 2.0 - 4), lbl_str)
+
+            painter.end()
+            target_img.save(out_path, "PNG")
+            return out_path
+        except Exception as exc:
+            print(f"[Slice2DViewer] 2D screenshot failed: {exc}")
+            return ""
 
     def calc_2d_distance(self, p1: tuple[int, int], p2: tuple[int, int], orientation: str | None = None) -> float:
         """Calculates physical distance in mm between two pixel coordinates (col, row)
@@ -1200,3 +1509,7 @@ class Slice2DViewerWidget(QWidget):
         if raw is not None and 0 <= py < raw.shape[0] and 0 <= px < raw.shape[1]:
             return float(raw[py, px])
         return None
+
+
+# Alias for backwards compatibility / alternate naming
+Slice2DViewer = Slice2DViewerWidget

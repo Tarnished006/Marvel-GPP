@@ -1184,22 +1184,26 @@ class MPRView(QWidget):
         """Returns structured summary of all Caliper and Cobb angle measurements across viewports."""
         summary = []
         for plane, widget in (("Axial", self.w_axial), ("Coronal", self.w_coronal), ("Sagittal", self.w_sagittal)):
-            for idx, m in enumerate(widget.measurements, 1):
+            for idx, m in enumerate(getattr(widget, "measurements", []), 1):
                 summary.append({
                     "plane": plane,
                     "type": "Caliper",
+                    "kind": "distance",
                     "label": f"{plane} #{idx}",
                     "value": f"{m.dist_mm:.1f} mm",
-                    "num_value": m.dist_mm,
+                    "num_value": float(m.dist_mm),
                     "unit": "mm",
+                    "p1": (float(m.p1.x()), float(m.p1.y())) if hasattr(m, "p1") and m.p1 else None,
+                    "p2": (float(m.p2.x()), float(m.p2.y())) if hasattr(m, "p2") and m.p2 else None,
                 })
-            for idx, cm in enumerate(widget.cobb_measurements, 1):
+            for idx, cm in enumerate(getattr(widget, "cobb_measurements", []), 1):
                 summary.append({
                     "plane": plane,
                     "type": "Cobb Angle",
+                    "kind": "cobb",
                     "label": f"{plane} Cobb #{idx}",
                     "value": f"{cm.angle_deg:.1f}°",
-                    "num_value": cm.angle_deg,
+                    "num_value": float(cm.angle_deg),
                     "unit": "deg",
                 })
         return summary
@@ -1221,4 +1225,22 @@ class MPRView(QWidget):
         if hasattr(self, "slider_sagittal") and self.slider_sagittal.maximum() > self.slider_sagittal.minimum():
             new_val = int(np.clip(self.slider_sagittal.value() + steps, self.slider_sagittal.minimum(), self.slider_sagittal.maximum()))
             self.slider_sagittal.setValue(new_val)
+
+    def save_screenshot(self, out_path: str = None) -> str:
+        """Captures the current 3-plane MPR viewports to a PNG file."""
+        import datetime, os as _os
+        try:
+            if not out_path:
+                out_dir = _os.path.join(
+                    _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), "captures"
+                )
+                _os.makedirs(out_dir, exist_ok=True)
+                stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+                out_path = _os.path.join(out_dir, f"aegis-mpr-{stamp}.png")
+            pix = self.grab()
+            pix.save(out_path, "PNG")
+            return out_path
+        except Exception as exc:
+            print(f"[MPRView] MPR screenshot failed: {exc}")
+            return ""
 

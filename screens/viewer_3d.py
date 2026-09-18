@@ -28,9 +28,10 @@ from pyvistaqt import QtInteractor
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QStackedWidget, QSizePolicy, QScrollArea,
-    QComboBox, QFrame, QSlider, QSplitter,
+    QComboBox, QFrame, QSlider, QSplitter, QMenu,
 )
 from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtGui import QAction
 from signal_bus import signal_bus
 from dicom_engine import DicomLoader, MeshSet
 from screens.mpr_view import MPRView
@@ -88,7 +89,10 @@ class Viewer3D(QWidget):
 
         # Null VTK style: keeps our camera controls working while blocking
         # VTK's own mouse-drag-orbit so air-mouse clicks can't grab the camera.
-        self.plotter.iren.interactor.SetInteractorStyle(vtk.vtkInteractorStyleUser())
+        import weakref
+        style = vtk.vtkInteractorStyleUser()
+        style._parent = weakref.ref(self.plotter.iren)
+        self.plotter.iren.interactor.SetInteractorStyle(style)
 
         # Viewer state
         self.bone_actor         = None
@@ -226,175 +230,466 @@ class Viewer3D(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
-        # ── Top info bar with View Mode Switcher ──────────────────────────────
-        top_row = QHBoxLayout()
-        top_row.setContentsMargins(8, 4, 8, 4)
-        top_row.setSpacing(6)
+        # ── Responsive Two-Row Header Toolbar (MPR-Style Compact Architecture) ─
+        toolbar_container = QVBoxLayout()
+        toolbar_container.setContentsMargins(8, 3, 8, 3)
+        toolbar_container.setSpacing(3)
 
-        # View Mode switcher: [ 🧊 3D Volume ] [ 📐 MPR Slices ]
+        row_top = QHBoxLayout()
+        row_top.setContentsMargins(0, 0, 0, 0)
+        row_top.setSpacing(5)
+
+        row_bottom = QHBoxLayout()
+        row_bottom.setContentsMargins(0, 0, 0, 0)
+        row_bottom.setSpacing(5)
+
+        def _make_vsep():
+            sep = QFrame()
+            sep.setFrameShape(QFrame.Shape.VLine)
+            sep.setFrameShadow(QFrame.Shadow.Sunken)
+            sep.setStyleSheet("color: #242424; background-color: #242424; width: 1px; max-height: 18px;")
+            return sep
+
+        def _make_group_lbl(text):
+            lbl = QLabel(text)
+            lbl.setStyleSheet("color: #555; font-size: 9px; font-weight: 700; margin-right: 2px; text-transform: uppercase;")
+            return lbl
+
+        btn_style_base = (
+            "QPushButton { background: #141414; color: #aaa; border: 1px solid #282828; "
+            "border-radius: 4px; font-size: 9px; font-weight: 600; padding: 0 6px; } "
+            "QPushButton:hover { background: #1f1f1f; color: #eee; border-color: #444; } "
+            "QPushButton::menu-indicator { image: none; width: 0px; }"
+        )
+
+        menu_style = (
+            "QMenu { background: #121212; color: #ccc; border: 1px solid #2c2c2c; padding: 4px; }"
+            "QMenu::item { padding: 5px 18px; font-size: 10px; border-radius: 3px; }"
+            "QMenu::item:selected { background: #002e3b; color: #00e5ff; }"
+            "QMenu::separator { height: 1px; background: #222; margin: 3px 6px; }"
+        )
+
+        # ── Group 1: VIEW (Row 1) ─────────────────────────────────────────────
+        row_top.addWidget(_make_group_lbl("VIEW:"))
+
         self.btn_3d_mode = QPushButton("🧊 3D Volume")
         self.btn_3d_mode.setCheckable(True)
         self.btn_3d_mode.setChecked(True)
         self.btn_3d_mode.setFixedHeight(24)
         self.btn_3d_mode.setStyleSheet(
-            "QPushButton { background: #1a1a1a; color: #888; border: 1px solid #333; "
-            "border-radius: 4px; font-size: 10px; font-weight: 600; padding: 0 10px; }"
+            btn_style_base +
             "QPushButton:checked { background: #1a2a1a; color: #7cfc00; border-color: #3a5a3a; }"
         )
         self.btn_3d_mode.clicked.connect(lambda: self._switch_view_mode(0))
+        row_top.addWidget(self.btn_3d_mode)
 
         self.btn_mpr_mode = QPushButton("📐 MPR Slices")
         self.btn_mpr_mode.setCheckable(True)
         self.btn_mpr_mode.setChecked(False)
         self.btn_mpr_mode.setFixedHeight(24)
         self.btn_mpr_mode.setStyleSheet(
-            "QPushButton { background: #1a1a1a; color: #888; border: 1px solid #333; "
-            "border-radius: 4px; font-size: 10px; font-weight: 600; padding: 0 10px; }"
+            btn_style_base +
             "QPushButton:checked { background: #1a2a1a; color: #7cfc00; border-color: #3a5a3a; }"
         )
         self.btn_mpr_mode.clicked.connect(lambda: self._switch_view_mode(1))
+        row_top.addWidget(self.btn_mpr_mode)
 
         self.btn_toggle_2d = QPushButton("🖼 2D Slice: OFF")
         self.btn_toggle_2d.setCheckable(True)
         self.btn_toggle_2d.setChecked(False)
         self.btn_toggle_2d.setFixedHeight(24)
         self.btn_toggle_2d.setStyleSheet(
-            "QPushButton { background: #1a1a1a; color: #888; border: 1px solid #333; "
-            "border-radius: 4px; font-size: 10px; font-weight: 600; padding: 0 10px; }"
+            btn_style_base +
             "QPushButton:checked { background: #00222a; color: #00e5ff; border-color: #00b4d8; }"
-            "QPushButton:hover { color: #ccc; }"
         )
         self.btn_toggle_2d.clicked.connect(self._on_toggle_2d_clicked)
+        row_top.addWidget(self.btn_toggle_2d)
 
-        # ── Synchronized 2D ↔ 3D Controls ─────────────────────────────────────
-        self.btn_sync_toggle = QPushButton("🔗 Sync 2D↔3D: OFF")
+        row_top.addWidget(_make_vsep())
+
+        # ── Group 2: TOOLS (Row 1) ────────────────────────────────────────────
+        row_top.addWidget(_make_group_lbl("TOOLS:"))
+
+        # Measure dropdown button
+        self.btn_measure_3d = QPushButton("📏 Measure: OFF ▼")
+        self.btn_measure_3d.setCheckable(True)
+        self.btn_measure_3d.setChecked(False)
+        self.btn_measure_3d.setFixedHeight(24)
+        self.btn_measure_3d.setStyleSheet(
+            btn_style_base +
+            "QPushButton:checked { background: #2a2200; color: #ffea00; border-color: #ffd600; }"
+        )
+        self.menu_measure = QMenu(self.btn_measure_3d)
+        self.menu_measure.setStyleSheet(menu_style)
+        self.act_measure_dist = QAction("📏 Distance (Point-to-Point)", self)
+        self.act_measure_dist.setCheckable(True)
+        self.act_measure_dist.setChecked(False)
+        self.act_measure_dist.triggered.connect(lambda: self.set_measuring_3d(not self._measuring_3d))
+        self.menu_measure.addAction(self.act_measure_dist)
+
+        self.act_measure_vis = QAction("👁 Show / Hide Measurements", self)
+        self.act_measure_vis.setCheckable(True)
+        self.act_measure_vis.setChecked(True)
+        self.act_measure_vis.triggered.connect(lambda: self.set_measurements_3d_visible(not self._measurements_3d_visible))
+        self.menu_measure.addAction(self.act_measure_vis)
+
+        self.menu_measure.addSeparator()
+        self.act_measure_clear = QAction("🗑 Clear All Measurements", self)
+        self.act_measure_clear.triggered.connect(self.clear_all_measurements)
+        self.menu_measure.addAction(self.act_measure_clear)
+        self.btn_measure_3d.setMenu(self.menu_measure)
+        row_top.addWidget(self.btn_measure_3d)
+
+        # Retained legacy buttons for test suite compatibility
+        self.btn_measure_3d_vis = QPushButton("👁 Measure: ON")
+        self.btn_measure_3d_vis.setCheckable(True)
+        self.btn_measure_3d_vis.setChecked(True)
+        self.btn_measure_3d_vis.setVisible(False)
+        self.btn_measure_3d_vis.clicked.connect(self._on_measure_3d_vis_clicked)
+
+        self.btn_clear_measure_3d = QPushButton("🗑 Clear")
+        self.btn_clear_measure_3d.setVisible(False)
+        self.btn_clear_measure_3d.clicked.connect(self.clear_all_measurements)
+
+        # Clip dropdown button
+        self.btn_clip_toggle = QPushButton("✂ Clip: OFF ▼")
+        self.btn_clip_toggle.setCheckable(True)
+        self.btn_clip_toggle.setChecked(False)
+        self.btn_clip_toggle.setFixedHeight(24)
+        self.btn_clip_toggle.setStyleSheet(
+            btn_style_base +
+            "QPushButton:checked { background: #00222a; color: #00e5ff; border-color: #00b4d8; }"
+        )
+        self.menu_clip = QMenu(self.btn_clip_toggle)
+        self.menu_clip.setStyleSheet(menu_style)
+        self.act_clip_enable = QAction("✂ Enable Clipping Plane", self)
+        self.act_clip_enable.setCheckable(True)
+        self.act_clip_enable.setChecked(False)
+        self.act_clip_enable.triggered.connect(lambda: self.set_clipping(not self._clip_active))
+        self.menu_clip.addAction(self.act_clip_enable)
+
+        menu_axis = self.menu_clip.addMenu("📐 Plane Axis")
+        menu_axis.setStyleSheet(menu_style)
+        self.act_clip_x = QAction("X Axis (Sagittal)", self)
+        self.act_clip_x.triggered.connect(lambda: self.set_clip_axis("x"))
+        menu_axis.addAction(self.act_clip_x)
+        self.act_clip_y = QAction("Y Axis (Coronal)", self)
+        self.act_clip_y.triggered.connect(lambda: self.set_clip_axis("y"))
+        menu_axis.addAction(self.act_clip_y)
+        self.act_clip_z = QAction("Z Axis (Axial)", self)
+        self.act_clip_z.triggered.connect(lambda: self.set_clip_axis("z"))
+        menu_axis.addAction(self.act_clip_z)
+
+        self.act_clip_rev = QAction("⇄ Reverse Direction", self)
+        self.act_clip_rev.triggered.connect(self.reverse_clip_direction)
+        self.menu_clip.addAction(self.act_clip_rev)
+        self.btn_clip_toggle.setMenu(self.menu_clip)
+        row_top.addWidget(self.btn_clip_toggle)
+
+        # Presets dropdown button
+        self.btn_presets_menu = QPushButton("🎨 Presets ▼")
+        self.btn_presets_menu.setFixedHeight(24)
+        self.btn_presets_menu.setStyleSheet(btn_style_base)
+        self.menu_presets = QMenu(self.btn_presets_menu)
+        self.menu_presets.setStyleSheet(menu_style)
+        self.act_preset_bone = QAction("🦴 Normal Bone View", self)
+        self.act_preset_bone.triggered.connect(lambda: self._select_preset("Bone"))
+        self.menu_presets.addAction(self.act_preset_bone)
+        self.act_preset_density = QAction("🌡 Hounsfield Heatmap", self)
+        self.act_preset_density.triggered.connect(lambda: self.combo_bone_mode.setCurrentIndex(1))
+        self.menu_presets.addAction(self.act_preset_density)
+        self.act_preset_soft = QAction("🥩 Soft Tissue Window", self)
+        self.act_preset_soft.triggered.connect(lambda: self._select_preset("Soft Tissue"))
+        self.menu_presets.addAction(self.act_preset_soft)
+        self.act_preset_lung = QAction("🫁 Lung Window", self)
+        self.act_preset_lung.triggered.connect(lambda: self._select_preset("Lung"))
+        self.menu_presets.addAction(self.act_preset_lung)
+        self.btn_presets_menu.setMenu(self.menu_presets)
+        row_top.addWidget(self.btn_presets_menu)
+
+        # Segmented buttons for Bone Mode (Touchless & Air-Mouse Optimized)
+        self.btn_bone_normal = QPushButton("🦴 Normal")
+        self.btn_bone_normal.setCheckable(True)
+        self.btn_bone_normal.setChecked(True)
+        self.btn_bone_normal.setFixedHeight(24)
+        self.btn_bone_normal.setStyleSheet(
+            btn_style_base +
+            "QPushButton:checked { background: #00222a; color: #00e5ff; border-color: #00b4d8; font-weight: bold; }"
+        )
+        self.btn_bone_normal.clicked.connect(lambda: self._set_bone_mode_index(0))
+        row_top.addWidget(self.btn_bone_normal)
+
+        self.btn_bone_heatmap = QPushButton("🌡 Heatmap")
+        self.btn_bone_heatmap.setCheckable(True)
+        self.btn_bone_heatmap.setChecked(False)
+        self.btn_bone_heatmap.setFixedHeight(24)
+        self.btn_bone_heatmap.setStyleSheet(
+            btn_style_base +
+            "QPushButton:checked { background: #00222a; color: #00e5ff; border-color: #00b4d8; font-weight: bold; }"
+        )
+        self.btn_bone_heatmap.clicked.connect(lambda: self._set_bone_mode_index(1))
+        row_top.addWidget(self.btn_bone_heatmap)
+
+        # Retained combo_bone_mode for test suite
+        self.combo_bone_mode = QComboBox()
+        self.combo_bone_mode.addItem("🦴 Normal Bone View")
+        self.combo_bone_mode.addItem("🌡 Hounsfield Heatmap")
+        self.combo_bone_mode.setVisible(False)
+        self.combo_bone_mode.currentIndexChanged.connect(self._on_bone_mode_changed)
+
+        # Reset / Views menu button
+        self.btn_reset_view = QPushButton("↺ Reset View ▼")
+        self.btn_reset_view.setFixedHeight(24)
+        self.btn_reset_view.setStyleSheet(btn_style_base)
+        self.menu_views = QMenu(self.btn_reset_view)
+        self.menu_views.setStyleSheet(menu_style)
+        act_reset = QAction("↺ Reset Camera View", self)
+        act_reset.triggered.connect(lambda: self.snap_to_view("reset"))
+        self.menu_views.addAction(act_reset)
+        self.menu_views.addSeparator()
+        for name, cmd in [
+            ("Anterior (Front)", "anterior"),
+            ("Posterior (Back)", "posterior"),
+            ("Left Lateral", "left_lateral"),
+            ("Right Lateral", "right_lateral"),
+            ("Superior (Top)", "superior"),
+            ("Inferior (Bottom)", "inferior"),
+        ]:
+            act_snap = QAction(name, self)
+            act_snap.triggered.connect(lambda checked, c=cmd: self.snap_to_view(c))
+            self.menu_views.addAction(act_snap)
+        self.menu_views.addSeparator()
+        act_spin_start = QAction("▶ Start Spin", self)
+        act_spin_start.triggered.connect(self.start_spin)
+        self.menu_views.addAction(act_spin_start)
+        act_spin_stop = QAction("■ Stop Spin", self)
+        act_spin_stop.triggered.connect(self.stop_spin)
+        self.menu_views.addAction(act_spin_stop)
+        self.act_ghost = QAction("👁 3D Ghost Slice", self)
+        self.act_ghost.setCheckable(True)
+        self.act_ghost.triggered.connect(self._toggle_ghost_plane)
+        self.menu_views.addAction(self.act_ghost)
+        self.btn_reset_view.setMenu(self.menu_views)
+        row_top.addWidget(self.btn_reset_view)
+
+        # Retained spin/ghost buttons for backwards compatibility
+        self.btn_start_spin = QPushButton("▶ Start Spin")
+        self.btn_start_spin.setVisible(False)
+        self.btn_start_spin.clicked.connect(self.start_spin)
+        self.btn_stop_spin = QPushButton("■ Stop Spin")
+        self.btn_stop_spin.setVisible(False)
+        self.btn_stop_spin.clicked.connect(self.stop_spin)
+        self.btn_ghost_plane = QPushButton("👁 3D Ghost Slice: OFF")
+        self.btn_ghost_plane.setCheckable(True)
+        self.btn_ghost_plane.setVisible(False)
+        self.btn_ghost_plane.clicked.connect(self._toggle_ghost_plane)
+
+        row_top.addStretch(1)
+
+        # ── Group 3: DISPLAY (Row 2) ──────────────────────────────────────────
+        row_bottom.addWidget(_make_group_lbl("DISPLAY:"))
+
+        lbl_op = QLabel("Opacity:")
+        lbl_op.setStyleSheet("color: #666; font-size: 9px; font-weight: 600; text-transform: uppercase;")
+        row_bottom.addWidget(lbl_op)
+
+        self.lbl_opacity = QLabel("100%")
+        self.lbl_opacity.setStyleSheet("color: #00e5ff; font-size: 9px; font-weight: 600; min-width: 28px;")
+        row_bottom.addWidget(self.lbl_opacity)
+
+        self.slider_opacity = QSlider(Qt.Orientation.Horizontal)
+        self.slider_opacity.setRange(10, 100)
+        self.slider_opacity.setValue(100)
+        self.slider_opacity.setFixedHeight(22)
+        self.slider_opacity.setFixedWidth(75)
+        self.slider_opacity.setStyleSheet(
+            "QSlider::groove:horizontal { height: 4px; background: #222; border-radius: 2px; }"
+            "QSlider::sub-page:horizontal { background: #0088a8; border-radius: 2px; }"
+            "QSlider::handle:horizontal { background: #00e5ff; border: 1px solid #00b4d8; width: 10px; margin-top: -3px; margin-bottom: -3px; border-radius: 5px; }"
+            "QSlider::handle:horizontal:hover { background: #fff; border-color: #00e5ff; }"
+        )
+        self.slider_opacity.valueChanged.connect(self._on_opacity_slider_changed)
+        row_bottom.addWidget(self.slider_opacity)
+
+        # Clipping controls in DISPLAY group (contextual)
+        self.lbl_clip_pos = QLabel("Clip: 50%")
+        self.lbl_clip_pos.setStyleSheet("color: #444; font-size: 9px; font-weight: 600; min-width: 50px;")
+        row_bottom.addWidget(self.lbl_clip_pos)
+
+        self.slider_clip_pos = QSlider(Qt.Orientation.Horizontal)
+        self.slider_clip_pos.setRange(0, 100)
+        self.slider_clip_pos.setValue(50)
+        self.slider_clip_pos.setFixedHeight(22)
+        self.slider_clip_pos.setFixedWidth(70)
+        self.slider_clip_pos.setEnabled(False)
+        self.slider_clip_pos.setStyleSheet(
+            "QSlider::groove:horizontal { height: 4px; background: #222; border-radius: 2px; }"
+            "QSlider::sub-page:horizontal { background: #0088a8; border-radius: 2px; }"
+            "QSlider::handle:horizontal { background: #00e5ff; border: 1px solid #00b4d8; width: 10px; margin-top: -3px; margin-bottom: -3px; border-radius: 5px; }"
+            "QSlider::handle:horizontal:hover { background: #fff; border-color: #00e5ff; }"
+            "QSlider:disabled { background: transparent; }"
+        )
+        self.slider_clip_pos.valueChanged.connect(self._on_clip_slider_changed)
+        row_bottom.addWidget(self.slider_clip_pos)
+
+        self.btn_clip_reverse = QPushButton("⇄")
+        self.btn_clip_reverse.setToolTip("Reverse Clipping Direction")
+        self.btn_clip_reverse.setFixedSize(22, 22)
+        self.btn_clip_reverse.setEnabled(False)
+        self.btn_clip_reverse.setStyleSheet(
+            "QPushButton { background: #141414; color: #888; border: 1px solid #282828; border-radius: 3px; font-size: 10px; }"
+            "QPushButton:hover { background: #222; color: #eee; border-color: #444; }"
+            "QPushButton:disabled { color: #333; border-color: #1a1a1a; }"
+        )
+        self.btn_clip_reverse.clicked.connect(self.reverse_clip_direction)
+        row_bottom.addWidget(self.btn_clip_reverse)
+
+        self.combo_clip_axis = QComboBox()
+        self.combo_clip_axis.addItem("X")
+        self.combo_clip_axis.addItem("Y")
+        self.combo_clip_axis.addItem("Z")
+        self.combo_clip_axis.setCurrentIndex(1)
+        self.combo_clip_axis.setEnabled(False)
+        self.combo_clip_axis.setFixedSize(40, 22)
+        self.combo_clip_axis.setStyleSheet(
+            "QComboBox { background: #141414; color: #bbb; border: 1px solid #282828; border-radius: 3px; font-size: 9px; font-weight: 600; padding: 0 4px; }"
+            "QComboBox:disabled { color: #444; border-color: #1a1a1a; }"
+            "QComboBox::drop-down { border: none; width: 12px; }"
+            "QComboBox QAbstractItemView { background: #111; color: #ddd; selection-background-color: #003344; selection-color: #00e5ff; border: 1px solid #333; }"
+        )
+        self.combo_clip_axis.currentIndexChanged.connect(self._on_clip_axis_changed)
+        row_bottom.addWidget(self.combo_clip_axis)
+
+        # Segmented buttons for Axis (Touchless & Air-Mouse Optimized)
+        self.btn_axis_x = QPushButton("X")
+        self.btn_axis_x.setCheckable(True)
+        self.btn_axis_x.setChecked(False)
+        self.btn_axis_x.setEnabled(False)
+        self.btn_axis_x.setFixedSize(22, 22)
+        self.btn_axis_x.setStyleSheet(
+            "QPushButton { background: #141414; color: #888; border: 1px solid #282828; "
+            "border-radius: 3px; font-size: 9px; font-weight: bold; } "
+            "QPushButton:checked { background: #00222a; color: #00e5ff; border: 1px solid #00b4d8; } "
+            "QPushButton:disabled { color: #333; border-color: #1a1a1a; background: #0e0e0e; } "
+            "QPushButton:hover:!disabled { background: #222; color: #eee; }"
+        )
+        self.btn_axis_x.clicked.connect(lambda: self._set_clip_axis_index(0))
+        row_bottom.addWidget(self.btn_axis_x)
+
+        self.btn_axis_y = QPushButton("Y")
+        self.btn_axis_y.setCheckable(True)
+        self.btn_axis_y.setChecked(True)
+        self.btn_axis_y.setEnabled(False)
+        self.btn_axis_y.setFixedSize(22, 22)
+        self.btn_axis_y.setStyleSheet(
+            "QPushButton { background: #141414; color: #888; border: 1px solid #282828; "
+            "border-radius: 3px; font-size: 9px; font-weight: bold; } "
+            "QPushButton:checked { background: #00222a; color: #00e5ff; border: 1px solid #00b4d8; } "
+            "QPushButton:disabled { color: #333; border-color: #1a1a1a; background: #0e0e0e; } "
+            "QPushButton:hover:!disabled { background: #222; color: #eee; }"
+        )
+        self.btn_axis_y.clicked.connect(lambda: self._set_clip_axis_index(1))
+        row_bottom.addWidget(self.btn_axis_y)
+
+        self.btn_axis_z = QPushButton("Z")
+        self.btn_axis_z.setCheckable(True)
+        self.btn_axis_z.setChecked(False)
+        self.btn_axis_z.setEnabled(False)
+        self.btn_axis_z.setFixedSize(22, 22)
+        self.btn_axis_z.setStyleSheet(
+            "QPushButton { background: #141414; color: #888; border: 1px solid #282828; "
+            "border-radius: 3px; font-size: 9px; font-weight: bold; } "
+            "QPushButton:checked { background: #00222a; color: #00e5ff; border: 1px solid #00b4d8; } "
+            "QPushButton:disabled { color: #333; border-color: #1a1a1a; background: #0e0e0e; } "
+            "QPushButton:hover:!disabled { background: #222; color: #eee; }"
+        )
+        self.btn_axis_z.clicked.connect(lambda: self._set_clip_axis_index(2))
+        row_bottom.addWidget(self.btn_axis_z)
+
+        # Initially hidden until clipping is activated
+        self.lbl_clip_pos.setVisible(False)
+        self.slider_clip_pos.setVisible(False)
+        self.btn_clip_reverse.setVisible(False)
+        self.combo_clip_axis.setVisible(False)
+        self.btn_axis_x.setVisible(False)
+        self.btn_axis_y.setVisible(False)
+        self.btn_axis_z.setVisible(False)
+
+        row_bottom.addWidget(_make_vsep())
+
+        # ── Group 4: SYNCHRONIZATION (Row 2) ──────────────────────────────────
+        row_bottom.addWidget(_make_group_lbl("SYNC:"))
+
+        self.btn_sync_toggle = QPushButton("🔗 Sync 2D ↔ 3D")
         self.btn_sync_toggle.setCheckable(True)
         self.btn_sync_toggle.setChecked(False)
         self.btn_sync_toggle.setFixedHeight(24)
         self.btn_sync_toggle.setStyleSheet(
-            "QPushButton { background: #1a1a1a; color: #888; border: 1px solid #333; "
-            "border-radius: 4px; font-size: 10px; font-weight: 600; padding: 0 8px; }"
+            btn_style_base +
             "QPushButton:checked { background: #00222a; color: #00e5ff; border-color: #00b4d8; }"
-            "QPushButton:hover { color: #ccc; }"
         )
         self.btn_sync_toggle.clicked.connect(self._on_sync_toggle_clicked)
+        row_bottom.addWidget(self.btn_sync_toggle)
 
+        # Retained sync sub-controls for tests & options menu
         self.btn_sync_marker = QPushButton("📍 3D Marker: ON")
         self.btn_sync_marker.setCheckable(True)
         self.btn_sync_marker.setChecked(True)
-        self.btn_sync_marker.setFixedHeight(24)
-        self.btn_sync_marker.setStyleSheet(
-            "QPushButton { background: #1a1a1a; color: #888; border: 1px solid #333; "
-            "border-radius: 4px; font-size: 10px; font-weight: 600; padding: 0 8px; }"
-            "QPushButton:checked { background: #00222a; color: #00e5ff; border-color: #00b4d8; }"
-            "QPushButton:hover { color: #ccc; }"
-        )
+        self.btn_sync_marker.setVisible(False)
         self.btn_sync_marker.clicked.connect(self._on_sync_marker_clicked)
 
         self.btn_sync_crosshair = QPushButton("🎯 Crosshair: ON")
         self.btn_sync_crosshair.setCheckable(True)
         self.btn_sync_crosshair.setChecked(True)
-        self.btn_sync_crosshair.setFixedHeight(24)
-        self.btn_sync_crosshair.setStyleSheet(
-            "QPushButton { background: #1a1a1a; color: #888; border: 1px solid #333; "
-            "border-radius: 4px; font-size: 10px; font-weight: 600; padding: 0 8px; }"
-            "QPushButton:checked { background: #00222a; color: #00e5ff; border-color: #00b4d8; }"
-            "QPushButton:hover { color: #ccc; }"
-        )
+        self.btn_sync_crosshair.setVisible(False)
         self.btn_sync_crosshair.clicked.connect(self._on_sync_crosshair_clicked)
 
         self.btn_sync_clip = QPushButton("✂ Link Clip: OFF")
         self.btn_sync_clip.setCheckable(True)
         self.btn_sync_clip.setChecked(False)
-        self.btn_sync_clip.setFixedHeight(24)
-        self.btn_sync_clip.setStyleSheet(
-            "QPushButton { background: #1a1a1a; color: #888; border: 1px solid #333; "
-            "border-radius: 4px; font-size: 10px; font-weight: 600; padding: 0 8px; }"
-            "QPushButton:checked { background: #00222a; color: #00e5ff; border-color: #00b4d8; }"
-            "QPushButton:hover { color: #ccc; }"
-        )
+        self.btn_sync_clip.setVisible(False)
         self.btn_sync_clip.clicked.connect(self._on_sync_clip_clicked)
 
-        # ── 3D Distance Measurement Controls ──────────────────────────────────
-        self.btn_measure_3d = QPushButton("📏 Measure: OFF")
-        self.btn_measure_3d.setCheckable(True)
-        self.btn_measure_3d.setChecked(False)
-        self.btn_measure_3d.setFixedHeight(24)
-        self.btn_measure_3d.setStyleSheet(
-            "QPushButton { background: #1a1a1a; color: #888; border: 1px solid #333; "
-            "border-radius: 4px; font-size: 10px; font-weight: 600; padding: 0 8px; }"
-            "QPushButton:checked { background: #2a2200; color: #ffea00; border-color: #ffd600; }"
-            "QPushButton:hover { color: #ccc; }"
-        )
-        self.btn_measure_3d.clicked.connect(self._on_measure_3d_btn_clicked)
+        row_bottom.addWidget(_make_vsep())
 
-        self.btn_measure_3d_vis = QPushButton("👁 Measure: ON")
-        self.btn_measure_3d_vis.setCheckable(True)
-        self.btn_measure_3d_vis.setChecked(True)
-        self.btn_measure_3d_vis.setFixedHeight(24)
-        self.btn_measure_3d_vis.setStyleSheet(
-            "QPushButton { background: #1a1a1a; color: #888; border: 1px solid #333; "
-            "border-radius: 4px; font-size: 10px; font-weight: 600; padding: 0 8px; }"
-            "QPushButton:checked { background: #1a1a1a; color: #00e5ff; border-color: #00b4d8; }"
-            "QPushButton:hover { color: #ccc; }"
-        )
-        self.btn_measure_3d_vis.clicked.connect(self._on_measure_3d_vis_clicked)
+        # ── Group 5: MORE (Row 2) ─────────────────────────────────────────────
+        row_bottom.addWidget(_make_group_lbl("MORE:"))
 
-        self.btn_clear_measure_3d = QPushButton("🗑 Clear")
-        self.btn_clear_measure_3d.setFixedHeight(24)
-        self.btn_clear_measure_3d.setStyleSheet(
-            "QPushButton { background: #1a1a1a; color: #888; border: 1px solid #333; "
-            "border-radius: 4px; font-size: 10px; font-weight: 600; padding: 0 8px; }"
-            "QPushButton:hover { color: #ff5555; border-color: #ff5555; }"
-        )
-        self.btn_clear_measure_3d.clicked.connect(self.clear_measurements_3d)
-
-        # ── Study Information & Scan Metadata Button ─────────────────────────
         self.btn_study_info = QPushButton("📋 Study Info")
         self.btn_study_info.setCheckable(True)
         self.btn_study_info.setChecked(False)
         self.btn_study_info.setFixedHeight(24)
         self.btn_study_info.setStyleSheet(
-            "QPushButton { background: #1a1a1a; color: #888; border: 1px solid #333; "
-            "border-radius: 4px; font-size: 10px; font-weight: 600; padding: 0 8px; }"
+            btn_style_base +
             "QPushButton:checked { background: #00222a; color: #00e5ff; border-color: #00b4d8; }"
-            "QPushButton:hover { color: #ccc; }"
         )
         self.btn_study_info.clicked.connect(self.toggle_study_info)
+        row_bottom.addWidget(self.btn_study_info)
 
-        top_row.addWidget(self.btn_3d_mode)
-        top_row.addWidget(self.btn_mpr_mode)
-        top_row.addWidget(self.btn_toggle_2d)
-        top_row.addWidget(self.btn_sync_toggle)
-        top_row.addWidget(self.btn_sync_marker)
-        top_row.addWidget(self.btn_sync_crosshair)
-        top_row.addWidget(self.btn_sync_clip)
-        top_row.addWidget(self.btn_measure_3d)
-        top_row.addWidget(self.btn_measure_3d_vis)
-        top_row.addWidget(self.btn_clear_measure_3d)
-        top_row.addWidget(self.btn_study_info)
-        top_row.addSpacing(10)
+        self.btn_export_report = QPushButton("📄 Export Report")
+        self.btn_export_report.setFixedHeight(24)
+        self.btn_export_report.setStyleSheet(btn_style_base)
+        self.btn_export_report.clicked.connect(self.export_case_report)
+        row_bottom.addWidget(self.btn_export_report)
+
+        self.switch_btn = QPushButton("↩ Switch Scan")
+        self.switch_btn.setFixedHeight(24)
+        self.switch_btn.setStyleSheet(btn_style_base)
+        self.switch_btn.clicked.connect(lambda: self.state_stack.setCurrentIndex(self._PAGE_SELECT))
+        row_bottom.addWidget(self.switch_btn)
+
+        row_bottom.addWidget(_make_vsep())
 
         self.info_bar = QLabel("")
-        self.info_bar.setStyleSheet("color: #777; font-size: 10px; font-weight: 500;")
-        top_row.addWidget(self.info_bar, stretch=1)
+        self.info_bar.setStyleSheet("color: #7cfc00; font-size: 10px; font-weight: 500;")
+        row_bottom.addWidget(self.info_bar, stretch=1)
 
-        # Switch scan button
-        switch_btn = QPushButton("↩ Switch Scan")
-        switch_btn.setFixedHeight(24)
-        switch_btn.setStyleSheet(
-            "QPushButton { background: #1a1a1a; color: #888; border: 1px solid #333;"
-            " border-radius: 4px; font-size: 10px; padding: 0 8px; }"
-            "QPushButton:hover { color: #ccc; border-color: #555; }"
-        )
-        switch_btn.clicked.connect(
-            lambda: self.state_stack.setCurrentIndex(self._PAGE_SELECT)
-        )
-        top_row.addWidget(switch_btn)
+        toolbar_container.addLayout(row_top)
+        toolbar_container.addLayout(row_bottom)
 
         info_bar_widget = QWidget()
-        info_bar_widget.setStyleSheet("background: #0f0f0f; border-bottom: 1px solid #1a1a1a;")
-        info_bar_widget.setLayout(top_row)
+        info_bar_widget.setStyleSheet("background: #0d0d0d; border-bottom: 1px solid #1c1c1c;")
+        info_bar_widget.setLayout(toolbar_container)
         outer.addWidget(info_bar_widget)
 
         # ── Content row: view stack (3D or MPR) + sidebar ────────────────────
@@ -405,304 +700,16 @@ class Viewer3D(QWidget):
 
         self.view_mode_stack = QStackedWidget()
 
-        # 1. 3D View Container
+        # 1. 3D View Container (clean, spacious viewport layout)
         self.container_3d = QWidget()
         self.container_3d.resizeEvent = self._on_container_3d_resized
         container_3d = self.container_3d
         layout_3d = QVBoxLayout(container_3d)
         layout_3d.setContentsMargins(0, 0, 0, 0)
         layout_3d.setSpacing(0)
-
-        # Snap views toolbar (discrete 90° anatomical turns)
-        snap_bar = QHBoxLayout()
-        snap_bar.setContentsMargins(8, 4, 8, 4)
-        snap_bar.setSpacing(4)
-        snap_lbl = QLabel("90° Snap:")
-        snap_lbl.setStyleSheet("color: #555; font-size: 9px; font-weight: 600; text-transform: uppercase;")
-        snap_bar.addWidget(snap_lbl)
-
-        for name, cmd in [
-            ("Anterior", "anterior"),
-            ("Posterior", "posterior"),
-            ("Left Lat", "left_lateral"),
-            ("Right Lat", "right_lateral"),
-            ("Superior", "superior"),
-            ("Inferior", "inferior"),
-            ("Reset", "reset"),
-        ]:
-            s_btn = QPushButton(name)
-            s_btn.setFixedHeight(22)
-            s_btn.setStyleSheet(
-                "QPushButton { background: #141414; color: #888; border: 1px solid #282828; "
-                "border-radius: 3px; font-size: 9px; padding: 0 6px; }"
-                "QPushButton:hover { background: #222; color: #eee; border-color: #444; }"
-                "QPushButton:pressed { background: #00e5ff; color: #000; font-weight: bold; border-color: #00e5ff; }"
-            )
-            s_btn.clicked.connect(lambda checked, c=cmd: self.snap_to_view(c))
-            snap_bar.addWidget(s_btn)
-
-        # Slow automatic rotation controls
-        self.btn_start_spin = QPushButton("▶ Start Spin")
-        self.btn_start_spin.setFixedHeight(22)
-        self.btn_start_spin.setStyleSheet(
-            "QPushButton { background: #141414; color: #888; "
-            "border: 1px solid #282828; border-radius: 3px; "
-            "font-size: 9px; padding: 0 7px; }"
-            "QPushButton:hover { background: #202020; color: #00e5ff; "
-            "border-color: #00e5ff; }"
-        )
-        self.btn_start_spin.clicked.connect(self.start_spin)
-        snap_bar.addWidget(self.btn_start_spin)
-
-        self.btn_stop_spin = QPushButton("■ Stop Spin")
-        self.btn_stop_spin.setFixedHeight(22)
-        self.btn_stop_spin.setStyleSheet(
-            "QPushButton { background: #141414; color: #888; "
-            "border: 1px solid #282828; border-radius: 3px; "
-            "font-size: 9px; padding: 0 7px; }"
-            "QPushButton:hover { background: #202020; color: #ff7777; "
-            "border-color: #ff7777; }"
-        )
-        self.btn_stop_spin.clicked.connect(self.stop_spin)
-        snap_bar.addWidget(self.btn_stop_spin)
-
-        snap_bar.addSpacing(14)
-        self.btn_ghost_plane = QPushButton("👁 3D Ghost Slice: OFF")
-        self.btn_ghost_plane.setCheckable(True)
-        self.btn_ghost_plane.setFixedHeight(22)
-        self.btn_ghost_plane.setStyleSheet(
-            "QPushButton { background: #141414; color: #888; border: 1px solid #282828; "
-            "border-radius: 3px; font-size: 9px; padding: 0 8px; font-weight: 600; }"
-            "QPushButton:checked { background: #00222a; color: #00e5ff; border: 1px solid #00b4d8; }"
-            "QPushButton:hover { background: #222; color: #eee; }"
-        )
-        self.btn_ghost_plane.clicked.connect(self._toggle_ghost_plane)
-        snap_bar.addWidget(self.btn_ghost_plane)
-
-        snap_bar.addSpacing(14)
-        bone_mode_lbl = QLabel("Bone Mode:")
-        bone_mode_lbl.setStyleSheet("color: #555; font-size: 9px; font-weight: 600; text-transform: uppercase;")
-        snap_bar.addWidget(bone_mode_lbl)
-
-        # Segmented buttons for Bone Mode (Touchless & Air-Mouse Optimized)
-        self.btn_bone_normal = QPushButton("🦴 Normal")
-        self.btn_bone_normal.setCheckable(True)
-        self.btn_bone_normal.setChecked(True)
-        self.btn_bone_normal.setFixedHeight(22)
-        self.btn_bone_normal.setStyleSheet(
-            "QPushButton { background: #141414; color: #888; border: 1px solid #282828; "
-            "border-radius: 3px; font-size: 9px; padding: 0 8px; font-weight: 600; }"
-            "QPushButton:checked { background: #00222a; color: #00e5ff; border: 1px solid #00b4d8; font-weight: bold; }"
-            "QPushButton:hover { background: #222; color: #eee; }"
-        )
-        self.btn_bone_normal.clicked.connect(lambda: self._set_bone_mode_index(0))
-        snap_bar.addWidget(self.btn_bone_normal)
-
-        self.btn_bone_heatmap = QPushButton("🌡 Heatmap")
-        self.btn_bone_heatmap.setCheckable(True)
-        self.btn_bone_heatmap.setChecked(False)
-        self.btn_bone_heatmap.setFixedHeight(22)
-        self.btn_bone_heatmap.setStyleSheet(
-            "QPushButton { background: #141414; color: #888; border: 1px solid #282828; "
-            "border-radius: 3px; font-size: 9px; padding: 0 8px; font-weight: 600; }"
-            "QPushButton:checked { background: #00222a; color: #00e5ff; border: 1px solid #00b4d8; font-weight: bold; }"
-            "QPushButton:hover { background: #222; color: #eee; }"
-        )
-        self.btn_bone_heatmap.clicked.connect(lambda: self._set_bone_mode_index(1))
-        snap_bar.addWidget(self.btn_bone_heatmap)
-
-        self.combo_bone_mode = QComboBox()
-        self.combo_bone_mode.addItem("🦴 Normal Bone View")
-        self.combo_bone_mode.addItem("🌡 Hounsfield Heatmap")
-        self.combo_bone_mode.setFixedHeight(22)
-        self.combo_bone_mode.setVisible(False)
-        self.combo_bone_mode.currentIndexChanged.connect(self._on_bone_mode_changed)
-        snap_bar.addWidget(self.combo_bone_mode)
-
-        snap_bar.addStretch()
-
-        snap_bar_widget = QWidget()
-        snap_bar_widget.setStyleSheet("background: #0b0b0b; border-bottom: 1px solid #181818;")
-        snap_bar_widget.setLayout(snap_bar)
-        layout_3d.addWidget(snap_bar_widget)
-
-        # ── Interactive Clipping Control Strip ──────────────────────────────────
-        clip_bar = QHBoxLayout()
-        clip_bar.setContentsMargins(8, 3, 8, 3)
-        clip_bar.setSpacing(6)
-
-        clip_lbl = QLabel("✂ Clip Plane:")
-        clip_lbl.setStyleSheet("color: #555; font-size: 9px; font-weight: 600; text-transform: uppercase;")
-        clip_bar.addWidget(clip_lbl)
-
-        self.btn_clip_toggle = QPushButton("Enable")
-        self.btn_clip_toggle.setCheckable(True)
-        self.btn_clip_toggle.setChecked(False)
-        self.btn_clip_toggle.setFixedHeight(22)
-        self.btn_clip_toggle.setStyleSheet(
-            "QPushButton { background: #141414; color: #888; border: 1px solid #282828; "
-            "border-radius: 3px; font-size: 9px; padding: 0 8px; font-weight: 600; }"
-            "QPushButton:checked { background: #00222a; color: #00e5ff; border: 1px solid #00b4d8; }"
-            "QPushButton:hover { background: #222; color: #eee; }"
-        )
-        self.btn_clip_toggle.toggled.connect(self._on_clip_toggle_clicked)
-        clip_bar.addWidget(self.btn_clip_toggle)
-
-        clip_bar.addSpacing(10)
-        axis_lbl = QLabel("Axis:")
-        axis_lbl.setStyleSheet("color: #555; font-size: 9px; font-weight: 600; text-transform: uppercase;")
-        clip_bar.addWidget(axis_lbl)
-
-        # Segmented buttons for Axis (Touchless & Air-Mouse Optimized)
-        self.btn_axis_x = QPushButton("X")
-        self.btn_axis_x.setCheckable(True)
-        self.btn_axis_x.setChecked(False)
-        self.btn_axis_x.setEnabled(False)
-        self.btn_axis_x.setFixedSize(24, 22)
-        self.btn_axis_x.setStyleSheet(
-            "QPushButton { background: #141414; color: #888; border: 1px solid #282828; "
-            "border-radius: 3px; font-size: 9px; font-weight: bold; }"
-            "QPushButton:checked { background: #00222a; color: #00e5ff; border: 1px solid #00b4d8; }"
-            "QPushButton:disabled { color: #333; border-color: #1a1a1a; background: #0e0e0e; }"
-            "QPushButton:hover:!disabled { background: #222; color: #eee; }"
-        )
-        self.btn_axis_x.clicked.connect(lambda: self._set_clip_axis_index(0))
-        clip_bar.addWidget(self.btn_axis_x)
-
-        self.btn_axis_y = QPushButton("Y")
-        self.btn_axis_y.setCheckable(True)
-        self.btn_axis_y.setChecked(True)  # Default Y
-        self.btn_axis_y.setEnabled(False)
-        self.btn_axis_y.setFixedSize(24, 22)
-        self.btn_axis_y.setStyleSheet(
-            "QPushButton { background: #141414; color: #888; border: 1px solid #282828; "
-            "border-radius: 3px; font-size: 9px; font-weight: bold; }"
-            "QPushButton:checked { background: #00222a; color: #00e5ff; border: 1px solid #00b4d8; }"
-            "QPushButton:disabled { color: #333; border-color: #1a1a1a; background: #0e0e0e; }"
-            "QPushButton:hover:!disabled { background: #222; color: #eee; }"
-        )
-        self.btn_axis_y.clicked.connect(lambda: self._set_clip_axis_index(1))
-        clip_bar.addWidget(self.btn_axis_y)
-
-        self.btn_axis_z = QPushButton("Z")
-        self.btn_axis_z.setCheckable(True)
-        self.btn_axis_z.setChecked(False)
-        self.btn_axis_z.setEnabled(False)
-        self.btn_axis_z.setFixedSize(24, 22)
-        self.btn_axis_z.setStyleSheet(
-            "QPushButton { background: #141414; color: #888; border: 1px solid #282828; "
-            "border-radius: 3px; font-size: 9px; font-weight: bold; }"
-            "QPushButton:checked { background: #00222a; color: #00e5ff; border: 1px solid #00b4d8; }"
-            "QPushButton:disabled { color: #333; border-color: #1a1a1a; background: #0e0e0e; }"
-            "QPushButton:hover:!disabled { background: #222; color: #eee; }"
-        )
-        self.btn_axis_z.clicked.connect(lambda: self._set_clip_axis_index(2))
-        clip_bar.addWidget(self.btn_axis_z)
-
-        self.combo_clip_axis = QComboBox()
-        self.combo_clip_axis.addItem("X")
-        self.combo_clip_axis.addItem("Y")
-        self.combo_clip_axis.addItem("Z")
-        self.combo_clip_axis.setCurrentIndex(1)  # Default Y
-        self.combo_clip_axis.setFixedHeight(22)
-        self.combo_clip_axis.setEnabled(False)
-        self.combo_clip_axis.setVisible(False)
-        self.combo_clip_axis.currentIndexChanged.connect(self._on_clip_axis_changed)
-        clip_bar.addWidget(self.combo_clip_axis)
-
-        clip_bar.addSpacing(10)
-        self.lbl_clip_pos = QLabel("Position: 50%")
-        self.lbl_clip_pos.setStyleSheet("color: #444; font-size: 9px; font-weight: 600; min-width: 95px;")
-        clip_bar.addWidget(self.lbl_clip_pos)
-
-        self.slider_clip_pos = QSlider(Qt.Orientation.Horizontal)
-        self.slider_clip_pos.setRange(0, 100)
-        self.slider_clip_pos.setValue(50)
-        self.slider_clip_pos.setFixedHeight(22)
-        self.slider_clip_pos.setMinimumWidth(120)
-        self.slider_clip_pos.setMaximumWidth(240)
-        self.slider_clip_pos.setEnabled(False)
-        self.slider_clip_pos.setStyleSheet(
-            "QSlider::groove:horizontal {"
-            "  height: 4px; background: #222; border-radius: 2px;"
-            "}"
-            "QSlider::sub-page:horizontal {"
-            "  background: #0088a8; border-radius: 2px;"
-            "}"
-            "QSlider::handle:horizontal {"
-            "  background: #00e5ff; border: 1px solid #00b4d8; width: 12px;"
-            "  margin-top: -4px; margin-bottom: -4px; border-radius: 6px;"
-            "}"
-            "QSlider::handle:horizontal:hover {"
-            "  background: #fff; border-color: #00e5ff;"
-            "}"
-            "QSlider:disabled {"
-            "  background: transparent;"
-            "}"
-        )
-        self.slider_clip_pos.valueChanged.connect(self._on_clip_slider_changed)
-        clip_bar.addWidget(self.slider_clip_pos)
-
-        clip_bar.addSpacing(10)
-        self.btn_clip_reverse = QPushButton("⇄ Reverse Direction")
-        self.btn_clip_reverse.setFixedHeight(22)
-        self.btn_clip_reverse.setEnabled(False)
-        self.btn_clip_reverse.setStyleSheet(
-            "QPushButton { background: #141414; color: #888; border: 1px solid #282828; "
-            "border-radius: 3px; font-size: 9px; padding: 0 8px; font-weight: 600; }"
-            "QPushButton:hover { background: #222; color: #eee; border-color: #444; }"
-            "QPushButton:disabled { color: #444; border-color: #1a1a1a; }"
-            "QPushButton:pressed { background: #00e5ff; color: #000; font-weight: bold; border-color: #00e5ff; }"
-        )
-        self.btn_clip_reverse.clicked.connect(self.reverse_clip_direction)
-        clip_bar.addWidget(self.btn_clip_reverse)
-
-        clip_bar.addSpacing(16)
-        sep_op = QFrame()
-        sep_op.setFrameShape(QFrame.Shape.VLine)
-        sep_op.setFrameShadow(QFrame.Shadow.Sunken)
-        sep_op.setStyleSheet("color: #222; background-color: #222; width: 1px; max-height: 18px;")
-        clip_bar.addWidget(sep_op)
-        clip_bar.addSpacing(12)
-
-        opacity_lbl = QLabel("Opacity:")
-        opacity_lbl.setStyleSheet("color: #555; font-size: 9px; font-weight: 600; text-transform: uppercase;")
-        clip_bar.addWidget(opacity_lbl)
-
-        self.lbl_opacity = QLabel("100%")
-        self.lbl_opacity.setStyleSheet("color: #00e5ff; font-size: 9px; font-weight: 600; min-width: 32px;")
-        clip_bar.addWidget(self.lbl_opacity)
-
-        self.slider_opacity = QSlider(Qt.Orientation.Horizontal)
-        self.slider_opacity.setRange(10, 100)
-        self.slider_opacity.setValue(100)
-        self.slider_opacity.setFixedHeight(22)
-        self.slider_opacity.setMinimumWidth(80)
-        self.slider_opacity.setMaximumWidth(130)
-        self.slider_opacity.setStyleSheet(
-            "QSlider::groove:horizontal {"
-            "  height: 4px; background: #222; border-radius: 2px;"
-            "}"
-            "QSlider::sub-page:horizontal {"
-            "  background: #0088a8; border-radius: 2px;"
-            "}"
-            "QSlider::handle:horizontal {"
-            "  background: #00e5ff; border: 1px solid #00b4d8; width: 12px;"
-            "  margin-top: -4px; margin-bottom: -4px; border-radius: 6px;"
-            "}"
-            "QSlider::handle:horizontal:hover {"
-            "  background: #fff; border-color: #00e5ff;"
-            "}"
-        )
-        self.slider_opacity.valueChanged.connect(self._on_opacity_slider_changed)
-        clip_bar.addWidget(self.slider_opacity)
-
-        clip_bar.addStretch()
-
+        # Placeholders to preserve attributes without cluttering the screen
+        self.snap_bar_widget = QWidget()
         self.clip_bar_widget = QWidget()
-        self.clip_bar_widget.setStyleSheet("background: #080808; border-bottom: 1px solid #181818;")
-        self.clip_bar_widget.setLayout(clip_bar)
-        layout_3d.addWidget(self.clip_bar_widget)
 
         self.plotter = QtInteractor(container_3d, auto_update=False)
         self.plotter.set_background("#090909")
@@ -717,6 +724,7 @@ class Viewer3D(QWidget):
         self.panel_2d.reference_position_changed.connect(self._on_2d_ref_pos_changed)
         self.panel_2d.measurement_added.connect(self._on_2d_measurement_added)
         self.panel_2d.measurement_cleared.connect(self._on_2d_measurement_cleared)
+        self.panel_2d.physical_point_selected.connect(self._on_2d_physical_point_selected)
         self.panel_2d.window_level_changed.connect(lambda w, l: self._notify_metadata_changed())
         self.panel_2d.orientation_changed.connect(lambda o: self._notify_metadata_changed())
         if hasattr(self.panel_2d, "btn_crosshair_toggle"):
@@ -727,9 +735,6 @@ class Viewer3D(QWidget):
         self.view_split.setStretchFactor(0, 3)
         self.view_split.setStretchFactor(1, 2)
         layout_3d.addWidget(self.view_split, stretch=1)
-
-        # Floating HUD card explaining HU density scale
-        self.legend_card = self._build_legend_card(container_3d)
 
         # Floating HUD card explaining HU density scale
         self.legend_card = self._build_legend_card(container_3d)
@@ -866,6 +871,8 @@ class Viewer3D(QWidget):
         # Re-anchor legend card after splitter layout updates
         QTimer.singleShot(50, self._reposition_legend)
 
+    set_2d_slice_visible = set_2d_panel_visible
+
     # ── 2D ↔ 3D Synchronization Handlers & State Management ───────────────────
 
     def _on_sync_toggle_clicked(self, checked: bool):
@@ -886,7 +893,7 @@ class Viewer3D(QWidget):
         if hasattr(self, "btn_sync_toggle"):
             self.btn_sync_toggle.blockSignals(True)
             self.btn_sync_toggle.setChecked(self._sync_2d_3d_enabled)
-            self.btn_sync_toggle.setText("🔗 Sync 2D↔3D: ON" if self._sync_2d_3d_enabled else "🔗 Sync 2D↔3D: OFF")
+            self.btn_sync_toggle.setText("🔗 Sync: ON" if self._sync_2d_3d_enabled else "🔗 Sync: OFF")
             self.btn_sync_toggle.blockSignals(False)
 
         if self._sync_2d_3d_enabled:
@@ -1165,10 +1172,17 @@ class Viewer3D(QWidget):
             self.btn_measure_3d.setChecked(self._measuring_3d)
             self.btn_measure_3d.setText("📏 Measure: ON" if self._measuring_3d else "📏 Measure: OFF")
             self.btn_measure_3d.blockSignals(False)
+        if hasattr(self, "act_measure_dist"):
+            self.act_measure_dist.blockSignals(True)
+            self.act_measure_dist.setChecked(self._measuring_3d)
+            self.act_measure_dist.blockSignals(False)
+        if hasattr(self, "panel_2d") and self.panel_2d is not None:
+            if self.panel_2d.is_measuring() != self._measuring_3d:
+                self.panel_2d.set_measurement_mode(self._measuring_3d)
         if self._measuring_3d:
             self._pending_3d_point = None
             if hasattr(self, "info_bar") and self.info_bar:
-                self.info_bar.setText("  📏 3D Measurement: Select first surface point")
+                self.info_bar.setText("  📏 Select first point in 3D surface or 2D slice")
         else:
             self.cancel_pending_3d_measurement()
             if hasattr(self, "info_bar") and self.info_bar:
@@ -1187,6 +1201,14 @@ class Viewer3D(QWidget):
                     self.plotter.render()
             except Exception:
                 pass
+        if hasattr(self, "panel_2d") and self.panel_2d is not None:
+            self.panel_2d.canvas.cancel_pending_measurement()
+
+    def clear_all_measurements(self):
+        """Clears measurements from both 3D and 2D views."""
+        self.clear_measurements_3d()
+        if hasattr(self, "panel_2d") and self.panel_2d is not None:
+            self.panel_2d.clear_measurements()
 
     def clear_measurements_3d(self):
         """Removes all 3D measurement lines, endpoint markers, and labels."""
@@ -1200,6 +1222,10 @@ class Viewer3D(QWidget):
             self.plotter.render()
         self._measurement_actor_names.clear()
         self._measurements_3d.clear()
+        if hasattr(self, "panel_2d") and self.panel_2d is not None and hasattr(self.panel_2d, "canvas"):
+            if hasattr(self.panel_2d.canvas, "measurements_3d_synced"):
+                self.panel_2d.canvas.measurements_3d_synced.clear()
+                self.panel_2d.canvas.update()
         if hasattr(self, "info_bar") and self.info_bar and getattr(self, "_measuring_3d", False):
             self.info_bar.setText("  📏 3D Measurement: Cleared")
         self._notify_metadata_changed()
@@ -1212,12 +1238,18 @@ class Viewer3D(QWidget):
             self.btn_measure_3d_vis.setChecked(self._measurements_3d_visible)
             self.btn_measure_3d_vis.setText("👁 Measure: ON" if self._measurements_3d_visible else "👁 Measure: OFF")
             self.btn_measure_3d_vis.blockSignals(False)
+        if hasattr(self, "act_measure_vis"):
+            self.act_measure_vis.blockSignals(True)
+            self.act_measure_vis.setChecked(self._measurements_3d_visible)
+            self.act_measure_vis.blockSignals(False)
         if hasattr(self, "plotter") and self.plotter is not None:
             for name in self._measurement_actor_names:
                 act = self.plotter.actors.get(name)
                 if act:
                     act.SetVisibility(self._measurements_3d_visible)
             self.plotter.render()
+        if hasattr(self, "panel_2d") and self.panel_2d is not None:
+            self.panel_2d.set_measurements_visible(self._measurements_3d_visible)
 
     def is_measurements_3d_visible(self) -> bool:
         return bool(self._measurements_3d_visible)
@@ -1244,12 +1276,12 @@ class Viewer3D(QWidget):
         if hasattr(self, "plotter") and self.plotter is not None:
             try:
                 line_mesh = pv.Line(pt1, pt2)
-                self.plotter.add_mesh(line_mesh, name=line_name, color="#ffea00", line_width=3)
+                self.plotter.add_mesh(line_mesh, name=line_name, color="#ffea00", line_width=3.5)
 
-                s1 = pv.Sphere(radius=2.0, center=pt1)
-                s2 = pv.Sphere(radius=2.0, center=pt2)
-                self.plotter.add_mesh(s1, name=pt1_name, color="#ffea00")
-                self.plotter.add_mesh(s2, name=pt2_name, color="#ffea00")
+                s1 = pv.Sphere(radius=2.2, center=pt1)
+                s2 = pv.Sphere(radius=2.2, center=pt2)
+                self.plotter.add_mesh(s1, name=pt1_name, color="#7cfc00")  # Distinguishable Green for P1
+                self.plotter.add_mesh(s2, name=pt2_name, color="#ffea00")  # Distinguishable Yellow for P2
 
                 midpoint = [
                     (float(pt1[0]) + float(pt2[0])) / 2.0,
@@ -1258,14 +1290,14 @@ class Viewer3D(QWidget):
                 ]
                 self.plotter.add_point_labels(
                     [midpoint],
-                    [f"{dist:.1f} mm"],
+                    [f"Distance: {dist:.1f} mm"],
                     name=lbl_name,
                     point_color="#ffea00",
                     point_size=1,
                     text_color="#ffffff",
                     fill_shape=True,
                     shape_color="#111111",
-                    shape_opacity=0.8,
+                    shape_opacity=0.85,
                     font_size=11,
                     always_visible=True
                 )
@@ -1302,36 +1334,62 @@ class Viewer3D(QWidget):
     def _on_measure_3d_vis_clicked(self):
         self.set_measurements_3d_visible(self.btn_measure_3d_vis.isChecked())
 
-    def _on_2d_measurement_added(self, m):
-        """When 2D measurement is created, sync to 3D if 2D-3D sync is enabled."""
-        if getattr(self, "_sync_2d_3d_enabled", False):
+    def _on_2d_physical_point_selected(self, pt_num: int, x_mm: float, y_mm: float, z_mm: float):
+        """Slot called when a physical point is clicked on the 2D CT slice."""
+        if pt_num == 1:
+            self._pending_3d_point = (x_mm, y_mm, z_mm)
             try:
-                pt1 = m.physical_start
-                pt2 = m.physical_end
-                self._add_3d_measurement(pt1, pt2, source="2D_synced")
+                if hasattr(self, "plotter") and self.plotter is not None:
+                    temp_s = pv.Sphere(radius=2.5, center=(x_mm, y_mm, z_mm))
+                    self.plotter.add_mesh(temp_s, name="measure_3d_temp_pt", color="#7cfc00")
+                    self.plotter.render()
             except Exception as exc:
-                print(f"[Viewer3D] 2D->3D measurement sync warning: {exc}")
+                print(f"[Viewer3D] 2D->3D Temp point warning: {exc}")
+            if hasattr(self, "info_bar") and self.info_bar:
+                self.info_bar.setText(
+                    f"  📏 Point 1: ({x_mm:.1f}, {y_mm:.1f}, {z_mm:.1f}) mm · Select second point"
+                )
+        elif pt_num == 2:
+            try:
+                if hasattr(self, "plotter") and self.plotter is not None:
+                    self.plotter.remove_actor("measure_3d_temp_pt")
+            except Exception:
+                pass
+            self._pending_3d_point = None
+
+    def _on_2d_measurement_added(self, m):
+        """When 2D measurement is created, synchronize line, markers, and distance label to 3D."""
+        try:
+            pt1 = m.physical_start
+            pt2 = m.physical_end
+            if pt1 and pt2:
+                already_exists = any(
+                    rec.get("pt1") == pt1 and rec.get("pt2") == pt2
+                    for rec in self._measurements_3d
+                )
+                if not already_exists:
+                    self._add_3d_measurement(pt1, pt2, source="2D_synced")
+            if hasattr(self, "info_bar") and self.info_bar:
+                self.info_bar.setText(f"  📏 Distance: {m.distance_mm:.1f} mm  ·  P1 to P2")
+        except Exception as exc:
+            print(f"[Viewer3D] 2D->3D measurement sync warning: {exc}")
         self._notify_metadata_changed()
 
     def _on_2d_measurement_cleared(self):
-        """When 2D measurements are cleared, remove synced 3D measurements if sync is active."""
-        if getattr(self, "_sync_2d_3d_enabled", False):
-            remaining = []
-            for m in list(self._measurements_3d):
-                if m.get("source") == "2D_synced":
-                    for name in m.get("actor_names", []):
-                        try:
-                            if hasattr(self, "plotter") and self.plotter is not None:
-                                self.plotter.remove_actor(name)
-                            if name in self._measurement_actor_names:
-                                self._measurement_actor_names.remove(name)
-                        except Exception:
-                            pass
-                else:
-                    remaining.append(m)
-            self._measurements_3d = remaining
-            if hasattr(self, "plotter") and self.plotter is not None:
-                self.plotter.render()
+        """When 2D measurements are cleared, remove synced 3D measurements."""
+        to_remove = [m for m in self._measurements_3d if m.get("source") == "2D_synced"]
+        for m in to_remove:
+            for name in m.get("actor_names", []):
+                if hasattr(self, "plotter") and self.plotter is not None:
+                    try:
+                        self.plotter.remove_actor(name)
+                    except Exception:
+                        pass
+                if name in self._measurement_actor_names:
+                    self._measurement_actor_names.remove(name)
+            self._measurements_3d.remove(m)
+        if hasattr(self, "plotter") and self.plotter is not None:
+            self.plotter.render()
         self._notify_metadata_changed()
 
     # ── Study Information & Scan Metadata Panel Methods ───────────────────────
@@ -1435,9 +1493,9 @@ class Viewer3D(QWidget):
             btn = QPushButton(display_name.split("  ")[0])
             btn.setFixedHeight(32)
             btn.setStyleSheet(
-                f"QPushButton {{ background: {'#1e2e1e' if is_active else '#181818'};"
-                f" color: {'#7cfc00' if is_active else '#888'};"
-                " border-radius: 4px; font-size: 11px; text-align: left; padding-left: 8px; }}"
+                f"QPushButton {{ background: {'#1e2e1e' if is_active else '#181818'}; "
+                f"color: {'#7cfc00' if is_active else '#888'}; "
+                "border-radius: 4px; font-size: 11px; text-align: left; padding-left: 8px; } "
                 "QPushButton:hover { background: #202020; color: #ccc; }"
             )
             btn.clicked.connect(
@@ -1562,7 +1620,7 @@ class Viewer3D(QWidget):
         if hasattr(self, "btn_clip_toggle"):
             self.btn_clip_toggle.blockSignals(True)
             self.btn_clip_toggle.setChecked(False)
-            self.btn_clip_toggle.setText("Enable")
+            self.btn_clip_toggle.setText("✂ Clip: OFF ▼")
             self.btn_clip_toggle.blockSignals(False)
         if hasattr(self, "combo_clip_axis"):
             self.combo_clip_axis.blockSignals(True)
@@ -1717,13 +1775,15 @@ class Viewer3D(QWidget):
                 try:
                     if hasattr(self, "plotter") and self.plotter is not None:
                         temp_s = pv.Sphere(radius=2.5, center=(x_mm, y_mm, z_mm))
-                        self.plotter.add_mesh(temp_s, name="measure_3d_temp_pt", color="#ffea00")
+                        self.plotter.add_mesh(temp_s, name="measure_3d_temp_pt", color="#7cfc00")
                         self.plotter.render()
                 except Exception as exc:
                     print(f"[Viewer3D] Temp point add warning: {exc}")
+                if hasattr(self, "panel_2d") and self.panel_2d is not None:
+                    self.panel_2d.set_pending_physical_point(x_mm, y_mm, z_mm)
                 if hasattr(self, "info_bar") and self.info_bar:
                     self.info_bar.setText(
-                        f"  📏 3D Point 1: ({x_mm:.1f}, {y_mm:.1f}, {z_mm:.1f}) mm · Select second point"
+                        f"  📏 Point 1: ({x_mm:.1f}, {y_mm:.1f}, {z_mm:.1f}) mm · Select second point"
                     )
             else:
                 pt1 = self._pending_3d_point
@@ -1736,8 +1796,10 @@ class Viewer3D(QWidget):
                     pass
                 m_rec = self._add_3d_measurement(pt1, pt2, source="3D")
                 dist = m_rec["distance_mm"]
+                if hasattr(self, "panel_2d") and self.panel_2d is not None:
+                    self.panel_2d.add_measurement_from_3d(pt1, pt2, dist)
                 if hasattr(self, "info_bar") and self.info_bar:
-                    self.info_bar.setText(f"  📏 3D Distance: {dist:.1f} mm  ·  P1 to P2")
+                    self.info_bar.setText(f"  📏 Distance: {dist:.1f} mm  ·  P1 to P2")
             return
 
         if hasattr(self, "mpr_view") and self.mpr_view:
@@ -2605,13 +2667,17 @@ class Viewer3D(QWidget):
         for btn in (getattr(self, "btn_axis_x", None), getattr(self, "btn_axis_y", None), getattr(self, "btn_axis_z", None)):
             if btn is not None:
                 btn.setEnabled(enabled)
+                btn.setVisible(enabled)
         if hasattr(self, "slider_clip_pos"):
             self.slider_clip_pos.setEnabled(enabled)
+            self.slider_clip_pos.setVisible(enabled)
         if hasattr(self, "btn_clip_reverse"):
             self.btn_clip_reverse.setEnabled(enabled)
+            self.btn_clip_reverse.setVisible(enabled)
         if hasattr(self, "lbl_clip_pos"):
+            self.lbl_clip_pos.setVisible(enabled)
             self.lbl_clip_pos.setStyleSheet(
-                f"color: {'#00e5ff' if enabled else '#444'}; font-size: 9px; font-weight: 600; min-width: 95px;"
+                f"color: {'#00e5ff' if enabled else '#444'}; font-size: 9px; font-weight: 600; min-width: 50px;"
             )
 
     def _on_clip_toggle_clicked(self, checked: bool):
@@ -2833,7 +2899,7 @@ class Viewer3D(QWidget):
         if hasattr(self, "btn_clip_toggle"):
             self.btn_clip_toggle.blockSignals(True)
             self.btn_clip_toggle.setChecked(self._clip_active)
-            self.btn_clip_toggle.setText("Active" if self._clip_active else "Enable")
+            self.btn_clip_toggle.setText("✂ Clip: ON ▼" if self._clip_active else "✂ Clip: OFF ▼")
             self.btn_clip_toggle.blockSignals(False)
 
         self._sync_clip_controls_enabled()
@@ -3019,3 +3085,257 @@ class Viewer3D(QWidget):
     def set_tissue_melt(self, melt_factor: float):
         """No-op: skin mesh removed. Signal still connected to avoid errors."""
         pass
+
+    def _select_preset(self, name: str):
+        """Applies an anatomical window / rendering preset."""
+        if name == "Bone":
+            self.combo_bone_mode.setCurrentIndex(0)
+            self._set_wl_preset_all("Bone")
+        elif name == "Soft Tissue":
+            self._set_wl_preset_all("Soft Tissue")
+        elif name == "Lung":
+            self._set_wl_preset_all("Lung")
+
+    def _set_wl_preset_all(self, preset_name: str):
+        """Propagates window / level preset to 2D slice and MPR viewports."""
+        target = getattr(self, "slice_2d_viewer", None) or getattr(self, "panel_2d", None)
+        if target is not None and hasattr(target, "set_window_preset"):
+            target.set_window_preset(preset_name)
+        if hasattr(self, "mpr_view") and self.mpr_view is not None:
+            self.mpr_view.set_window_preset(preset_name)
+
+    def export_case_report(self) -> str:
+        """Generates and exports an exhaustive, publication-grade PDF case summary using report_export."""
+        from report_export import build_case_report
+        from screens.study_info_panel import extract_safe_metadata
+
+        patient = getattr(self, "current_patient", None)
+        if not patient or not isinstance(patient, dict):
+            folder = getattr(self, "_active_path", "")
+            folder_name = os.path.basename(os.path.normpath(folder)) if folder else "Local Scan"
+            patient = {
+                "_is_local": True,
+                "name": folder_name,
+                "mrn": f"LOCAL-{folder_name.upper()}",
+                "age": "—",
+                "sex": "—",
+                "scans": 1,
+            }
+
+        scan = getattr(self, "current_scan", None)
+        if not scan or not isinstance(scan, dict):
+            active_p = getattr(self, "_active_path", "")
+            scan = {
+                "type": "CT",
+                "date": "Local dataset",
+                "file_path": active_p or "-",
+                "slice_count": len(self.slices) if hasattr(self, "slices") and self.slices is not None else "-",
+            }
+
+        # Safe technical DICOM and volume metadata
+        safe_meta = extract_safe_metadata(self)
+
+        # 2D and 3D Viewport State
+        target_2d = getattr(self, "slice_2d_viewer", None) or getattr(self, "panel_2d", None)
+        if target_2d is not None and getattr(target_2d, "vol_data", None) is None:
+            if hasattr(self, "mpr_view") and getattr(self.mpr_view, "vol_data", None) is not None:
+                target_2d.load_volume(
+                    self.mpr_view.vol_data,
+                    self.mpr_view.pixel_spacing,
+                    self.mpr_view.slice_thickness
+                )
+            elif hasattr(self, "_active_path") and self._active_path and os.path.isdir(self._active_path):
+                try:
+                    from dicom_engine import load_volume_for_mpr
+                    vol, sp, z_sp, _ = load_volume_for_mpr(self._active_path)
+                    target_2d.load_volume(vol, sp, z_sp)
+                except Exception as exc:
+                    print(f"[Viewer3D] Could not preload volume for 2D report slice: {exc}")
+
+        cur_orient = "Axial"
+        cur_slice_str = None
+        cur_pos_str = None
+        cur_ww = safe_meta.get("current_window_width")
+        cur_wl = safe_meta.get("current_window_level")
+        cur_preset = safe_meta.get("current_wl_preset", "Bone")
+
+        if target_2d is not None:
+            cur_orient = getattr(target_2d, "current_orientation", "axial").capitalize()
+            cur_idx = target_2d.get_current_slice_index() if hasattr(target_2d, "get_current_slice_index") else getattr(target_2d, "current_slice_index", 0)
+            total_cnt = target_2d.get_slice_count() if hasattr(target_2d, "get_slice_count") else 0
+            if total_cnt > 0:
+                cur_slice_str = f"Slice {cur_idx + 1} / {total_cnt}"
+            if hasattr(target_2d, "get_current_physical_position"):
+                pos = target_2d.get_current_physical_position()
+                if pos != (0.0, 0.0, 0.0):
+                    cur_pos_str = f"X: {pos[0]:.1f} mm, Y: {pos[1]:.1f} mm, Z: {pos[2]:.1f} mm"
+            cur_ww = f"{target_2d.window_width:.0f} HU" if hasattr(target_2d, "window_width") else cur_ww
+            cur_wl = f"{target_2d.window_level:.0f} HU" if hasattr(target_2d, "window_level") else cur_wl
+            cur_preset = getattr(target_2d, "current_preset", "bone").capitalize()
+
+        clip_active = bool(getattr(self, "_clip_active", False))
+        clip_axis = str(getattr(self, "_clip_axis", "Y")).upper()
+        clip_frac = int(getattr(self, "_clip_fraction", 0.5) * 100)
+        clip_inv = getattr(self, "_clip_inverted", False)
+        clip_summary = (
+            f"Enabled — {clip_axis}-axis — Position {clip_frac}% — "
+            f"{'Inverted direction' if clip_inv else 'Standard direction'}"
+        ) if clip_active else None
+
+        # Check if MPR was actively used or is open
+        mpr_state = None
+        mpr = getattr(self, "mpr_view", None)
+        if mpr is not None and getattr(mpr, "vol_data", None) is not None:
+            if (hasattr(mpr, "isVisible") and mpr.isVisible()) or getattr(self, "_mpr_active", False):
+                H, W, D = mpr.vol_data.shape
+                mpr_state = {
+                    "axial": f"Slice {getattr(mpr, 'idx_z', 0) + 1} / {D}",
+                    "coronal": f"Slice {getattr(mpr, 'idx_y', 0) + 1} / {H}",
+                    "sagittal": f"Slice {getattr(mpr, 'idx_x', 0) + 1} / {W}",
+                }
+
+        # Meaningful viewing state only -- omit UI toggles & internal defaults
+        view_state = {
+            "orientation": cur_orient,
+            "slice_index": cur_slice_str,
+            "physical_pos": cur_pos_str,
+            "window_width": cur_ww,
+            "window_level": cur_wl,
+            "preset": cur_preset,
+            "sync_mode": "Enabled" if getattr(self, "_sync_2d_3d_enabled", False) else None,
+            "clipping_active": clip_active,
+            "clipping_summary": clip_summary,
+            "mpr_state": mpr_state,
+            "cursor_hu": getattr(self, "_last_cursor_hu", None),
+        }
+
+        # Deduplicated Measurements Collection
+        measurements = []
+        is_synced = getattr(self, "_sync_2d_3d_enabled", False)
+
+        # 1. 2D CT Slice Measurements (with true slice index and physical coordinates)
+        if target_2d is not None:
+            try:
+                meas_2d = target_2d.get_measurements() if hasattr(target_2d, "get_measurements") else getattr(target_2d, "measurements", [])
+                for idx, m in enumerate(meas_2d):
+                    val = getattr(m, "distance_mm", 0.0)
+                    orient = getattr(m, "orientation", "axial").capitalize()
+                    sl_num = getattr(m, "slice_idx", 0) + 1
+                    plane_desc = f"2D {orient} / 3D synchronized" if is_synced else f"2D {orient}"
+                    measurements.append({
+                        "plane": plane_desc,
+                        "kind": "distance",
+                        "value": float(val),
+                        "unit": "mm",
+                        "slice_idx": f"Slice {sl_num}",
+                        "p1": getattr(m, "physical_start", None),
+                        "p2": getattr(m, "physical_end", None),
+                        "source": "2D",
+                    })
+            except Exception as exc:
+                print(f"[Viewer3D] could not collect 2D measurements: {exc}")
+
+        # 2. 3D Volume Measurements (exclude 2D_synced to avoid duplication!)
+        try:
+            for idx, m in enumerate(getattr(self, "_measurements_3d", [])):
+                if m.get("source") == "2D_synced":
+                    continue  # Already represented from 2D above!
+                val = m.get("distance_mm", 0.0)
+                measurements.append({
+                    "plane": "3D Volume Space",
+                    "kind": "distance",
+                    "value": float(val),
+                    "unit": "mm",
+                    "slice_idx": "3D Space",
+                    "p1": m.get("pt1"),
+                    "p2": m.get("pt2"),
+                    "source": "3D",
+                })
+        except Exception as exc:
+            print(f"[Viewer3D] could not collect 3D measurements: {exc}")
+
+        # 3. MPR Viewport Measurements
+        try:
+            mpr = getattr(self, "mpr_view", None)
+            if mpr is not None and hasattr(mpr, "get_measurement_summary"):
+                measurements.extend(mpr.get_measurement_summary())
+        except Exception as exc:
+            print(f"[Viewer3D] could not collect MPR measurements: {exc}")
+
+        # Visual Figure Captures (2D CT Slice first as primary representative scan, then 3D Viewport)
+        images = []
+        try:
+            if target_2d is not None and hasattr(target_2d, "save_screenshot"):
+                shot_2d = target_2d.save_screenshot()
+                if shot_2d and os.path.isfile(shot_2d):
+                    sl_ref = f" ({cur_slice_str})" if cur_slice_str else ""
+                    images.append({
+                        "path": shot_2d,
+                        "title": f"2D CT — {cur_orient}",
+                        "caption": f"Figure 1 — Calibrated 2D {cur_orient} CT slice{sl_ref}",
+                    })
+        except Exception as exc:
+            print(f"[Viewer3D] Screenshot 2D failed: {exc}")
+
+        shot_3d = ""
+        try:
+            shot_3d = self.save_screenshot()
+            if shot_3d and os.path.isfile(shot_3d):
+                fig_num = len(images) + 1
+                images.append({
+                    "path": shot_3d,
+                    "title": "3D Volume Reconstruction",
+                    "caption": f"Figure {fig_num} — 3D anatomical volume reconstruction",
+                })
+        except Exception as exc:
+            print(f"[Viewer3D] Screenshot 3D failed: {exc}")
+
+        try:
+            mpr = getattr(self, "mpr_view", None)
+            if mpr is not None and hasattr(mpr, "save_screenshot") and hasattr(mpr, "isVisible") and mpr.isVisible():
+                shot_mpr = mpr.save_screenshot()
+                if shot_mpr and os.path.isfile(shot_mpr):
+                    images.append({
+                        "path": shot_mpr,
+                        "title": "MPR Tri-Planar Viewports",
+                        "caption": "Figure 3 — Synchronized Multi-Planar Reconstruction (Axial, Coronal, Sagittal) overview",
+                    })
+        except Exception as exc:
+            print(f"[Viewer3D] Screenshot MPR failed: {exc}")
+
+        # Notes from Database
+        notes = []
+        try:
+            if not patient.get("_is_local") and patient.get("mrn"):
+                from database import get_notes_for_patient
+                notes = get_notes_for_patient(patient["mrn"]) or []
+        except Exception:
+            notes = []
+
+        try:
+            path = build_case_report(
+                patient=patient,
+                scan=scan,
+                measurements=measurements,
+                notes=notes,
+                screenshot_path=shot_3d,
+                metadata=safe_meta,
+                view_state=view_state,
+                images=images,
+            )
+            if hasattr(self, "info_bar") and self.info_bar:
+                self.info_bar.setText(f"  📄 Report saved: {os.path.basename(path)}")
+            try:
+                from database import log_action
+                if patient.get("mrn"):
+                    log_action("export_report", patient.get("mrn"), path)
+            except Exception:
+                pass
+            return path
+        except Exception as exc:
+            print(f"[Viewer3D] report export failed: {exc}")
+            import traceback
+            traceback.print_exc()
+            if hasattr(self, "info_bar") and self.info_bar:
+                self.info_bar.setText("  ⚠️ Report export failed")
+            return ""

@@ -1,4 +1,4 @@
-﻿# Aegis-Touch 🏥✋
+# Aegis-Touch 🏥✋
 
 > **Touchless medical imaging workstation** — Control DICOM 3D scans with hand gestures and voice commands. No physical contact required.
 
@@ -207,6 +207,38 @@ Set `JETSON_OPTIMIZED = True` in `dicom_engine.py` (enabled by default) to activ
 
 Set `JETSON_OPTIMIZED = False` for full-resolution desktop rendering.
 
+### Jetson Nano Setup & Installation
+
+1. **System Libraries (One-time setup)**:
+   ```bash
+   bash setup.sh
+   ```
+   *Or install manually via apt:*
+   ```bash
+   sudo apt-get update && sudo apt-get install -y \
+       libgl1 libegl1 libgl1-mesa-glx libxkbcommon0 libxkbcommon-x11-0 \
+       libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 \
+       libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 \
+       libdbus-1-3 libfontconfig1 libxrender1 libxext6 \
+       libxi6 libsm6 libice6 libglib2.0-0 \
+       libportaudio2 libasound2-dev scrot python3-tk xvfb x11vnc
+   ```
+
+2. **Install Python Requirements**:
+   ```bash
+   pip install -r requirements.txt
+   ```
+   *(Note: If your Jetson Nano already has hardware-accelerated OpenCV with CUDA installed in your system Python, preserve it with `pip install -r requirements.txt --no-deps opencv-python`).*
+
+3. **Launch Application**:
+   ```bash
+   # Direct display:
+   python3 main.py
+
+   # Virtual display + VNC:
+   bash run.sh
+   ```
+
 ---
 
 ## 🗄 Database
@@ -230,12 +262,14 @@ python ingest.py
 | `PyQt6` | Desktop UI framework |
 | `mediapipe` | Hand landmark detection (AI) |
 | `opencv-python` | Webcam capture + frame annotation |
-| `pyvista` / `pyvistaqt` / `vtk` | 3D mesh rendering |
+| `pyvista` / `pyvistaqt` / `vtk` | 3D mesh rendering & interactive viewport |
 | `pydicom` | DICOM file reading + HU conversion |
-| `numpy` | Array math |
+| `numpy` | Array math & volume operations |
 | `vosk` | Offline speech recognition |
 | `sounddevice` | Microphone audio capture |
+| `pyautogui` | Touchless air-mouse OS cursor & click automation |
 | `watchdog` | Folder watching for auto-ingest |
+| `matplotlib` / `Pillow` | PDF case report generation & density plotting |
 
 ---
 

@@ -42,10 +42,10 @@ _DECIMATE       = 0.92 if JETSON_OPTIMIZED else 0.88
 # ── HU thresholds per scan type ───────────────────────────────────────────────
 # skull: 250 HU catches the complete calvarium including thinner parietal and
 #        sphenoid wings that disappear at 300+ HU.
-# body:  400 HU for dense cortical bone throughout the torso.
+# body:  200 HU for dense cortical bone throughout the torso (400 HU was erasing ribs).
 PRESETS: dict = {
     "skull": {"bone": 250.0},
-    "body":  {"bone": 400.0},
+    "body":  {"bone": 200.0},
 }
 
 # ── Natural bone colour ───────────────────────────────────────────────────────
@@ -188,6 +188,7 @@ class DicomVolume:
             self.slice_thickness = float(z_space)
             vol = pv.wrap(vol_data)
             vol.spacing = (self.pixel_spacing[0], self.pixel_spacing[1], self.slice_thickness)
+            vol = vol.gaussian_smooth(radius_factor=1.0)
         else:
             vol_data = np.zeros((orig_shape[0], orig_shape[1], n_slices), dtype=np.float32)
             for i, (_, path) in enumerate(meta_list):
@@ -240,6 +241,7 @@ class MeshSet:
         # Decimate: removes the given fraction of triangles while preserving shape.
         mesh = mesh.decimate(_DECIMATE)
         mesh = mesh.clean()
+        # Cleanly extracts the full connected skeleton and deletes floating scanner noise!
         mesh = mesh.extract_largest()
         return mesh
 

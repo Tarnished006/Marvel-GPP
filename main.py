@@ -35,7 +35,7 @@ class CameraHUD(QWidget):
     # PiP dimensions — tall enough to see hand skeleton clearly
     HUD_W = 280
     HUD_H = 210
-    MARGIN = 14          # gap from the window edges
+    MARGIN = 24          # gap from the window edges (clears scrollbar)
     BORDER_RADIUS = 10
 
     def __init__(self, parent: QWidget):
@@ -479,9 +479,16 @@ class MainWindow(QMainWindow):
         self._push_screen(record_screen)
 
     def show_scans(self, patient: dict):
-        scans_screen = ScanGallery(patient)
-        scans_screen.view_in_3d_clicked.connect(self.show_3d_viewer)
-        self._push_screen(scans_screen)
+        # View in 2D goes straight to MPR slices!
+        from database import get_scans_for_ui
+        scans = get_scans_for_ui(patient["mrn"])
+        scan = scans[0] if scans else patient.get("_scan", {})
+        
+        self.viewer_3d.load_scan(patient, scan)
+        self.viewer_3d.btn_3d_mode.setChecked(False)
+        self.viewer_3d.btn_mpr_mode.setChecked(True)
+        self.viewer_3d._switch_view_mode(1)
+        self._go_root(self.viewer_3d)
 
     def show_3d_viewer(self, patient: dict, scan: dict):
         self.viewer_3d.load_scan(patient, scan)
@@ -490,6 +497,9 @@ class MainWindow(QMainWindow):
     def show_3d_direct(self, patient: dict, scan: dict):
         """Called by local-scan cards on the dashboard — skip gallery, go straight to 3D."""
         self.viewer_3d.load_scan(patient, scan)
+        self.viewer_3d.btn_3d_mode.setChecked(True)
+        self.viewer_3d.btn_mpr_mode.setChecked(False)
+        self.viewer_3d._switch_view_mode(0)
         self._go_root(self.viewer_3d)
 
     def _toggle_camera_hud(self):

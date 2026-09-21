@@ -47,10 +47,10 @@ _DECIMATE       = 0.92 if JETSON_OPTIMIZED else 0.88
 # body:    220 HU general default for torso.
 PRESETS: dict = {
     "skull":   {"bone": 250.0},
-    "body":    {"bone": 220.0},
+    "body":    {"bone": 240.0},
     "chest":   {"bone": 260.0},
     "spine":   {"bone": 240.0},
-    "abdomen": {"bone": 220.0},
+    "abdomen": {"bone": 340.0},
 }
 
 # ── Natural bone colour ───────────────────────────────────────────────────────
@@ -74,7 +74,7 @@ _CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache")
 def get_cache_path(folder_path: str, preset: str = "body") -> str:
     """Returns deterministic path to cached .vtp mesh for a DICOM folder."""
     abs_path = os.path.abspath(folder_path)
-    key = f"{abs_path}_{preset}_{JETSON_OPTIMIZED}_{_DECIMATE}_hu_v1"
+    key = f"{abs_path}_{preset}_{JETSON_OPTIMIZED}_{_DECIMATE}_hu_v2"
     h = hashlib.md5(key.encode("utf-8")).hexdigest()[:12]
     safe_name = os.path.basename(os.path.normpath(folder_path)) or "scan"
     os.makedirs(_CACHE_DIR, exist_ok=True)
@@ -270,8 +270,30 @@ class MeshSet:
 
         return mesh
 
-    def _build_bone(self, isovalue: float) -> pv.PolyData:
-        mesh = self.volume.volume_data.contour(isosurfaces=[isovalue], method="flying_edges")
+    def _build_bone(self, isovalue: float, preset: str = "body") -> pv.PolyData:
+        vol_data = self.volume.volume_data
+
+        # In contrast-enhanced CT scans (IV contrast), contrast agent in vascular pools
+        # and visceral organs reaches 250-400+ HU, creating dense internal clumps inside
+        # the thoracic cavity (heart/aorta) and abdominal cavity (liver/spleen/kidney).
+        # We suppress internal non-skeletal visceral/vascular pools prior to isosurface extraction
+        # while preserving the surrounding skeletal structures (ribs, sternum, spine, scapulae).
+        if preset == "chest" and hasattr(self.volume, "raw_data") and self.volume.raw_data is not None:
+            arr = self.volume.raw_data.copy()
+            h, w, d = arr.shape
+            # Internal mediastinal core (heart chambers, aorta, pulmonary trunk):
+            arr[int(h*0.31):int(h*0.60), int(w*0.37):int(w*0.63), int(d*0.18):int(d*0.90)] = np.minimum(
+                arr[int(h*0.31):int(h*0.60), int(w*0.37):int(w*0.63), int(d*0.18):int(d*0.90)], 50.0
+            )
+            # Bottom upper-abdominal viscera stumps (liver dome / spleen):
+            arr[int(h*0.27):int(h*0.70), int(w*0.27):int(w*0.70), :int(d*0.18)] = np.minimum(
+                arr[int(h*0.27):int(h*0.70), int(w*0.27):int(w*0.70), :int(d*0.18)], 50.0
+            )
+            v_prep = pv.wrap(arr)
+            v_prep.spacing = (self.volume.pixel_spacing[0], self.volume.pixel_spacing[1], self.volume.slice_thickness)
+            vol_data = v_prep
+
+        mesh = vol_data.contour(isosurfaces=[isovalue], method="flying_edges")
 
         if mesh.n_cells == 0:
             raise ValueError(
@@ -285,14 +307,14 @@ class MeshSet:
         mesh = mesh.clean()
 
         # Multi-component anatomical connectivity filter:
-        # Replaces extract_largest() to preserve ALL anatomical bones (24 ribs, clavicles, scapulae)
-        # while removing isolated scanner noise particles and scanner couch/bed artifacts.
+        # Preserves all true anatomical bones (ribs, clavicles, scapulae, spine, pelvis)
+        # while removing isolated scanner noise particles, table/bed artifacts, and visceral clumps.
         try:
             conn = mesh.connectivity("all")
             reg_ids = conn.cell_data.get("RegionId")
             if reg_ids is not None and len(reg_ids) > 0:
                 counts = np.bincount(reg_ids)
-                min_cells = min(150, max(15, int(len(reg_ids) * 0.0004)))
+                min_cells = 600 if preset in ("chest", "abdomen") else min(150, max(15, int(len(reg_ids) * 0.0004)))
                 candidate_regions = np.where(counts >= min_cells)[0]
                 
                 clean_regions = []
@@ -301,11 +323,19 @@ class MeshSet:
                     b = sub.bounds
                     x_span = b[1] - b[0]
                     y_span = b[3] - b[2]
-                    z_span = b[5] - b[4]
-                    # Scanner couch/bed artifact check: thin planar sheet (thickness < 20mm) spanning almost entire Z at volume boundary
-                    is_bed = (x_span < 20.0 and z_span > 240.0 and b[0] > 290.0) or (y_span < 20.0 and z_span > 240.0 and b[2] > 290.0)
-                    if not is_bed:
-                        clean_regions.append(r)
+                    # Scanner couch/bed artifact check: thin planar sheet (thickness < 4mm)
+                    is_bed = min(x_span, y_span) < 4.0
+                    if is_bed:
+                        continue
+
+                    # Abdominal visceral cavity check: isolated soft tissue clump inside anterior cavity
+                    if preset == "abdomen":
+                        center = [(b[0]+b[1])/2, (b[2]+b[3])/2, (b[4]+b[5])/2]
+                        vb = self.volume.volume_data.bounds
+                        if center[0] < vb[0] + 0.45*(vb[1]-vb[0]) and (vb[2] + 0.22*(vb[3]-vb[2]) < center[1] < vb[2] + 0.50*(vb[3]-vb[2])):
+                            continue
+
+                    clean_regions.append(r)
                 
                 if clean_regions:
                     keep_cells = np.isin(reg_ids, clean_regions)
@@ -323,9 +353,10 @@ class MeshSet:
         preset: str = "body",
     ):
         self.volume        = volume
+        self.preset        = preset
         p                  = PRESETS.get(preset, PRESETS["body"])
         self.bone_isovalue = p["bone"]
-        self.bone_mesh: pv.PolyData = self._build_bone(self.bone_isovalue)
+        self.bone_mesh: pv.PolyData = self._build_bone(self.bone_isovalue, preset=preset)
 
     @classmethod
     def load_from_cache(
@@ -554,8 +585,9 @@ class DicomLoader(QThread):
 
             meshset = MeshSet.__new__(MeshSet)
             meshset.volume        = volume
+            meshset.preset        = self.preset
             meshset.bone_isovalue = PRESETS.get(self.preset, PRESETS["body"])["bone"]
-            meshset.bone_mesh     = meshset._build_bone(meshset.bone_isovalue)
+            meshset.bone_mesh     = meshset._build_bone(meshset.bone_isovalue, preset=self.preset)
 
             # Save to disk cache so future loads take <0.2s
             try:

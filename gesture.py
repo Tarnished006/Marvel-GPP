@@ -189,7 +189,7 @@ class GestureWorker(QThread):
         base_opts = python.BaseOptions(model_asset_path="hand_landmarker.task")
         opts = vision.HandLandmarkerOptions(
             base_options=base_opts,
-            num_hands=2,
+            num_hands=1,
             min_hand_detection_confidence=0.45,
             min_tracking_confidence=0.45,
             running_mode=vision.RunningMode.VIDEO,
@@ -361,14 +361,15 @@ class GestureWorker(QThread):
                     label = "Left" if raw_label == "Right" else "Right"
                     valid_candidates.append((hand_lms, raw, label, score))
 
-            # If multiple candidates detected, filter out shoulder/collar false-positive near the top
+            # Strictly enforce single-hand only: retain only the single best candidate
             if len(valid_candidates) > 1:
-                active_zone_candidates = [
-                    c for c in valid_candidates
-                    if not (c[1][0, 1] < 0.22 and c[1][9, 1] < 0.22)
-                ]
-                if active_zone_candidates:
-                    valid_candidates = active_zone_candidates
+                # Prioritize continuity with last tracked palm if available
+                if self._last_mouse_palm_pos is not None:
+                    lx, ly = self._last_mouse_palm_pos
+                    valid_candidates.sort(key=lambda c: (float(c[1][9, 0]) - lx)**2 + (float(c[1][9, 1]) - ly)**2)
+                else:
+                    valid_candidates.sort(key=lambda c: c[3], reverse=True)
+                valid_candidates = valid_candidates[:1]
 
             num_detected = len(valid_candidates)
             signal_bus.tracking_confidence.emit(
@@ -380,45 +381,16 @@ class GestureWorker(QThread):
             thumbs_up_px = None
             thumbs_down_px = None
 
-            # Determine which candidate drives the air mouse (with temporal continuity)
-            mouse_candidate_idx = None
-            if self.air_mouse_enabled and valid_candidates:
-                now_t = time.time()
-                if len(valid_candidates) == 1:
-                    mouse_candidate_idx = 0
-                else:
-                    if self._last_mouse_palm_pos is not None and (now_t - self._last_mouse_time < 0.8):
-                        best_dist = float('inf')
-                        best_i = 0
-                        lx, ly = self._last_mouse_palm_pos
-                        for i, c in enumerate(valid_candidates):
-                            cx, cy = float(c[1][9, 0]), float(c[1][9, 1])
-                            d = (cx - lx)**2 + (cy - ly)**2
-                            if d < best_dist:
-                                best_dist = d
-                                best_i = i
-                        mouse_candidate_idx = best_i
-                    else:
-                        right_indices = [i for i, c in enumerate(valid_candidates) if c[2] == self.AIR_MOUSE_HAND]
-                        if right_indices:
-                            mouse_candidate_idx = right_indices[0]
-                        else:
-                            mouse_candidate_idx = max(range(len(valid_candidates)), key=lambda i: valid_candidates[i][1][9, 0])
+            # Single-hand tracking: the single candidate drives mouse if air mouse is enabled
+            mouse_candidate_idx = 0 if (self.air_mouse_enabled and valid_candidates) else None
 
             if num_detected > 0:
                 for cand_idx, (hand_lms, raw, label, score) in enumerate(valid_candidates):
                     active_labels.add(label)
 
                     # ── Landmark smoothing ──────────────────────────────────
-                    # Use sticky single_hand_filter when only 1 hand is visible to prevent
-                    # filter resets if MediaPipe's handedness label flickers on screen edges.
-                    if num_detected == 1:
-                        filt = self.single_hand_filter
-                    else:
-                        if label not in self.hand_filters:
-                            self.hand_filters[label] = EMAFilter(alpha=0.75)
-                        filt = self.hand_filters[label]
-
+                    # Dedicated single-hand filter ensures smooth tracking with zero filter-switching jitters
+                    filt = self.single_hand_filter
                     sm = filt.filter(raw)  # shape (21,3), normalized 0-1
 
                     # ── Draw skeleton ───────────────────────────────────────
@@ -600,15 +572,11 @@ class GestureWorker(QThread):
 
                     # ══════════════════════════════════════════════════════════
                     # 3-D VIEWER CONTROL — rotation, zoom, tissue melt
-                    # Routing logic:
-                    #   Air mouse ON  → Mouse hand controls cursor ONLY
-                    #                   (secondary hand controls 3D if 2 hands present)
-                    #   Air mouse OFF → Both hands control 3-D viewer
+                    # Single-Hand Routing logic:
+                    #   Air mouse ON  → Single hand controls OS cursor & pinch-to-click
+                    #   Air mouse OFF → Single hand directly controls 3-D viewer (rotation/zoom/melt)
                     # ══════════════════════════════════════════════════════════
-                    if self.air_mouse_enabled:
-                        drives_3d = (num_detected > 1 and not is_mouse_hand)
-                    else:
-                        drives_3d = True
+                    drives_3d = not self.air_mouse_enabled
 
                     if drives_3d:
                         palm_x = float(sm[9,0])

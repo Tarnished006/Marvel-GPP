@@ -17,6 +17,51 @@ except Exception:
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+def _local_scan_cards():
+    """Return a list of patient dicts for any local DICOM folders not already in database."""
+    cards = []
+    known_paths = set()
+    try:
+        from database import get_connection
+        conn = get_connection()
+        rows = conn.execute("SELECT file_path FROM scans").fetchall()
+        known_paths = {os.path.normpath(r[0]).lower() for r in rows if r[0]}
+        conn.close()
+    except Exception:
+        pass
+
+    try:
+        for entry in os.listdir(_ROOT):
+            path = os.path.join(_ROOT, entry)
+            if os.path.isdir(path) and entry not in (".git", ".venv", ".cache", "__pycache__", "reports", "captures", "tests"):
+                if os.path.normpath(path).lower() in known_paths:
+                    continue
+                dcm_count = sum(1 for f in os.listdir(path) if f.lower().endswith((".dcm", ".ima")))
+                if dcm_count > 1:
+                    preset = "skull" if "skull" in entry.lower() else "body"
+                    display = f"{entry.replace('_', ' ').capitalize()} CT"
+                    cards.append({
+                        "_is_local": True,
+                        "name": display,
+                        "mrn": f"LOCAL-{entry.upper()[:8]}",
+                        "age": "Unk",
+                        "sex": "U",
+                        "scans": dcm_count,
+                        "scan_desc": f"{preset.capitalize()} CT",
+                        "scan_date": "Local Dataset",
+                        "slice_count": dcm_count,
+                        "_scan": {
+                            "type": display,
+                            "date": "Local dataset",
+                            "description": f"{dcm_count} DICOM slices",
+                            "file_path": path,
+                            "slice_count": dcm_count,
+                        }
+                    })
+    except Exception:
+        pass
+    return cards
+
 
 class PatientCard(QFrame):
     view_records_clicked  = pyqtSignal(dict)
@@ -288,11 +333,21 @@ class Dashboard(QWidget):
 
         self.card_widgets = []
         db_patients = get_patients_for_ui()
-        all_cards = self.imported_cards + db_patients
+        if not db_patients:
+            try:
+                from ingest import seed_demo_database
+                seed_demo_database()
+                db_patients = get_patients_for_ui()
+            except Exception:
+                pass
+
+        local_datasets = _local_scan_cards()
+        all_cards = self.imported_cards + local_datasets + db_patients
 
         self.dir_label.setText(
-            f"PATIENT DIRECTORY  ({len(all_cards)} total patients)"
+            f"PATIENT DIRECTORY  ({len(all_cards)} total scans/patients)"
             + (f"  ·  {len(self.imported_cards)} IMPORTED" if self.imported_cards else "")
+            + ("  ·  LOCAL 3D DATASETS AVAILABLE" if local_datasets else "")
         )
 
         if not all_cards:

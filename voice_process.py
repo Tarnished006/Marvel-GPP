@@ -36,6 +36,41 @@ COMMAND_PHRASES = [
     "zoom out",
     "turn left",
     "turn right",
+    # Density heatmap
+    "density",
+    "show density",
+    "hide density",
+    "normal view",
+    # Interactive clipping
+    "enable clipping",
+    "disable clipping",
+    "reverse clipping",
+    "clip along x",
+    "clip along y",
+    "clip along z",
+    # Transparency
+    "full opacity",
+    "half opacity",
+    "high transparency",
+    # Anatomical layers & Organs
+    "show heart",
+    "hide heart",
+    "isolate heart",
+    "show lungs",
+    "hide lungs",
+    "isolate lungs",
+    "show brain",
+    "hide brain",
+    "isolate brain",
+    "show kidneys",
+    "hide kidneys",
+    "isolate kidneys",
+    "ghost skeleton",
+    "solid skeleton",
+    "hide skeleton",
+    "show skeleton",
+    "reset layers",
+    "show all organs",
 ]
 
 audio_q = queue.Queue()

@@ -91,6 +91,16 @@ def get_volume_cache_path(folder_path: str) -> str:
     return os.path.join(_CACHE_DIR, f"{safe_name}_vol_{h}.npz")
 
 
+def get_organ_cache_path(folder_path: str, organ_name: str) -> str:
+    """Returns deterministic path to cached .vtp mesh for an extracted anatomical organ."""
+    abs_path = os.path.abspath(folder_path)
+    key = f"{abs_path}_{organ_name}_{JETSON_OPTIMIZED}_{_DECIMATE}_organ_v1"
+    h = hashlib.md5(key.encode("utf-8")).hexdigest()[:12]
+    safe_name = os.path.basename(os.path.normpath(folder_path)) or "scan"
+    os.makedirs(_CACHE_DIR, exist_ok=True)
+    return os.path.join(_CACHE_DIR, f"{safe_name}_{organ_name}_{h}.vtp")
+
+
 def is_cache_valid(cache_path: str, folder_path: str) -> bool:
     """Checks if cached file exists and is newer than the DICOM folder."""
     if not os.path.isfile(cache_path):
@@ -345,7 +355,130 @@ class MeshSet:
 
         # Sample true volumetric HU density onto vertices before caching
         mesh = self._sample_hu_density(mesh)
+        try:
+            mesh.clear_cell_data()
+        except Exception:
+            pass
         return mesh
+
+    def _extract_organs(self, preset: str = "body") -> dict[str, dict]:
+        """Extracts patient-specific anatomical organ meshes based on scan type."""
+        organs = {}
+        if not hasattr(self.volume, "raw_data") or self.volume.raw_data is None:
+            return organs
+
+        arr = self.volume.raw_data
+        h, w, d = arr.shape
+        sp = self.volume.pixel_spacing
+        st = self.volume.slice_thickness
+
+        if preset == "chest":
+            # 1. Real Heart & Great Vessels
+            try:
+                arr_h = np.zeros_like(arr)
+                med_slice = arr[int(h*0.30):int(h*0.62), int(w*0.35):int(w*0.66), int(d*0.18):int(d*0.92)]
+                arr_h[int(h*0.30):int(h*0.62), int(w*0.35):int(w*0.66), int(d*0.18):int(d*0.92)] = np.where(
+                    med_slice >= 320.0, med_slice, 0.0
+                )
+                vh = pv.wrap(arr_h)
+                vh.spacing = (sp[0], sp[1], st)
+                mh = vh.contour(isosurfaces=[320.0], method="flying_edges").decimate(0.90).clean()
+                ch = mh.connectivity("largest").clean()
+                try:
+                    ch.clear_cell_data()
+                except Exception:
+                    pass
+                if ch.n_cells > 500:
+                    organs["heart"] = {
+                        "mesh": ch,
+                        "color": "#d32f2f",
+                        "opacity": 1.0,
+                        "label": "Heart & Aorta",
+                    }
+            except Exception as e:
+                print(f"[dicom_engine] Heart extraction skipped: {e}")
+
+            # 2. Real Pleural Lungs
+            try:
+                arr_l = np.zeros_like(arr)
+                chest_roi = arr[int(h*0.20):int(h*0.82), int(w*0.15):int(w*0.86), int(d*0.18):int(d*0.94)]
+                arr_l[int(h*0.20):int(h*0.82), int(w*0.15):int(w*0.86), int(d*0.18):int(d*0.94)] = np.where(
+                    chest_roi <= -450.0, 1.0, 0.0
+                )
+                vl = pv.wrap(arr_l)
+                vl.spacing = (sp[0], sp[1], st)
+                ml = vl.contour(isosurfaces=[0.5], method="flying_edges").decimate(0.90).clean()
+                conn_l = ml.connectivity("all")
+                reg_ids = conn_l.cell_data.get("RegionId")
+                if reg_ids is not None and len(reg_ids) > 0:
+                    counts = np.bincount(reg_ids)
+                    top_lungs = np.argsort(-counts)[:2]
+                    cl = conn_l.extract_cells(np.isin(reg_ids, top_lungs)).extract_surface(algorithm="dataset_surface").clean()
+                    try:
+                        cl.clear_cell_data()
+                    except Exception:
+                        pass
+                    if cl.n_cells > 500:
+                        organs["lungs"] = {
+                            "mesh": cl,
+                            "color": "#26c6da",
+                            "opacity": 0.25,
+                            "label": "Lungs",
+                        }
+            except Exception as e:
+                print(f"[dicom_engine] Lungs extraction skipped: {e}")
+
+        elif preset == "abdomen":
+            # Real Kidneys / Visceral Vascular Bed
+            try:
+                m_abd = self.volume.volume_data.contour(isosurfaces=[220.0], method="flying_edges").decimate(0.92).clean()
+                conn_abd = m_abd.connectivity("all")
+                reg_ids = conn_abd.cell_data.get("RegionId")
+                if reg_ids is not None and len(reg_ids) > 0:
+                    counts = np.bincount(reg_ids)
+                    top = np.argsort(-counts)
+                    if len(top) > 1 and counts[top[1]] > 5000:
+                        mk = conn_abd.extract_cells(reg_ids == top[1]).extract_surface(algorithm="dataset_surface").clean()
+                        try:
+                            mk.clear_cell_data()
+                        except Exception:
+                            pass
+                        organs["kidneys"] = {
+                            "mesh": mk,
+                            "color": "#ff8f00",
+                            "opacity": 0.90,
+                            "label": "Kidneys & Viscera",
+                        }
+            except Exception as e:
+                print(f"[dicom_engine] Kidneys extraction skipped: {e}")
+
+        elif preset in ("skull", "head"):
+            # Real Brain Mantle
+            try:
+                arr_b = np.zeros_like(arr)
+                calv_roi = arr[int(h*0.25):int(h*0.75), int(w*0.25):int(w*0.75), int(d*0.20):int(d*0.85)]
+                arr_b[int(h*0.25):int(h*0.75), int(w*0.25):int(w*0.75), int(d*0.20):int(d*0.85)] = np.where(
+                    (calv_roi >= 15.0) & (calv_roi <= 85.0), 1.0, 0.0
+                )
+                vb = pv.wrap(arr_b)
+                vb.spacing = (sp[0], sp[1], st)
+                mb = vb.contour(isosurfaces=[0.5], method="flying_edges").decimate(0.92).clean()
+                cb = mb.connectivity("largest").clean()
+                try:
+                    cb.clear_cell_data()
+                except Exception:
+                    pass
+                if cb.n_cells > 1000:
+                    organs["brain"] = {
+                        "mesh": cb,
+                        "color": "#f48fb1",
+                        "opacity": 0.70,
+                        "label": "Brain Mantle",
+                    }
+            except Exception as e:
+                print(f"[dicom_engine] Brain extraction skipped: {e}")
+
+        return organs
 
     def __init__(
         self,
@@ -357,6 +490,7 @@ class MeshSet:
         p                  = PRESETS.get(preset, PRESETS["body"])
         self.bone_isovalue = p["bone"]
         self.bone_mesh: pv.PolyData = self._build_bone(self.bone_isovalue, preset=preset)
+        self.organ_meshes: dict[str, dict] = self._extract_organs(preset=preset)
 
     @classmethod
     def load_from_cache(
@@ -368,14 +502,76 @@ class MeshSet:
         """Ultra-fast (0.15s) load of pre-computed mesh directly from disk cache."""
         meshset = cls.__new__(cls)
         meshset.volume = None
+        meshset.preset = preset
         p = PRESETS.get(preset, PRESETS["body"])
         meshset.bone_isovalue = p["bone"]
         meshset.bone_mesh = pv.read(cache_path)
+        try:
+            meshset.bone_mesh.clear_cell_data()
+        except Exception:
+            pass
 
         # If cache is from an earlier version without HU_density, attempt to populate
         # from cached volume if available; otherwise leave absent (do NOT invent fake HU).
         if "HU_density" not in meshset.bone_mesh.point_data and folder_path:
             meshset._try_attach_hu_from_volume(folder_path)
+
+        # Load any cached organ meshes
+        meshset.organ_meshes = {}
+        if folder_path:
+            meta = {
+                "heart": {"color": "#d32f2f", "opacity": 1.0, "label": "Heart & Aorta"},
+                "lungs": {"color": "#26c6da", "opacity": 0.25, "label": "Lungs"},
+                "kidneys": {"color": "#ff8f00", "opacity": 0.90, "label": "Kidneys & Viscera"},
+                "brain": {"color": "#f48fb1", "opacity": 0.70, "label": "Brain Mantle"},
+            }
+            for organ_name, organ_info in meta.items():
+                ocp = get_organ_cache_path(folder_path, organ_name)
+                if os.path.isfile(ocp):
+                    try:
+                        omesh = pv.read(ocp)
+                        try:
+                            omesh.clear_cell_data()
+                        except Exception:
+                            pass
+                        if omesh.n_cells > 0:
+                            meshset.organ_meshes[organ_name] = {
+                                "mesh": omesh,
+                                "color": organ_info["color"],
+                                "opacity": organ_info["opacity"],
+                                "label": organ_info["label"],
+                            }
+                    except Exception:
+                        pass
+
+            # Fallback: if organs not cached yet, extract from cached volume npz and save
+            if not meshset.organ_meshes:
+                cache_npz = get_volume_cache_path(folder_path)
+                if is_cache_valid(cache_npz, folder_path):
+                    try:
+                        with np.load(cache_npz) as data:
+                            raw_data = data["vol_data"].astype(np.float32)
+                            ps = tuple(data["pixel_spacing"])
+                            st = float(data["slice_thickness"])
+                            vol_wrapped = pv.wrap(raw_data)
+                            vol_wrapped.spacing = (ps[0], ps[1], st)
+                            dummy_vol = type("DummyVol", (), {
+                                "raw_data": raw_data,
+                                "pixel_spacing": ps,
+                                "slice_thickness": st,
+                                "volume_data": vol_wrapped
+                            })()
+                            meshset.volume = dummy_vol
+                            meshset.organ_meshes = meshset._extract_organs(preset=preset)
+                            meshset.volume = None
+                            for oname, oinfo in meshset.organ_meshes.items():
+                                ocp = get_organ_cache_path(folder_path, oname)
+                                try:
+                                    oinfo["mesh"].save(ocp)
+                                except Exception:
+                                    pass
+                    except Exception as e:
+                        print(f"[dicom_engine] Auto organ extraction from volume cache skipped: {e}")
 
         return meshset
 
@@ -421,10 +617,12 @@ class MeshSet:
         plotter: pv.Plotter,
         density_mode: bool = False,
         cmap: str = "turbo",
+        show_organs: bool = True,
     ):
-        """Adds the bone mesh to an existing plotter.
+        """Adds the bone mesh and any extracted organ meshes to an existing plotter.
         If density_mode is True and HU density is available, renders with continuous HU colormap.
         Otherwise renders with warm natural cortical bone shading.
+        Returns (bone_actor, organ_actors_dict).
         """
         if density_mode and self.has_hu_density():
             lo, hi = self.get_hu_range()
@@ -466,7 +664,30 @@ class MeshSet:
                 opacity=1.0,
                 name="bone",
             )
-        return bone_actor, None
+
+        organ_actors = {}
+        if show_organs and hasattr(self, "organ_meshes") and self.organ_meshes:
+            for organ_name, organ_info in self.organ_meshes.items():
+                omesh = organ_info["mesh"]
+                col = organ_info.get("color", "#ff5555")
+                op = organ_info.get("opacity", 1.0)
+                try:
+                    act = plotter.add_mesh(
+                        omesh,
+                        color=col,
+                        smooth_shading=True,
+                        ambient=0.30,
+                        diffuse=0.80,
+                        specular=0.25,
+                        specular_power=15,
+                        opacity=op,
+                        name=f"organ_{organ_name}",
+                    )
+                    organ_actors[organ_name] = act
+                except Exception as exc:
+                    print(f"[dicom_engine] Warning rendering organ {organ_name}: {exc}")
+
+        return bone_actor, organ_actors
 
 
 def build_meshes_from_folder(
@@ -482,6 +703,9 @@ def build_meshes_from_folder(
     meshset = MeshSet(volume, preset=preset)
     try:
         meshset.bone_mesh.save(cache_path)
+        for organ_name, organ_info in meshset.organ_meshes.items():
+            ocp = get_organ_cache_path(folder_path, organ_name)
+            organ_info["mesh"].save(ocp)
     except Exception as exc:
         print(f"[build_meshes_from_folder] Warning: could not write cache: {exc}")
     gc.collect()
@@ -588,10 +812,14 @@ class DicomLoader(QThread):
             meshset.preset        = self.preset
             meshset.bone_isovalue = PRESETS.get(self.preset, PRESETS["body"])["bone"]
             meshset.bone_mesh     = meshset._build_bone(meshset.bone_isovalue, preset=self.preset)
+            meshset.organ_meshes  = meshset._extract_organs(preset=self.preset)
 
             # Save to disk cache so future loads take <0.2s
             try:
                 meshset.bone_mesh.save(cache_path)
+                for organ_name, organ_info in meshset.organ_meshes.items():
+                    ocp = get_organ_cache_path(self.folder_path, organ_name)
+                    organ_info["mesh"].save(ocp)
             except Exception as exc:
                 print(f"[DicomLoader] Warning: could not write cache: {exc}")
 

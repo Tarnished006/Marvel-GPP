@@ -116,6 +116,12 @@ class Viewer3D(QWidget):
         self._ghost_active      = False
         self.mesh_bounds        = None
 
+        # Multi-organ & Anatomical Layers state
+        self.organ_actors: dict[str, pv.Actor] = {}
+        self.organ_meshes: dict[str, dict] = {}
+        self.organ_visible: dict[str, bool] = {}
+        self.skeleton_mode: str = "solid"  # "solid" (1.0), "ghost" (0.28), "hidden" (0.0)
+
         # Voice/feature state
         self._voice_zoom_level = 1.0      # bookkeeping for "zoom to X percent"
         self._clip_active      = False    # cross-section clipping plane
@@ -486,6 +492,94 @@ class Viewer3D(QWidget):
         self.menu_views.addAction(self.act_ghost)
         self.btn_reset_view.setMenu(self.menu_views)
         row_top.addWidget(self.btn_reset_view)
+
+        row_top.addWidget(_make_vsep())
+
+        # ── Group 3: ANATOMICAL LAYERS (Row 1) ────────────────────────────────
+        row_top.addWidget(_make_group_lbl("LAYERS:"))
+
+        # Skeleton Mode (Solid, Ghost, Hidden)
+        self.btn_skeleton_mode = QPushButton("🦴 Skeleton: Solid ▼")
+        self.btn_skeleton_mode.setFixedHeight(24)
+        self.btn_skeleton_mode.setStyleSheet(
+            btn_style_base +
+            "QPushButton { background: #162416; color: #a5d6a7; border-color: #2e7d32; font-weight: 700; } "
+            "QPushButton:hover { background: #1f331f; color: #c8e6c9; border-color: #388e3c; }"
+        )
+        self.menu_skeleton = QMenu(self.btn_skeleton_mode)
+        self.menu_skeleton.setStyleSheet(menu_style)
+        self.act_skel_solid = QAction("🦴 Solid Skeleton (100% Opacity)", self)
+        self.act_skel_solid.triggered.connect(lambda: self.set_skeleton_mode("solid"))
+        self.menu_skeleton.addAction(self.act_skel_solid)
+        self.act_skel_ghost = QAction("👻 Ghost Skeleton (30% Translucent)", self)
+        self.act_skel_ghost.triggered.connect(lambda: self.set_skeleton_mode("ghost"))
+        self.menu_skeleton.addAction(self.act_skel_ghost)
+        self.act_skel_hide = QAction("🚫 Hide Skeleton", self)
+        self.act_skel_hide.triggered.connect(lambda: self.set_skeleton_mode("hidden"))
+        self.menu_skeleton.addAction(self.act_skel_hide)
+        self.btn_skeleton_mode.setMenu(self.menu_skeleton)
+        row_top.addWidget(self.btn_skeleton_mode)
+
+        # Dynamic Organ Toggle Chips (visible contextual to current scan)
+        self.btn_organ_heart = QPushButton("❤️ Heart")
+        self.btn_organ_heart.setCheckable(True)
+        self.btn_organ_heart.setChecked(True)
+        self.btn_organ_heart.setFixedHeight(24)
+        self.btn_organ_heart.setStyleSheet(
+            btn_style_base +
+            "QPushButton:checked { background: #351414; color: #ff8a80; border-color: #c62828; font-weight: bold; } "
+            "QPushButton:!checked { background: #1a1a1a; color: #666; border-color: #2a2a2a; }"
+        )
+        self.btn_organ_heart.clicked.connect(lambda checked: self.set_organ_visible("heart", checked))
+        self.btn_organ_heart.setVisible(False)
+        row_top.addWidget(self.btn_organ_heart)
+
+        self.btn_organ_lungs = QPushButton("🫁 Lungs")
+        self.btn_organ_lungs.setCheckable(True)
+        self.btn_organ_lungs.setChecked(True)
+        self.btn_organ_lungs.setFixedHeight(24)
+        self.btn_organ_lungs.setStyleSheet(
+            btn_style_base +
+            "QPushButton:checked { background: #002830; color: #80deea; border-color: #00838f; font-weight: bold; } "
+            "QPushButton:!checked { background: #1a1a1a; color: #666; border-color: #2a2a2a; }"
+        )
+        self.btn_organ_lungs.clicked.connect(lambda checked: self.set_organ_visible("lungs", checked))
+        self.btn_organ_lungs.setVisible(False)
+        row_top.addWidget(self.btn_organ_lungs)
+
+        self.btn_organ_brain = QPushButton("🧠 Brain")
+        self.btn_organ_brain.setCheckable(True)
+        self.btn_organ_brain.setChecked(True)
+        self.btn_organ_brain.setFixedHeight(24)
+        self.btn_organ_brain.setStyleSheet(
+            btn_style_base +
+            "QPushButton:checked { background: #331525; color: #f48fb1; border-color: #ad1457; font-weight: bold; } "
+            "QPushButton:!checked { background: #1a1a1a; color: #666; border-color: #2a2a2a; }"
+        )
+        self.btn_organ_brain.clicked.connect(lambda checked: self.set_organ_visible("brain", checked))
+        self.btn_organ_brain.setVisible(False)
+        row_top.addWidget(self.btn_organ_brain)
+
+        self.btn_organ_kidneys = QPushButton("🫘 Kidneys")
+        self.btn_organ_kidneys.setCheckable(True)
+        self.btn_organ_kidneys.setChecked(True)
+        self.btn_organ_kidneys.setFixedHeight(24)
+        self.btn_organ_kidneys.setStyleSheet(
+            btn_style_base +
+            "QPushButton:checked { background: #332200; color: #ffe082; border-color: #f57f17; font-weight: bold; } "
+            "QPushButton:!checked { background: #1a1a1a; color: #666; border-color: #2a2a2a; }"
+        )
+        self.btn_organ_kidneys.clicked.connect(lambda checked: self.set_organ_visible("kidneys", checked))
+        self.btn_organ_kidneys.setVisible(False)
+        row_top.addWidget(self.btn_organ_kidneys)
+
+        self.btn_layers_reset = QPushButton("↺ Layers")
+        self.btn_layers_reset.setFixedHeight(24)
+        self.btn_layers_reset.setStyleSheet(btn_style_base)
+        self.btn_layers_reset.setToolTip("Reset all anatomical layers to default visible state")
+        self.btn_layers_reset.clicked.connect(self.reset_anatomical_layers)
+        self.btn_layers_reset.setVisible(False)
+        row_top.addWidget(self.btn_layers_reset)
 
         # Retained spin/ghost buttons for backwards compatibility
         self.btn_start_spin = QPushButton("▶ Start Spin")
@@ -1604,10 +1698,34 @@ class Viewer3D(QWidget):
             light_type="scene light",
         ))
 
-        self.bone_actor, _skin = meshset.add_to_plotter(
+        self.bone_actor, self.organ_actors = meshset.add_to_plotter(
             self.plotter,
             density_mode=self._density_active,
         )
+        self.organ_meshes = getattr(meshset, "organ_meshes", {})
+        self.organ_visible = {name: True for name in self.organ_meshes}
+        self.skeleton_mode = "solid"
+        if hasattr(self, "btn_skeleton_mode"):
+            self.btn_skeleton_mode.setText("🦴 Skeleton: Solid ▼")
+
+        has_organs = bool(self.organ_meshes)
+        if hasattr(self, "btn_layers_reset"):
+            self.btn_layers_reset.setVisible(has_organs)
+
+        organ_buttons = {
+            "heart": getattr(self, "btn_organ_heart", None),
+            "lungs": getattr(self, "btn_organ_lungs", None),
+            "brain": getattr(self, "btn_organ_brain", None),
+            "kidneys": getattr(self, "btn_organ_kidneys", None),
+        }
+        for oname, obtn in organ_buttons.items():
+            if obtn is not None:
+                present = oname in self.organ_meshes
+                obtn.setVisible(present)
+                obtn.blockSignals(True)
+                obtn.setChecked(True)
+                obtn.blockSignals(False)
+
         self.mesh_bounds = meshset.bone_mesh.bounds
         # Kept so cross-section clipping and the density colormap can re-add the
         # mesh without re-running the whole DICOM -> mesh pipeline.
@@ -2211,9 +2329,111 @@ class Viewer3D(QWidget):
             "toggle study info": "toggle study info",
             "toggle scan metadata": "toggle study info",
             "toggle study information": "toggle study info",
+
+            # Anatomical layers and organ voice aliases
+            "show heart": "show heart",
+            "heart view": "show heart",
+            "enable heart": "show heart",
+            "hide heart": "hide heart",
+            "disable heart": "hide heart",
+            "isolate heart": "isolate heart",
+            "heart only": "isolate heart",
+
+            "show lungs": "show lungs",
+            "lungs view": "show lungs",
+            "enable lungs": "show lungs",
+            "hide lungs": "hide lungs",
+            "disable lungs": "hide lungs",
+            "isolate lungs": "isolate lungs",
+            "lungs only": "isolate lungs",
+
+            "show brain": "show brain",
+            "brain view": "show brain",
+            "enable brain": "show brain",
+            "hide brain": "hide brain",
+            "disable brain": "hide brain",
+            "isolate brain": "isolate brain",
+            "brain only": "isolate brain",
+
+            "show kidneys": "show kidneys",
+            "kidneys view": "show kidneys",
+            "enable kidneys": "show kidneys",
+            "hide kidneys": "hide kidneys",
+            "disable kidneys": "hide kidneys",
+            "isolate kidneys": "isolate kidneys",
+            "kidneys only": "isolate kidneys",
+
+            "ghost skeleton": "ghost skeleton",
+            "ghost bone": "ghost skeleton",
+            "translucent skeleton": "ghost skeleton",
+            "solid skeleton": "solid skeleton",
+            "solid bone": "solid skeleton",
+            "hide skeleton": "hide skeleton",
+            "hide bone": "hide skeleton",
+            "show skeleton": "solid skeleton",
+            "show bone": "solid skeleton",
+
+            "reset layers": "reset layers",
+            "show all layers": "reset layers",
+            "show all organs": "reset layers",
+            "reset organs": "reset layers",
         }
 
         command = aliases.get(command, command)
+
+        # Anatomical layer & organ voice actions
+        if command == "show heart":
+            self.set_organ_visible("heart", True)
+            return
+        if command == "hide heart":
+            self.set_organ_visible("heart", False)
+            return
+        if command == "isolate heart":
+            self.isolate_organ("heart")
+            return
+
+        if command == "show lungs":
+            self.set_organ_visible("lungs", True)
+            return
+        if command == "hide lungs":
+            self.set_organ_visible("lungs", False)
+            return
+        if command == "isolate lungs":
+            self.isolate_organ("lungs")
+            return
+
+        if command == "show brain":
+            self.set_organ_visible("brain", True)
+            return
+        if command == "hide brain":
+            self.set_organ_visible("brain", False)
+            return
+        if command == "isolate brain":
+            self.isolate_organ("brain")
+            return
+
+        if command == "show kidneys":
+            self.set_organ_visible("kidneys", True)
+            return
+        if command == "hide kidneys":
+            self.set_organ_visible("kidneys", False)
+            return
+        if command == "isolate kidneys":
+            self.isolate_organ("kidneys")
+            return
+
+        if command == "ghost skeleton":
+            self.set_skeleton_mode("ghost")
+            return
+        if command == "solid skeleton":
+            self.set_skeleton_mode("solid")
+            return
+        if command == "hide skeleton":
+            self.set_skeleton_mode("hidden")
+            return
+        if command == "reset layers":
+            self.reset_anatomical_layers()
+            return
 
         # Density heatmap commands
         if command in ("show density", "density"):
@@ -2768,11 +2988,19 @@ class Viewer3D(QWidget):
             origin = (cx, cy, pos)
 
         try:
+            try:
+                mesh.clear_cell_data()
+            except Exception:
+                pass
             clipped = mesh.clip(
                 normal=axis,
                 origin=origin,
                 invert=getattr(self, "_clip_inverted", False),
             )
+            try:
+                clipped.clear_cell_data()
+            except Exception:
+                pass
             if clipped.n_points == 0 or clipped.n_cells == 0:
                 print(f"[Viewer3D] Warning: Clipping plane at {axis}={pos:.1f} produced an empty mesh.")
                 p = self.window()
@@ -2808,74 +3036,87 @@ class Viewer3D(QWidget):
         try:
             if self.bone_actor is not None:
                 self.plotter.remove_actor(self.bone_actor, render=False)
+                self.bone_actor = None
 
-            if getattr(self, "_density_active", False):
-                # Heatmap mode: verify presence of HU_density scalars
-                has_hu = "HU_density" in mesh.point_data
-                if not has_hu:
-                    orig = getattr(self, "_bone_mesh", None)
-                    if orig is not None and "HU_density" in orig.point_data:
-                        self._update_clipped_mesh()
-                        mesh = self._get_current_display_mesh()
-                        has_hu = mesh is not None and "HU_density" in mesh.point_data
+            if getattr(self, "skeleton_mode", "solid") != "hidden":
+                if getattr(self, "_density_active", False):
+                    # Heatmap mode: verify presence of HU_density scalars
+                    has_hu = "HU_density" in mesh.point_data
+                    if not has_hu:
+                        orig = getattr(self, "_bone_mesh", None)
+                        if orig is not None and "HU_density" in orig.point_data:
+                            self._update_clipped_mesh()
+                            mesh = self._get_current_display_mesh()
+                            has_hu = mesh is not None and "HU_density" in mesh.point_data
 
-                if has_hu:
-                    meshset = getattr(self, "_meshset", None)
-                    if meshset is not None and hasattr(meshset, "get_hu_range"):
-                        lo, hi = meshset.get_hu_range()
+                    if has_hu:
+                        meshset = getattr(self, "_meshset", None)
+                        if meshset is not None and hasattr(meshset, "get_hu_range"):
+                            lo, hi = meshset.get_hu_range()
+                        else:
+                            arr = np.asarray(mesh.point_data["HU_density"])
+                            lo = float(max(150.0, np.percentile(arr, 5)))
+                            hi = float(max(lo + 300.0, min(2200.0, np.percentile(arr, 98))))
+
+                        self.bone_actor = self.plotter.add_mesh(
+                            mesh,
+                            scalars="HU_density",
+                            cmap="turbo",
+                            clim=(lo, hi),
+                            smooth_shading=True,
+                            ambient=0.35,
+                            diffuse=0.75,
+                            specular=0.15,
+                            specular_power=10,
+                            opacity=getattr(self, "_bone_opacity", 1.0),
+                            name="bone",
+                            scalar_bar_args={
+                                "title": "Density (HU)",
+                                "color": "#e0e0e0",
+                                "title_font_size": 11,
+                                "label_font_size": 9,
+                                "shadow": False,
+                                "n_labels": 5,
+                                "fmt": "%.0f",
+                                "position_x": 0.84,
+                                "position_y": 0.05,
+                                "width": 0.12,
+                                "height": 0.38,
+                            },
+                        )
+                        if hasattr(self, "legend_card"):
+                            self.legend_card.setVisible(True)
+                            self._reposition_legend()
                     else:
-                        arr = np.asarray(mesh.point_data["HU_density"])
-                        lo = float(max(150.0, np.percentile(arr, 5)))
-                        hi = float(max(lo + 300.0, min(2200.0, np.percentile(arr, 98))))
-
-                    self.bone_actor = self.plotter.add_mesh(
-                        mesh,
-                        scalars="HU_density",
-                        cmap="turbo",
-                        clim=(lo, hi),
-                        smooth_shading=True,
-                        ambient=0.35,
-                        diffuse=0.75,
-                        specular=0.15,
-                        specular_power=10,
-                        opacity=getattr(self, "_bone_opacity", 1.0),
-                        name="bone",
-                        scalar_bar_args={
-                            "title": "Density (HU)",
-                            "color": "#e0e0e0",
-                            "title_font_size": 11,
-                            "label_font_size": 9,
-                            "shadow": False,
-                            "n_labels": 5,
-                            "fmt": "%.0f",
-                            "position_x": 0.84,
-                            "position_y": 0.05,
-                            "width": 0.12,
-                            "height": 0.38,
-                        },
-                    )
-                    if hasattr(self, "legend_card"):
-                        self.legend_card.setVisible(True)
-                        self._reposition_legend()
+                        self._density_active = False
+                        if hasattr(self, "combo_bone_mode"):
+                            self.combo_bone_mode.blockSignals(True)
+                            self.combo_bone_mode.setCurrentIndex(0)
+                            self.combo_bone_mode.blockSignals(False)
+                        self._sync_bone_mode_buttons(False)
+                        if hasattr(self, "legend_card"):
+                            self.legend_card.setVisible(False)
+                        self._render_normal_bone(mesh)
                 else:
-                    self._density_active = False
-                    if hasattr(self, "combo_bone_mode"):
-                        self.combo_bone_mode.blockSignals(True)
-                        self.combo_bone_mode.setCurrentIndex(0)
-                        self.combo_bone_mode.blockSignals(False)
-                    self._sync_bone_mode_buttons(False)
+                    # Normal bone view: warm natural cortical bone shading
+                    try:
+                        self.plotter.remove_scalar_bar("Density (HU)")
+                    except Exception:
+                        pass
                     if hasattr(self, "legend_card"):
                         self.legend_card.setVisible(False)
                     self._render_normal_bone(mesh)
             else:
-                # Normal bone view: warm natural cortical bone shading
+                # Skeleton hidden: hide scalar bar if active
                 try:
                     self.plotter.remove_scalar_bar("Density (HU)")
                 except Exception:
                     pass
                 if hasattr(self, "legend_card"):
                     self.legend_card.setVisible(False)
-                self._render_normal_bone(mesh)
+
+            # Re-apply synchronous clipping and visibility to organ layers
+            self._update_organ_actors()
 
             self.plotter.render()
         except Exception as exc:
@@ -3006,6 +3247,159 @@ class Viewer3D(QWidget):
             if hasattr(self, "plotter"):
                 self.plotter.render()
         self._notify_metadata_changed()
+
+    # ── Anatomical Layers & Multi-Organ Management ────────────────────────────
+
+    def set_skeleton_mode(self, mode: str):
+        """Sets skeleton rendering mode:
+        - 'solid': 100% opacity bone
+        - 'ghost': 28% opacity bone with natural shading so internal organs are visible inside
+        - 'hidden': 0% opacity / hidden bone so only soft-tissue organs are seen
+        """
+        mode = str(mode).lower().strip()
+        if mode not in ("solid", "ghost", "hidden"):
+            mode = "solid"
+        self.skeleton_mode = mode
+
+        if hasattr(self, "btn_skeleton_mode"):
+            label_map = {
+                "solid": "🦴 Skeleton: Solid ▼",
+                "ghost": "👻 Skeleton: Ghost ▼",
+                "hidden": "🚫 Skeleton: Off ▼",
+            }
+            self.btn_skeleton_mode.setText(label_map.get(mode, "🦴 Skeleton: Solid ▼"))
+
+        if mode == "hidden":
+            self._bone_opacity = 0.0
+            if self.bone_actor is not None:
+                try:
+                    self.bone_actor.prop.opacity = 0.0
+                except Exception:
+                    try:
+                        self.bone_actor.GetProperty().SetOpacity(0.0)
+                    except Exception:
+                        pass
+            if hasattr(self, "lbl_opacity"):
+                self.lbl_opacity.setText("0%")
+            if hasattr(self, "slider_opacity"):
+                self.slider_opacity.blockSignals(True)
+                self.slider_opacity.setValue(0)
+                self.slider_opacity.blockSignals(False)
+        elif mode == "ghost":
+            self.set_bone_opacity(0.28)
+        else:  # solid
+            self.set_bone_opacity(1.0)
+
+        self._apply_bone_rendering()
+
+    def set_organ_visible(self, organ_name: str, visible: bool):
+        """Sets visibility of a specific anatomical organ."""
+        organ_name = str(organ_name).lower().strip()
+        self.organ_visible[organ_name] = bool(visible)
+
+        btn_map = {
+            "heart": getattr(self, "btn_organ_heart", None),
+            "lungs": getattr(self, "btn_organ_lungs", None),
+            "brain": getattr(self, "btn_organ_brain", None),
+            "kidneys": getattr(self, "btn_organ_kidneys", None),
+        }
+        btn = btn_map.get(organ_name)
+        if btn is not None:
+            btn.blockSignals(True)
+            btn.setChecked(bool(visible))
+            btn.blockSignals(False)
+
+        self._update_organ_actors()
+        self._notify_metadata_changed()
+
+    def toggle_organ(self, organ_name: str):
+        """Toggles visibility of an anatomical organ."""
+        current = self.organ_visible.get(organ_name, True)
+        self.set_organ_visible(organ_name, not current)
+
+    def isolate_organ(self, organ_name: str):
+        """Isolates an organ by hiding the skeleton and all other organs."""
+        organ_name = str(organ_name).lower().strip()
+        self.set_skeleton_mode("hidden")
+        for oname in list(self.organ_meshes.keys()):
+            self.set_organ_visible(oname, oname == organ_name)
+
+    def reset_anatomical_layers(self):
+        """Restores full anatomical view: solid skeleton and all organs visible."""
+        self.set_skeleton_mode("solid")
+        for oname in list(self.organ_meshes.keys()):
+            self.set_organ_visible(oname, True)
+
+    def _update_organ_actors(self):
+        """Re-syncs organ actors with active visibility, colors, and clipping planes."""
+        if not hasattr(self, "plotter") or self.plotter is None:
+            return
+
+        for name, oinfo in self.organ_meshes.items():
+            # Remove old actor if present
+            if name in self.organ_actors and self.organ_actors[name] is not None:
+                try:
+                    self.plotter.remove_actor(self.organ_actors[name], render=False)
+                except Exception:
+                    pass
+                self.organ_actors[name] = None
+
+            if not self.organ_visible.get(name, True):
+                continue
+
+            omesh = oinfo["mesh"]
+            try:
+                omesh.clear_cell_data()
+            except Exception:
+                pass
+            if getattr(self, "_clip_active", False):
+                try:
+                    axis = getattr(self, "_clip_axis", "y").lower().strip()
+                    mesh_bone = getattr(self, "_bone_mesh", None)
+                    if mesh_bone is not None:
+                        bounds = mesh_bone.bounds
+                        if axis == "x":
+                            lo, hi = bounds[0], bounds[1]
+                        elif axis == "y":
+                            lo, hi = bounds[2], bounds[3]
+                        else:
+                            lo, hi = bounds[4], bounds[5]
+                        fraction = float(np.clip(self._clip_fraction, 0.005, 0.995))
+                        pos = lo + fraction * (hi - lo)
+                        cx, cy, cz = mesh_bone.center
+                        if axis == "x":
+                            origin = (pos, cy, cz)
+                        elif axis == "y":
+                            origin = (cx, pos, cz)
+                        else:
+                            origin = (cx, cy, pos)
+                        omesh = omesh.clip(normal=axis, origin=origin, invert=getattr(self, "_clip_inverted", False))
+                        try:
+                            omesh.clear_cell_data()
+                        except Exception:
+                            pass
+                except Exception as exc:
+                    print(f"[Viewer3D] Organ clipping warning for {name}: {exc}")
+
+            if omesh.n_cells > 0:
+                try:
+                    act = self.plotter.add_mesh(
+                        omesh,
+                        color=oinfo.get("color", "#ff5555"),
+                        smooth_shading=True,
+                        ambient=0.30,
+                        diffuse=0.80,
+                        specular=0.25,
+                        specular_power=15,
+                        opacity=oinfo.get("opacity", 1.0),
+                        name=f"organ_{name}",
+                    )
+                    self.organ_actors[name] = act
+                except Exception as exc:
+                    print(f"[Viewer3D] Organ render warning for {name}: {exc}")
+
+        if hasattr(self, "plotter"):
+            self.plotter.render()
 
     def set_density_colormap(self, active: bool):
         """Toggle density-based heatmap coloring using genuine CT Hounsfield Units (HU).

@@ -49,13 +49,14 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 def _discover_local_datasets():
     candidates = []
-    for name in ("skull", "DICOM"):
-        path = os.path.join(_ROOT, name)
-        if os.path.isdir(path):
-            dcm_count = sum(1 for f in os.listdir(path) if f.lower().endswith(".dcm"))
+    for entry in os.listdir(_ROOT):
+        path = os.path.join(_ROOT, entry)
+        if os.path.isdir(path) and entry not in (".git", ".venv", ".cache", "__pycache__"):
+            dcm_count = sum(1 for f in os.listdir(path) if f.lower().endswith((".dcm", ".ima")))
             if dcm_count > 1:
-                preset = "skull" if "skull" in name.lower() else "body"
-                label  = f"{name}  ({dcm_count} slices)"
+                preset = "skull" if "skull" in entry.lower() else "body"
+                display = entry.replace("_", " ").capitalize()
+                label  = f"{display}  ({dcm_count} slices)"
                 candidates.append((label, path, preset))
     return candidates
 

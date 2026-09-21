@@ -50,28 +50,52 @@ def get_scans_for_patient(mrn: str) -> list[dict]:
 
 def _format_age(age: str) -> str:
     """DICOM PatientAge comes as e.g. '082Y' -> return '82'."""
-    if not age:
-        return ""
-    digits = age.rstrip("YMD")
-    return str(int(digits)) if digits.isdigit() else age
+    if not age or str(age).strip() in ("U", "U U", "None", ""):
+        return "Unk"
+    digits = str(age).strip().upper().rstrip("YMD ")
+    return str(int(digits)) if digits.isdigit() else digits
 
 def _format_date(study_date: str) -> str:
     """DICOM StudyDate comes as YYYYMMDD -> return YYYY-MM-DD."""
     if study_date and len(study_date) == 8 and study_date.isdigit():
         return f"{study_date[0:4]}-{study_date[4:6]}-{study_date[6:8]}"
-    return study_date or ""
+    return study_date or "Unknown Date"
 
 def get_patients_for_ui() -> list[dict]:
-    """Shaped for dashboard.py / or_icu_mode.py: name, mrn, age, sex, scans (count)."""
+    """Shaped for dashboard.py: includes latest scan data for the card."""
     result = []
     for p in get_all_patients():
-        scan_count = len(get_scans_for_patient(p["mrn"]))
+        scans = get_scans_for_patient(p["mrn"])
+        scan_count = len(scans)
+        
+        # Determine primary scan details for the card
+        primary_scan = scans[0] if scans else {}
+        modality = primary_scan.get("modality", "CT")
+        slice_cnt = primary_scan.get("slice_count", 0)
+        desc = primary_scan.get("description", "Scan")
+        date = _format_date(primary_scan.get("study_date", ""))
+        
+        # Clean sex field
+        sex = str(p["sex"]).strip() if p["sex"] else "U"
+        if sex in ("U U", "None"): sex = "U"
+        
         result.append({
             "mrn": p["mrn"],
             "name": p["name"],
             "age": _format_age(p["age"]),
-            "sex": p["sex"] or "",
+            "sex": sex,
             "scans": scan_count,
+            "scan_desc": desc,
+            "scan_type": modality,
+            "scan_date": date,
+            "slice_count": slice_cnt,
+            "_scan": {
+                "type": modality,
+                "date": date,
+                "description": desc,
+                "file_path": primary_scan.get("file_path", ""),
+                "slice_count": slice_cnt,
+            } if primary_scan else {}
         })
     return result
 

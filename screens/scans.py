@@ -13,7 +13,7 @@ from PyQt6.QtGui import QPixmap, QImage
 def dicom_to_qpixmap(file_path: str) -> QPixmap | None:
     try:
         if os.path.isdir(file_path):
-            dcm_files = [f for f in os.listdir(file_path) if f.endswith(".dcm")]
+            dcm_files = [f for f in os.listdir(file_path) if f.lower().endswith((".dcm", ".ima"))]
             if not dcm_files:
                 return None
             file_path = os.path.join(file_path, sorted(dcm_files)[0])

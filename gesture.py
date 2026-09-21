@@ -22,9 +22,39 @@ class CameraStream:
     never blocks or lags behind real-time hand motion.
     """
     def __init__(self, src=0, width=640, height=480, fps=30):
-        if sys.platform == "win32":
-            self.cap = cv2.VideoCapture(src, cv2.CAP_DSHOW)
-        else:
+        self.cap = None
+        self.running = False
+        
+        # Try multiple camera indices and backends
+        def try_open_camera(idx):
+            if sys.platform == "win32":
+                # Try MSMF first, then DSHOW, then default
+                for backend in [cv2.CAP_MSMF, cv2.CAP_DSHOW, cv2.CAP_ANY]:
+                    cap = cv2.VideoCapture(idx, backend)
+                    if cap.isOpened():
+                        ok, _ = cap.read()
+                        if ok:
+                            return cap
+                    cap.release()
+            else:
+                cap = cv2.VideoCapture(idx)
+                if cap.isOpened():
+                    ok, _ = cap.read()
+                    if ok:
+                        return cap
+                cap.release()
+            return None
+
+        # Try to find a working camera
+        for test_src in [src, 0, 1, 2]:
+            self.cap = try_open_camera(test_src)
+            if self.cap is not None:
+                print(f"[CameraStream] Successfully opened camera index {test_src}")
+                break
+                
+        if self.cap is None:
+            print("[CameraStream] WARNING: Could not open any camera feed.")
+            # Fallback to a dummy cap so the program doesn't crash
             self.cap = cv2.VideoCapture(src)
 
         self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)

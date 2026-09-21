@@ -6,3 +6,5 @@ __pycache__/
 .cache/
 reports/
 captures/
+.venv/
+tests/test_reports/

@@ -8,3 +8,6 @@ reports/
 captures/
 .venv/
 tests/test_reports/
+chest_real/
+abdomen_real/
+*.zip

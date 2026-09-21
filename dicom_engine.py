@@ -40,12 +40,17 @@ _VOL_RESAMPLE   = 0.50 if JETSON_OPTIMIZED else 1.0
 _DECIMATE       = 0.92 if JETSON_OPTIMIZED else 0.88
 
 # ── HU thresholds per scan type ───────────────────────────────────────────────
-# skull: 250 HU catches the complete calvarium including thinner parietal and
-#        sphenoid wings that disappear at 300+ HU.
-# body:  200 HU for dense cortical bone throughout the torso (400 HU was erasing ribs).
+# skull:   250 HU catches the complete calvarium including thinner parietal and sphenoid wings.
+# chest:   260 HU preserves complete ribcage, clavicles & scapulae while eliminating contrast in heart/aorta.
+# spine:   240 HU isolates vertebral column and posterior arches.
+# abdomen: 220 HU captures pelvis and lumbar anatomy cleanly.
+# body:    220 HU general default for torso.
 PRESETS: dict = {
-    "skull": {"bone": 250.0},
-    "body":  {"bone": 200.0},
+    "skull":   {"bone": 250.0},
+    "body":    {"bone": 220.0},
+    "chest":   {"bone": 260.0},
+    "spine":   {"bone": 240.0},
+    "abdomen": {"bone": 220.0},
 }
 
 # ── Natural bone colour ───────────────────────────────────────────────────────
@@ -278,8 +283,35 @@ class MeshSet:
         # Decimate: removes the given fraction of triangles while preserving shape.
         mesh = mesh.decimate(_DECIMATE)
         mesh = mesh.clean()
-        # Cleanly extracts the full connected skeleton and deletes floating scanner noise!
-        mesh = mesh.extract_largest()
+
+        # Multi-component anatomical connectivity filter:
+        # Replaces extract_largest() to preserve ALL anatomical bones (24 ribs, clavicles, scapulae)
+        # while removing isolated scanner noise particles and scanner couch/bed artifacts.
+        try:
+            conn = mesh.connectivity("all")
+            reg_ids = conn.cell_data.get("RegionId")
+            if reg_ids is not None and len(reg_ids) > 0:
+                counts = np.bincount(reg_ids)
+                min_cells = min(150, max(15, int(len(reg_ids) * 0.0004)))
+                candidate_regions = np.where(counts >= min_cells)[0]
+                
+                clean_regions = []
+                for r in candidate_regions:
+                    sub = conn.extract_cells(reg_ids == r)
+                    b = sub.bounds
+                    x_span = b[1] - b[0]
+                    y_span = b[3] - b[2]
+                    z_span = b[5] - b[4]
+                    # Scanner couch/bed artifact check: thin planar sheet (thickness < 20mm) spanning almost entire Z at volume boundary
+                    is_bed = (x_span < 20.0 and z_span > 240.0 and b[0] > 290.0) or (y_span < 20.0 and z_span > 240.0 and b[2] > 290.0)
+                    if not is_bed:
+                        clean_regions.append(r)
+                
+                if clean_regions:
+                    keep_cells = np.isin(reg_ids, clean_regions)
+                    mesh = conn.extract_cells(keep_cells).extract_surface(algorithm="dataset_surface")
+        except Exception:
+            mesh = mesh.clean()
 
         # Sample true volumetric HU density onto vertices before caching
         mesh = self._sample_hu_density(mesh)

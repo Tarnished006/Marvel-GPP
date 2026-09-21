@@ -47,6 +47,20 @@ except Exception:
 # ── Locate project-root DICOM folders ────────────────────────────────────────
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+from dicom_engine import detect_scan_anatomy
+
+def _preset_from_path(path: str) -> str:
+    anatomy = detect_scan_anatomy(path)
+    if anatomy in ("head", "skull"):
+        return "skull"
+    elif anatomy == "chest":
+        return "chest"
+    elif anatomy == "spine":
+        return "spine"
+    elif anatomy == "abdomen":
+        return "abdomen"
+    return "body"
+
 def _discover_local_datasets():
     candidates = []
     for entry in os.listdir(_ROOT):
@@ -54,7 +68,7 @@ def _discover_local_datasets():
         if os.path.isdir(path) and entry not in (".git", ".venv", ".cache", "__pycache__"):
             dcm_count = sum(1 for f in os.listdir(path) if f.lower().endswith((".dcm", ".ima")))
             if dcm_count > 1:
-                preset = "skull" if "skull" in entry.lower() else "body"
+                preset = _preset_from_path(path)
                 display = entry.replace("_", " ").capitalize()
                 label  = f"{display}  ({dcm_count} slices)"
                 candidates.append((label, path, preset))
@@ -1845,7 +1859,7 @@ class Viewer3D(QWidget):
             f"{scan.get('type', 'CT')} ({scan.get('slice_count', 1)} slices)"
         )
         folder = scan.get("file_path", "")
-        preset = "skull" if "skull" in folder.lower() else "body"
+        preset = _preset_from_path(folder)
 
         if folder and os.path.isdir(folder) and scan.get("slice_count", 1) > 1:
             self._start_load(folder, preset=preset, label=label)

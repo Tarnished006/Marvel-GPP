@@ -195,6 +195,81 @@ def test_viewer3d_clipping_synchronization(qapp):
     assert viewer.organ_actors.get("heart") is not None
 
 
+def test_abdomen_multi_organ_separation():
+    """Verify abdomen_real extracts distinct bilateral kidneys and liver rather than a single clump."""
+    ms = dicom_engine.build_meshes_from_folder("abdomen_real", preset="abdomen")
+    assert ms.bone_mesh is not None
+    assert "rkidney" in ms.organ_meshes, "Right kidney must be extracted"
+    assert "lkidney" in ms.organ_meshes, "Left kidney must be extracted"
+    assert "liver" in ms.organ_meshes, "Liver must be extracted"
+
+    rk = ms.organ_meshes["rkidney"]["mesh"]
+    lk = ms.organ_meshes["lkidney"]["mesh"]
+    liv = ms.organ_meshes["liver"]["mesh"]
+
+    assert rk.n_points > 500
+    assert lk.n_points > 500
+    assert liv.n_points > 1000
+
+    # Right and left kidneys must be separated along the sagittal axis (X)
+    assert rk.center[0] < lk.center[0], "Right kidney X center must be less than Left kidney X center"
+
+
+def test_cinematic_dvr_mode(qapp):
+    """Verify Cinematic Direct Volume Rendering (DVR) mode toggling and preset selection."""
+    viewer = Viewer3D()
+    viewer._active_path = "abdomen_real"
+    ms = dicom_engine.build_meshes_from_folder("abdomen_real", preset="abdomen")
+    viewer._on_meshes_ready(ms)
+
+    # Enable DVR mode
+    viewer.toggle_dvr_mode(True, preset="soft_tissue")
+    assert viewer._dvr_active
+    assert viewer._dvr_preset == "soft_tissue"
+    assert viewer._dvr_actor is not None
+    # Bone and organ actors must be hidden in DVR mode
+    if viewer.bone_actor is not None:
+        assert not viewer.bone_actor.GetVisibility()
+    for oact in viewer.organ_actors.values():
+        if oact is not None:
+            assert not oact.GetVisibility()
+
+    # Switch DVR preset
+    viewer.set_dvr_preset("vascular")
+    assert viewer._dvr_preset == "vascular"
+    assert viewer._dvr_actor is not None
+
+    # Disable DVR mode
+    viewer.toggle_dvr_mode(False)
+    assert not viewer._dvr_active
+    assert viewer._dvr_actor is None
+    if viewer.bone_actor is not None:
+        assert viewer.bone_actor.GetVisibility()
+
+
+def test_dvr_and_liver_voice_commands(qapp):
+    """Verify voice commands for liver and DVR mode."""
+    viewer = Viewer3D()
+    viewer._active_path = "abdomen_real"
+    ms = dicom_engine.build_meshes_from_folder("abdomen_real", preset="abdomen")
+    viewer._on_meshes_ready(ms)
+
+    viewer.handle_voice_command("show liver")
+    assert viewer.organ_visible.get("liver", False)
+
+    viewer.handle_voice_command("hide liver")
+    assert not viewer.organ_visible.get("liver", True)
+
+    viewer.handle_voice_command("enable dvr")
+    assert viewer._dvr_active
+
+    viewer.handle_voice_command("dvr vascular")
+    assert viewer._dvr_preset == "vascular"
+
+    viewer.handle_voice_command("disable dvr")
+    assert not viewer._dvr_active
+
+
 if __name__ == "__main__":
     import sys
     app = QApplication(sys.argv)
@@ -211,4 +286,10 @@ if __name__ == "__main__":
     print("[OK] test_viewer3d_voice_commands passed")
     test_viewer3d_clipping_synchronization(app)
     print("[OK] test_viewer3d_clipping_synchronization passed")
+    test_abdomen_multi_organ_separation()
+    print("[OK] test_abdomen_multi_organ_separation passed")
+    test_cinematic_dvr_mode(app)
+    print("[OK] test_cinematic_dvr_mode passed")
+    test_dvr_and_liver_voice_commands(app)
+    print("[OK] test_dvr_and_liver_voice_commands passed")
     print("\nALL MULTI-ORGAN TESTS PASSED SUCCESSFULLY!")

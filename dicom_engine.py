@@ -22,7 +22,33 @@ import os
 import pydicom
 import numpy as np
 import pyvista as pv
+import vtk
 from PyQt6.QtCore import QThread, pyqtSignal
+
+# ── Cinematic Direct Volume Rendering (DVR) Clinical Transfer Functions ──────
+DVR_PRESETS: dict = {
+    "soft_tissue": {
+        "name": "Soft Tissue & Viscera",
+        "clim": [-150, 600],
+        "mapping_values": [-1000, -150, -30, 30, 80, 150, 300, 1000],
+        "opacities": [0.0, 0.0, 0.01, 0.15, 0.30, 0.55, 0.85, 0.95],
+        "colors": ["#000000", "#100805", "#5c3a21", "#a63a3a", "#c94a4a", "#e65100", "#e8dfd0", "#ffffff"],
+    },
+    "vascular": {
+        "name": "Contrast & Vascular",
+        "clim": [50, 800],
+        "mapping_values": [-1000, 50, 120, 200, 350, 500, 1000],
+        "opacities": [0.0, 0.0, 0.10, 0.45, 0.80, 0.95, 0.98],
+        "colors": ["#000000", "#260505", "#800000", "#ff1744", "#ff9100", "#fff3e0", "#ffffff"],
+    },
+    "bone_depth": {
+        "name": "Bone & Depth",
+        "clim": [150, 1200],
+        "mapping_values": [-1000, 150, 250, 450, 700, 1000, 2000],
+        "opacities": [0.0, 0.0, 0.20, 0.70, 0.90, 0.98, 1.0],
+        "colors": ["#000000", "#3e2723", "#8d6e63", "#d7ccc8", "#f5f5f5", "#ffffff", "#ffffff"],
+    },
+}
 
 
 # ── Jetson Nano flag ──────────────────────────────────────────────────────────
@@ -361,6 +387,68 @@ class MeshSet:
             pass
         return mesh
 
+    @staticmethod
+    def _extract_smooth_organ(
+        sub_arr: np.ndarray,
+        origin: tuple[float, float, float],
+        spacing: tuple[float, float, float],
+        iso: float = 45.0,
+        sigma: tuple[float, float, float] = (1.2, 1.2, 1.0),
+        n_iter: int = 25,
+        pass_band: float = 0.03,
+        decimate_ratio: float = 0.85,
+    ) -> pv.PolyData | None:
+        """Utility to extract an organically smoothed 3D mesh from a CT subvolume."""
+        try:
+            grid = pv.wrap(sub_arr.astype(np.float32))
+            grid.spacing = spacing
+            grid.origin = origin
+            smoother = vtk.vtkImageGaussianSmooth()
+            smoother.SetInputData(grid)
+            smoother.SetStandardDeviation(*sigma)
+            smoother.SetRadiusFactor(2.0)
+            smoother.Update()
+            sm_grid = pv.wrap(smoother.GetOutput())
+            surf = sm_grid.contour(isosurfaces=[float(iso)], method="flying_edges")
+            if surf is None or surf.n_points == 0:
+                return None
+            surf = surf.connectivity("largest").clean()
+            try:
+                surf.clear_cell_data()
+                surf.clear_point_data()
+            except Exception:
+                pass
+            sinc = vtk.vtkWindowedSincPolyDataFilter()
+            sinc.SetInputData(surf)
+            sinc.SetNumberOfIterations(n_iter)
+            sinc.SetPassBand(pass_band)
+            sinc.NonManifoldSmoothingOn()
+            sinc.NormalizeCoordinatesOn()
+            sinc.Update()
+            smooth_surf = pv.wrap(sinc.GetOutput()).clean()
+            try:
+                smooth_surf.clear_cell_data()
+                smooth_surf.clear_point_data()
+            except Exception:
+                pass
+            if decimate_ratio > 0 and smooth_surf.n_cells > 2000:
+                try:
+                    smooth_surf = smooth_surf.decimate(decimate_ratio).clean()
+                except Exception:
+                    try:
+                        smooth_surf = smooth_surf.decimate_pro(decimate_ratio).clean()
+                    except Exception:
+                        pass
+            try:
+                smooth_surf.clear_cell_data()
+                smooth_surf.clear_point_data()
+            except Exception:
+                pass
+            return smooth_surf if smooth_surf.n_cells > 100 else None
+        except Exception as exc:
+            print(f"[dicom_engine] Organ extraction error: {exc}")
+            return None
+
     def _extract_organs(self, preset: str = "body") -> dict[str, dict]:
         """Extracts patient-specific anatomical organ meshes based on scan type."""
         organs = {}
@@ -371,24 +459,15 @@ class MeshSet:
         h, w, d = arr.shape
         sp = self.volume.pixel_spacing
         st = self.volume.slice_thickness
+        spacing = (sp[1], sp[0], st)
 
         if preset == "chest":
-            # 1. Real Heart & Great Vessels
+            # 1. Smooth Heart & Mediastinal Silhouette
             try:
-                arr_h = np.zeros_like(arr)
-                med_slice = arr[int(h*0.30):int(h*0.62), int(w*0.35):int(w*0.66), int(d*0.18):int(d*0.92)]
-                arr_h[int(h*0.30):int(h*0.62), int(w*0.35):int(w*0.66), int(d*0.18):int(d*0.92)] = np.where(
-                    med_slice >= 320.0, med_slice, 0.0
-                )
-                vh = pv.wrap(arr_h)
-                vh.spacing = (sp[0], sp[1], st)
-                mh = vh.contour(isosurfaces=[320.0], method="flying_edges").decimate(0.90).clean()
-                ch = mh.connectivity("largest").clean()
-                try:
-                    ch.clear_cell_data()
-                except Exception:
-                    pass
-                if ch.n_cells > 500:
+                heart_sub = arr[int(h*0.25):int(h*0.68), int(w*0.32):int(w*0.72), int(d*0.15):int(d*0.80)]
+                heart_orig = (int(w*0.32)*sp[1], int(h*0.25)*sp[0], int(d*0.15)*st)
+                ch = self._extract_smooth_organ(heart_sub, heart_orig, spacing, iso=40.0, decimate_ratio=0.85)
+                if ch is not None and ch.n_cells > 300:
                     organs["heart"] = {
                         "mesh": ch,
                         "color": "#d32f2f",
@@ -398,77 +477,93 @@ class MeshSet:
             except Exception as e:
                 print(f"[dicom_engine] Heart extraction skipped: {e}")
 
-            # 2. Real Pleural Lungs
+            # 2. Smooth Pleural Lungs
             try:
-                arr_l = np.zeros_like(arr)
-                chest_roi = arr[int(h*0.20):int(h*0.82), int(w*0.15):int(w*0.86), int(d*0.18):int(d*0.94)]
-                arr_l[int(h*0.20):int(h*0.82), int(w*0.15):int(w*0.86), int(d*0.18):int(d*0.94)] = np.where(
-                    chest_roi <= -450.0, 1.0, 0.0
-                )
-                vl = pv.wrap(arr_l)
-                vl.spacing = (sp[0], sp[1], st)
-                ml = vl.contour(isosurfaces=[0.5], method="flying_edges").decimate(0.90).clean()
-                conn_l = ml.connectivity("all")
-                reg_ids = conn_l.cell_data.get("RegionId")
-                if reg_ids is not None and len(reg_ids) > 0:
-                    counts = np.bincount(reg_ids)
-                    top_lungs = np.argsort(-counts)[:2]
-                    cl = conn_l.extract_cells(np.isin(reg_ids, top_lungs)).extract_surface(algorithm="dataset_surface").clean()
-                    try:
-                        cl.clear_cell_data()
-                    except Exception:
-                        pass
-                    if cl.n_cells > 500:
-                        organs["lungs"] = {
-                            "mesh": cl,
-                            "color": "#26c6da",
-                            "opacity": 0.25,
-                            "label": "Lungs",
-                        }
+                lungs_sub = np.where(arr[int(h*0.20):int(h*0.82), int(w*0.15):int(w*0.86), int(d*0.18):int(d*0.94)] <= -450.0, 1.0, 0.0)
+                lungs_orig = (int(w*0.15)*sp[1], int(h*0.20)*sp[0], int(d*0.18)*st)
+                cl = self._extract_smooth_organ(lungs_sub, lungs_orig, spacing, iso=0.5, decimate_ratio=0.90)
+                if cl is not None and cl.n_cells > 500:
+                    organs["lungs"] = {
+                        "mesh": cl,
+                        "color": "#26c6da",
+                        "opacity": 0.25,
+                        "label": "Lungs",
+                    }
             except Exception as e:
                 print(f"[dicom_engine] Lungs extraction skipped: {e}")
 
         elif preset == "abdomen":
-            # Real Kidneys / Visceral Vascular Bed
+            # 1. Real Right Kidney (Anatomical right, patient retroperitoneum)
+            rk_mesh = None
             try:
-                m_abd = self.volume.volume_data.contour(isosurfaces=[220.0], method="flying_edges").decimate(0.92).clean()
-                conn_abd = m_abd.connectivity("all")
-                reg_ids = conn_abd.cell_data.get("RegionId")
-                if reg_ids is not None and len(reg_ids) > 0:
-                    counts = np.bincount(reg_ids)
-                    top = np.argsort(-counts)
-                    if len(top) > 1 and counts[top[1]] > 5000:
-                        mk = conn_abd.extract_cells(reg_ids == top[1]).extract_surface(algorithm="dataset_surface").clean()
-                        try:
-                            mk.clear_cell_data()
-                        except Exception:
-                            pass
-                        organs["kidneys"] = {
-                            "mesh": mk,
-                            "color": "#ff8f00",
-                            "opacity": 0.90,
-                            "label": "Kidneys & Viscera",
-                        }
+                rk_sub = arr[int(h*0.16):int(h*0.44), int(w*0.18):int(w*0.48), int(d*0.12):int(d*0.60)]
+                rk_orig = (int(w*0.18)*sp[1], int(h*0.16)*sp[0], int(d*0.12)*st)
+                rk_mesh = self._extract_smooth_organ(rk_sub, rk_orig, spacing, iso=45.0, decimate_ratio=0.82)
+                if rk_mesh is not None and rk_mesh.n_cells > 200:
+                    organs["rkidney"] = {
+                        "mesh": rk_mesh,
+                        "color": "#e65100",
+                        "opacity": 0.95,
+                        "label": "Right Kidney",
+                    }
             except Exception as e:
-                print(f"[dicom_engine] Kidneys extraction skipped: {e}")
+                print(f"[dicom_engine] Right Kidney extraction skipped: {e}")
+
+            # 2. Real Left Kidney (Anatomical left, patient retroperitoneum)
+            lk_mesh = None
+            try:
+                lk_sub = arr[int(h*0.16):int(h*0.44), int(w*0.52):int(w*0.82), int(d*0.12):int(d*0.60)]
+                lk_orig = (int(w*0.52)*sp[1], int(h*0.16)*sp[0], int(d*0.12)*st)
+                lk_mesh = self._extract_smooth_organ(lk_sub, lk_orig, spacing, iso=45.0, decimate_ratio=0.82)
+                if lk_mesh is not None and lk_mesh.n_cells > 200:
+                    organs["lkidney"] = {
+                        "mesh": lk_mesh,
+                        "color": "#e65100",
+                        "opacity": 0.95,
+                        "label": "Left Kidney",
+                    }
+            except Exception as e:
+                print(f"[dicom_engine] Left Kidney extraction skipped: {e}")
+
+            # Combined Kidneys layer for unified toggle / backward compatibility
+            if rk_mesh is not None and lk_mesh is not None:
+                organs["kidneys"] = {
+                    "mesh": rk_mesh.merge(lk_mesh).clean(),
+                    "color": "#e65100",
+                    "opacity": 0.95,
+                    "label": "Kidneys (Bilateral)",
+                }
+            elif rk_mesh is not None:
+                organs["kidneys"] = organs["rkidney"]
+            elif lk_mesh is not None:
+                organs["kidneys"] = organs["lkidney"]
+
+            # 3. Real Liver (Right upper quadrant parenchyma)
+            try:
+                liv_sub = arr[int(h*0.20):int(h*0.75), int(w*0.10):int(w*0.54), int(d*0.35):int(d*0.95)]
+                liv_orig = (int(w*0.10)*sp[1], int(h*0.20)*sp[0], int(d*0.35)*st)
+                liv_mesh = self._extract_smooth_organ(liv_sub, liv_orig, spacing, iso=50.0, decimate_ratio=0.88)
+                if liv_mesh is not None and liv_mesh.n_cells > 500:
+                    organs["liver"] = {
+                        "mesh": liv_mesh,
+                        "color": "#8d6e63",
+                        "opacity": 0.60,
+                        "label": "Liver",
+                    }
+            except Exception as e:
+                print(f"[dicom_engine] Liver extraction skipped: {e}")
 
         elif preset in ("skull", "head"):
-            # Real Brain Mantle
+            # Real Brain Mantle (Cerebral hemispheres)
             try:
-                arr_b = np.zeros_like(arr)
-                calv_roi = arr[int(h*0.25):int(h*0.75), int(w*0.25):int(w*0.75), int(d*0.20):int(d*0.85)]
-                arr_b[int(h*0.25):int(h*0.75), int(w*0.25):int(w*0.75), int(d*0.20):int(d*0.85)] = np.where(
-                    (calv_roi >= 15.0) & (calv_roi <= 85.0), 1.0, 0.0
+                arr_b = np.where(
+                    (arr[int(h*0.25):int(h*0.75), int(w*0.25):int(w*0.75), int(d*0.20):int(d*0.85)] >= 15.0) &
+                    (arr[int(h*0.25):int(h*0.75), int(w*0.25):int(w*0.75), int(d*0.20):int(d*0.85)] <= 85.0),
+                    1.0, 0.0
                 )
-                vb = pv.wrap(arr_b)
-                vb.spacing = (sp[0], sp[1], st)
-                mb = vb.contour(isosurfaces=[0.5], method="flying_edges").decimate(0.92).clean()
-                cb = mb.connectivity("largest").clean()
-                try:
-                    cb.clear_cell_data()
-                except Exception:
-                    pass
-                if cb.n_cells > 1000:
+                b_orig = (int(w*0.25)*sp[1], int(h*0.25)*sp[0], int(d*0.20)*st)
+                cb = self._extract_smooth_organ(arr_b, b_orig, spacing, iso=0.5, decimate_ratio=0.90)
+                if cb is not None and cb.n_cells > 500:
                     organs["brain"] = {
                         "mesh": cb,
                         "color": "#f48fb1",
@@ -522,7 +617,10 @@ class MeshSet:
             meta = {
                 "heart": {"color": "#d32f2f", "opacity": 1.0, "label": "Heart & Aorta"},
                 "lungs": {"color": "#26c6da", "opacity": 0.25, "label": "Lungs"},
-                "kidneys": {"color": "#ff8f00", "opacity": 0.90, "label": "Kidneys & Viscera"},
+                "rkidney": {"color": "#e65100", "opacity": 0.95, "label": "Right Kidney"},
+                "lkidney": {"color": "#e65100", "opacity": 0.95, "label": "Left Kidney"},
+                "kidneys": {"color": "#e65100", "opacity": 0.95, "label": "Kidneys (Bilateral)"},
+                "liver": {"color": "#8d6e63", "opacity": 0.60, "label": "Liver"},
                 "brain": {"color": "#f48fb1", "opacity": 0.70, "label": "Brain Mantle"},
             }
             for organ_name, organ_info in meta.items():

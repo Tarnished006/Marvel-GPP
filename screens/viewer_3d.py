@@ -33,7 +33,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QAction
 from signal_bus import signal_bus
-from dicom_engine import DicomLoader, MeshSet
+from dicom_engine import DicomLoader, MeshSet, DVR_PRESETS, load_volume_for_mpr
 from screens.mpr_view import MPRView
 from screens.slice_2d_viewer import Slice2DViewerWidget
 from screens.study_info_panel import StudyInfoDialog, StudyInfoPanel, extract_safe_metadata
@@ -121,6 +121,12 @@ class Viewer3D(QWidget):
         self.organ_meshes: dict[str, dict] = {}
         self.organ_visible: dict[str, bool] = {}
         self.skeleton_mode: str = "solid"  # "solid" (1.0), "ghost" (0.28), "hidden" (0.0)
+
+        # Direct Volume Rendering (DVR) state
+        self._dvr_active: bool = False
+        self._dvr_preset: str = "soft_tissue"
+        self._dvr_actor = None
+        self._volume_grid: pv.ImageData | None = None
 
         # Voice/feature state
         self._voice_zoom_level = 1.0      # bookkeeping for "zoom to X percent"
@@ -573,6 +579,45 @@ class Viewer3D(QWidget):
         self.btn_organ_kidneys.setVisible(False)
         row_top.addWidget(self.btn_organ_kidneys)
 
+        self.btn_organ_rkidney = QPushButton("🫘 R. Kidney")
+        self.btn_organ_rkidney.setCheckable(True)
+        self.btn_organ_rkidney.setChecked(True)
+        self.btn_organ_rkidney.setFixedHeight(24)
+        self.btn_organ_rkidney.setStyleSheet(
+            btn_style_base +
+            "QPushButton:checked { background: #332200; color: #ffe082; border-color: #f57f17; font-weight: bold; } "
+            "QPushButton:!checked { background: #1a1a1a; color: #666; border-color: #2a2a2a; }"
+        )
+        self.btn_organ_rkidney.clicked.connect(lambda checked: self.set_organ_visible("rkidney", checked))
+        self.btn_organ_rkidney.setVisible(False)
+        row_top.addWidget(self.btn_organ_rkidney)
+
+        self.btn_organ_lkidney = QPushButton("🫘 L. Kidney")
+        self.btn_organ_lkidney.setCheckable(True)
+        self.btn_organ_lkidney.setChecked(True)
+        self.btn_organ_lkidney.setFixedHeight(24)
+        self.btn_organ_lkidney.setStyleSheet(
+            btn_style_base +
+            "QPushButton:checked { background: #332200; color: #ffe082; border-color: #f57f17; font-weight: bold; } "
+            "QPushButton:!checked { background: #1a1a1a; color: #666; border-color: #2a2a2a; }"
+        )
+        self.btn_organ_lkidney.clicked.connect(lambda checked: self.set_organ_visible("lkidney", checked))
+        self.btn_organ_lkidney.setVisible(False)
+        row_top.addWidget(self.btn_organ_lkidney)
+
+        self.btn_organ_liver = QPushButton("🫁 Liver")
+        self.btn_organ_liver.setCheckable(True)
+        self.btn_organ_liver.setChecked(True)
+        self.btn_organ_liver.setFixedHeight(24)
+        self.btn_organ_liver.setStyleSheet(
+            btn_style_base +
+            "QPushButton:checked { background: #2b1810; color: #d7ccc8; border-color: #8d6e63; font-weight: bold; } "
+            "QPushButton:!checked { background: #1a1a1a; color: #666; border-color: #2a2a2a; }"
+        )
+        self.btn_organ_liver.clicked.connect(lambda checked: self.set_organ_visible("liver", checked))
+        self.btn_organ_liver.setVisible(False)
+        row_top.addWidget(self.btn_organ_liver)
+
         self.btn_layers_reset = QPushButton("↺ Layers")
         self.btn_layers_reset.setFixedHeight(24)
         self.btn_layers_reset.setStyleSheet(btn_style_base)
@@ -580,6 +625,31 @@ class Viewer3D(QWidget):
         self.btn_layers_reset.clicked.connect(self.reset_anatomical_layers)
         self.btn_layers_reset.setVisible(False)
         row_top.addWidget(self.btn_layers_reset)
+
+        # Cinematic Direct Volume Rendering (DVR) Mode
+        self.btn_dvr_mode = QPushButton("📽 Volume DVR: OFF ▼")
+        self.btn_dvr_mode.setFixedHeight(24)
+        self.btn_dvr_mode.setStyleSheet(
+            btn_style_base +
+            "QPushButton { background: #1a1728; color: #b39ddb; border-color: #512da8; font-weight: 700; } "
+            "QPushButton:hover { background: #262040; color: #d1c4e9; border-color: #673ab7; }"
+        )
+        self.menu_dvr = QMenu(self.btn_dvr_mode)
+        self.menu_dvr.setStyleSheet(menu_style)
+        self.act_dvr_soft = QAction("🩺 Soft Tissue & Organs", self)
+        self.act_dvr_soft.triggered.connect(lambda: self.set_dvr_preset("soft_tissue"))
+        self.menu_dvr.addAction(self.act_dvr_soft)
+        self.act_dvr_vascular = QAction("🩸 Contrast & Vascular", self)
+        self.act_dvr_vascular.triggered.connect(lambda: self.set_dvr_preset("vascular"))
+        self.menu_dvr.addAction(self.act_dvr_vascular)
+        self.act_dvr_bone = QAction("🦴 Bone & Volume Depth", self)
+        self.act_dvr_bone.triggered.connect(lambda: self.set_dvr_preset("bone_depth"))
+        self.menu_dvr.addAction(self.act_dvr_bone)
+        self.act_dvr_off = QAction("🚫 Turn Off DVR (Surface Meshes)", self)
+        self.act_dvr_off.triggered.connect(lambda: self.toggle_dvr_mode(False))
+        self.menu_dvr.addAction(self.act_dvr_off)
+        self.btn_dvr_mode.setMenu(self.menu_dvr)
+        row_top.addWidget(self.btn_dvr_mode)
 
         # Retained spin/ghost buttons for backwards compatibility
         self.btn_start_spin = QPushButton("▶ Start Spin")
@@ -1717,10 +1787,17 @@ class Viewer3D(QWidget):
             "lungs": getattr(self, "btn_organ_lungs", None),
             "brain": getattr(self, "btn_organ_brain", None),
             "kidneys": getattr(self, "btn_organ_kidneys", None),
+            "rkidney": getattr(self, "btn_organ_rkidney", None),
+            "lkidney": getattr(self, "btn_organ_lkidney", None),
+            "liver": getattr(self, "btn_organ_liver", None),
         }
+        has_separate_kidneys = "rkidney" in self.organ_meshes or "lkidney" in self.organ_meshes
         for oname, obtn in organ_buttons.items():
             if obtn is not None:
-                present = oname in self.organ_meshes
+                if oname == "kidneys" and has_separate_kidneys:
+                    present = False
+                else:
+                    present = oname in self.organ_meshes
                 obtn.setVisible(present)
                 obtn.blockSignals(True)
                 obtn.setChecked(True)
@@ -2363,6 +2440,32 @@ class Viewer3D(QWidget):
             "isolate kidneys": "isolate kidneys",
             "kidneys only": "isolate kidneys",
 
+            "show liver": "show liver",
+            "liver view": "show liver",
+            "enable liver": "show liver",
+            "hide liver": "hide liver",
+            "disable liver": "hide liver",
+            "isolate liver": "isolate liver",
+            "liver only": "isolate liver",
+
+            "show right kidney": "show right kidney",
+            "hide right kidney": "hide right kidney",
+            "isolate right kidney": "isolate right kidney",
+            "show left kidney": "show left kidney",
+            "hide left kidney": "hide left kidney",
+            "isolate left kidney": "isolate left kidney",
+
+            "cinematic volume": "enable dvr",
+            "volume rendering": "enable dvr",
+            "dvr mode": "enable dvr",
+            "enable dvr": "enable dvr",
+            "disable dvr": "disable dvr",
+            "turn off dvr": "disable dvr",
+            "surface mode": "disable dvr",
+            "soft tissue volume": "dvr soft tissue",
+            "vascular volume": "dvr vascular",
+            "bone volume": "dvr bone",
+
             "ghost skeleton": "ghost skeleton",
             "ghost bone": "ghost skeleton",
             "translucent skeleton": "ghost skeleton",
@@ -2420,6 +2523,52 @@ class Viewer3D(QWidget):
             return
         if command == "isolate kidneys":
             self.isolate_organ("kidneys")
+            return
+
+        if command == "show liver":
+            self.set_organ_visible("liver", True)
+            return
+        if command == "hide liver":
+            self.set_organ_visible("liver", False)
+            return
+        if command == "isolate liver":
+            self.isolate_organ("liver")
+            return
+
+        if command == "show right kidney":
+            self.set_organ_visible("rkidney", True)
+            return
+        if command == "hide right kidney":
+            self.set_organ_visible("rkidney", False)
+            return
+        if command == "isolate right kidney":
+            self.isolate_organ("rkidney")
+            return
+
+        if command == "show left kidney":
+            self.set_organ_visible("lkidney", True)
+            return
+        if command == "hide left kidney":
+            self.set_organ_visible("lkidney", False)
+            return
+        if command == "isolate left kidney":
+            self.isolate_organ("lkidney")
+            return
+
+        if command == "enable dvr":
+            self.toggle_dvr_mode(True)
+            return
+        if command == "disable dvr":
+            self.toggle_dvr_mode(False)
+            return
+        if command == "dvr soft tissue":
+            self.set_dvr_preset("soft_tissue")
+            return
+        if command == "dvr vascular":
+            self.set_dvr_preset("vascular")
+            return
+        if command == "dvr bone":
+            self.set_dvr_preset("bone_depth")
             return
 
         if command == "ghost skeleton":
@@ -3297,17 +3446,36 @@ class Viewer3D(QWidget):
         organ_name = str(organ_name).lower().strip()
         self.organ_visible[organ_name] = bool(visible)
 
+        # If user toggled 'kidneys', also sync rkidney and lkidney if present
+        if organ_name == "kidneys":
+            if "rkidney" in self.organ_meshes:
+                self.organ_visible["rkidney"] = bool(visible)
+            if "lkidney" in self.organ_meshes:
+                self.organ_visible["lkidney"] = bool(visible)
+
         btn_map = {
             "heart": getattr(self, "btn_organ_heart", None),
             "lungs": getattr(self, "btn_organ_lungs", None),
             "brain": getattr(self, "btn_organ_brain", None),
             "kidneys": getattr(self, "btn_organ_kidneys", None),
+            "rkidney": getattr(self, "btn_organ_rkidney", None),
+            "lkidney": getattr(self, "btn_organ_lkidney", None),
+            "liver": getattr(self, "btn_organ_liver", None),
         }
         btn = btn_map.get(organ_name)
         if btn is not None:
             btn.blockSignals(True)
             btn.setChecked(bool(visible))
             btn.blockSignals(False)
+
+        # Also update child buttons if kidneys was toggled
+        if organ_name == "kidneys":
+            for child_name in ("rkidney", "lkidney"):
+                cbtn = btn_map.get(child_name)
+                if cbtn is not None:
+                    cbtn.blockSignals(True)
+                    cbtn.setChecked(bool(visible))
+                    cbtn.blockSignals(False)
 
         self._update_organ_actors()
         self._notify_metadata_changed()
@@ -3330,9 +3498,114 @@ class Viewer3D(QWidget):
         for oname in list(self.organ_meshes.keys()):
             self.set_organ_visible(oname, True)
 
+    def toggle_dvr_mode(self, enabled: bool | None = None, preset: str | None = None):
+        """Toggles or sets the Cinematic Direct Volume Rendering (DVR) mode."""
+        if enabled is None:
+            enabled = not getattr(self, "_dvr_active", False)
+        self._dvr_active = bool(enabled)
+        if preset is not None:
+            self._dvr_preset = str(preset)
+
+        if hasattr(self, "btn_dvr_mode"):
+            if self._dvr_active:
+                pname = DVR_PRESETS.get(self._dvr_preset, {}).get("name", "DVR")
+                self.btn_dvr_mode.setText(f"📽 Volume DVR: ON ({pname}) ▼")
+                self.btn_dvr_mode.setStyleSheet(
+                    "QPushButton { background: #3b1b60; color: #e1bee7; border: 1px solid #8e24aa; font-weight: 700; border-radius: 4px; padding: 2px 8px; } "
+                    "QPushButton:hover { background: #4a2378; color: #f3e5f5; border-color: #ab47bc; }"
+                )
+            else:
+                self.btn_dvr_mode.setText("📽 Volume DVR: OFF ▼")
+                self.btn_dvr_mode.setStyleSheet(
+                    "QPushButton { background: #1a1728; color: #b39ddb; border: 1px solid #512da8; font-weight: 700; border-radius: 4px; padding: 2px 8px; } "
+                    "QPushButton:hover { background: #262040; color: #d1c4e9; border-color: #673ab7; }"
+                )
+
+        self._apply_dvr_rendering()
+        self._notify_metadata_changed()
+
+    def set_dvr_preset(self, preset_name: str):
+        """Switches the active DVR transfer function preset and enables DVR mode."""
+        self._dvr_preset = str(preset_name)
+        self.toggle_dvr_mode(True, preset=preset_name)
+
+    def _apply_dvr_rendering(self):
+        """Applies or disables Direct Volume Rendering actor in the 3D plotter."""
+        if not hasattr(self, "plotter") or self.plotter is None:
+            return
+
+        if self._dvr_active:
+            # 1. Hide surface bone mesh and organ meshes
+            if self.bone_actor is not None:
+                try:
+                    self.bone_actor.SetVisibility(False)
+                except Exception:
+                    pass
+            for oname, oactor in self.organ_actors.items():
+                if oactor is not None:
+                    try:
+                        oactor.SetVisibility(False)
+                    except Exception:
+                        pass
+
+            # 2. Build or fetch pyvista volume grid
+            active_path = getattr(self, "_active_path", "")
+            if active_path:
+                try:
+                    vol_data, (sy, sx), sz, _ = load_volume_for_mpr(active_path)
+                    grid = pv.ImageData()
+                    grid.dimensions = vol_data.shape
+                    grid.spacing = (sx, sy, sz)
+                    grid.origin = (0, 0, 0)
+                    grid.point_data["HU"] = vol_data.flatten(order="F")
+
+                    preset_info = DVR_PRESETS.get(self._dvr_preset, DVR_PRESETS.get("soft_tissue"))
+                    if self._dvr_actor is not None:
+                        try:
+                            self.plotter.remove_actor(self._dvr_actor, render=False)
+                        except Exception:
+                            pass
+                        self._dvr_actor = None
+
+                    self._dvr_actor = self.plotter.add_volume(
+                        grid,
+                        scalars="HU",
+                        cmap=preset_info["colors"],
+                        opacity=preset_info["opacities"],
+                        clim=preset_info["clim"],
+                        shade=True,
+                        ambient=0.35,
+                        diffuse=0.65,
+                        specular=0.25,
+                        name="dvr_volume",
+                    )
+                except Exception as exc:
+                    print(f"[Viewer3D] Error applying DVR volume: {exc}")
+        else:
+            # Remove DVR volume actor if present
+            if self._dvr_actor is not None:
+                try:
+                    self.plotter.remove_actor("dvr_volume", render=False)
+                    self.plotter.remove_actor(self._dvr_actor, render=False)
+                except Exception:
+                    pass
+                self._dvr_actor = None
+
+            # Restore surface mesh visibility
+            if self.bone_actor is not None and self.skeleton_mode != "hidden":
+                try:
+                    self.bone_actor.SetVisibility(True)
+                except Exception:
+                    pass
+            self._update_organ_actors()
+
+        self.plotter.render()
+
     def _update_organ_actors(self):
         """Re-syncs organ actors with active visibility, colors, and clipping planes."""
         if not hasattr(self, "plotter") or self.plotter is None:
+            return
+        if getattr(self, "_dvr_active", False):
             return
 
         for name, oinfo in self.organ_meshes.items():

@@ -52,25 +52,11 @@ COMMAND_PHRASES = [
     "full opacity",
     "half opacity",
     "high transparency",
-    # Anatomical layers & Organs
-    "show heart",
-    "hide heart",
-    "isolate heart",
-    "show lungs",
-    "hide lungs",
-    "isolate lungs",
-    "show brain",
-    "hide brain",
-    "isolate brain",
-    "show kidneys",
-    "hide kidneys",
-    "isolate kidneys",
+    # Skeleton transparency
     "ghost skeleton",
     "solid skeleton",
     "hide skeleton",
     "show skeleton",
-    "reset layers",
-    "show all organs",
 ]
 
 audio_q = queue.Queue()

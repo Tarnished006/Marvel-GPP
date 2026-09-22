@@ -33,7 +33,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QAction
 from signal_bus import signal_bus
-from dicom_engine import DicomLoader, MeshSet, DVR_PRESETS, load_volume_for_mpr
+from dicom_engine import DicomLoader, MeshSet, load_volume_for_mpr
 from screens.mpr_view import MPRView
 from screens.slice_2d_viewer import Slice2DViewerWidget
 from screens.study_info_panel import StudyInfoDialog, StudyInfoPanel, extract_safe_metadata
@@ -501,155 +501,19 @@ class Viewer3D(QWidget):
 
         row_top.addWidget(_make_vsep())
 
-        # ── Group 3: ANATOMICAL LAYERS (Row 1) ────────────────────────────────
-        row_top.addWidget(_make_group_lbl("LAYERS:"))
+        # Skeleton Mode (Retained reference for backwards compatibility)
+        self.btn_skeleton_mode = None
 
-        # Skeleton Mode (Solid, Ghost, Hidden)
-        self.btn_skeleton_mode = QPushButton("🦴 Skeleton: Solid ▼")
-        self.btn_skeleton_mode.setFixedHeight(24)
-        self.btn_skeleton_mode.setStyleSheet(
-            btn_style_base +
-            "QPushButton { background: #162416; color: #a5d6a7; border-color: #2e7d32; font-weight: 700; } "
-            "QPushButton:hover { background: #1f331f; color: #c8e6c9; border-color: #388e3c; }"
-        )
-        self.menu_skeleton = QMenu(self.btn_skeleton_mode)
-        self.menu_skeleton.setStyleSheet(menu_style)
-        self.act_skel_solid = QAction("🦴 Solid Skeleton (100% Opacity)", self)
-        self.act_skel_solid.triggered.connect(lambda: self.set_skeleton_mode("solid"))
-        self.menu_skeleton.addAction(self.act_skel_solid)
-        self.act_skel_ghost = QAction("👻 Ghost Skeleton (30% Translucent)", self)
-        self.act_skel_ghost.triggered.connect(lambda: self.set_skeleton_mode("ghost"))
-        self.menu_skeleton.addAction(self.act_skel_ghost)
-        self.act_skel_hide = QAction("🚫 Hide Skeleton", self)
-        self.act_skel_hide.triggered.connect(lambda: self.set_skeleton_mode("hidden"))
-        self.menu_skeleton.addAction(self.act_skel_hide)
-        self.btn_skeleton_mode.setMenu(self.menu_skeleton)
-        row_top.addWidget(self.btn_skeleton_mode)
-
-        # Dynamic Organ Toggle Chips (visible contextual to current scan)
-        self.btn_organ_heart = QPushButton("❤️ Heart")
-        self.btn_organ_heart.setCheckable(True)
-        self.btn_organ_heart.setChecked(True)
-        self.btn_organ_heart.setFixedHeight(24)
-        self.btn_organ_heart.setStyleSheet(
-            btn_style_base +
-            "QPushButton:checked { background: #351414; color: #ff8a80; border-color: #c62828; font-weight: bold; } "
-            "QPushButton:!checked { background: #1a1a1a; color: #666; border-color: #2a2a2a; }"
-        )
-        self.btn_organ_heart.clicked.connect(lambda checked: self.set_organ_visible("heart", checked))
-        self.btn_organ_heart.setVisible(False)
-        row_top.addWidget(self.btn_organ_heart)
-
-        self.btn_organ_lungs = QPushButton("🫁 Lungs")
-        self.btn_organ_lungs.setCheckable(True)
-        self.btn_organ_lungs.setChecked(True)
-        self.btn_organ_lungs.setFixedHeight(24)
-        self.btn_organ_lungs.setStyleSheet(
-            btn_style_base +
-            "QPushButton:checked { background: #002830; color: #80deea; border-color: #00838f; font-weight: bold; } "
-            "QPushButton:!checked { background: #1a1a1a; color: #666; border-color: #2a2a2a; }"
-        )
-        self.btn_organ_lungs.clicked.connect(lambda checked: self.set_organ_visible("lungs", checked))
-        self.btn_organ_lungs.setVisible(False)
-        row_top.addWidget(self.btn_organ_lungs)
-
-        self.btn_organ_brain = QPushButton("🧠 Brain")
-        self.btn_organ_brain.setCheckable(True)
-        self.btn_organ_brain.setChecked(True)
-        self.btn_organ_brain.setFixedHeight(24)
-        self.btn_organ_brain.setStyleSheet(
-            btn_style_base +
-            "QPushButton:checked { background: #331525; color: #f48fb1; border-color: #ad1457; font-weight: bold; } "
-            "QPushButton:!checked { background: #1a1a1a; color: #666; border-color: #2a2a2a; }"
-        )
-        self.btn_organ_brain.clicked.connect(lambda checked: self.set_organ_visible("brain", checked))
-        self.btn_organ_brain.setVisible(False)
-        row_top.addWidget(self.btn_organ_brain)
-
-        self.btn_organ_kidneys = QPushButton("🫘 Kidneys")
-        self.btn_organ_kidneys.setCheckable(True)
-        self.btn_organ_kidneys.setChecked(True)
-        self.btn_organ_kidneys.setFixedHeight(24)
-        self.btn_organ_kidneys.setStyleSheet(
-            btn_style_base +
-            "QPushButton:checked { background: #332200; color: #ffe082; border-color: #f57f17; font-weight: bold; } "
-            "QPushButton:!checked { background: #1a1a1a; color: #666; border-color: #2a2a2a; }"
-        )
-        self.btn_organ_kidneys.clicked.connect(lambda checked: self.set_organ_visible("kidneys", checked))
-        self.btn_organ_kidneys.setVisible(False)
-        row_top.addWidget(self.btn_organ_kidneys)
-
-        self.btn_organ_rkidney = QPushButton("🫘 R. Kidney")
-        self.btn_organ_rkidney.setCheckable(True)
-        self.btn_organ_rkidney.setChecked(True)
-        self.btn_organ_rkidney.setFixedHeight(24)
-        self.btn_organ_rkidney.setStyleSheet(
-            btn_style_base +
-            "QPushButton:checked { background: #332200; color: #ffe082; border-color: #f57f17; font-weight: bold; } "
-            "QPushButton:!checked { background: #1a1a1a; color: #666; border-color: #2a2a2a; }"
-        )
-        self.btn_organ_rkidney.clicked.connect(lambda checked: self.set_organ_visible("rkidney", checked))
-        self.btn_organ_rkidney.setVisible(False)
-        row_top.addWidget(self.btn_organ_rkidney)
-
-        self.btn_organ_lkidney = QPushButton("🫘 L. Kidney")
-        self.btn_organ_lkidney.setCheckable(True)
-        self.btn_organ_lkidney.setChecked(True)
-        self.btn_organ_lkidney.setFixedHeight(24)
-        self.btn_organ_lkidney.setStyleSheet(
-            btn_style_base +
-            "QPushButton:checked { background: #332200; color: #ffe082; border-color: #f57f17; font-weight: bold; } "
-            "QPushButton:!checked { background: #1a1a1a; color: #666; border-color: #2a2a2a; }"
-        )
-        self.btn_organ_lkidney.clicked.connect(lambda checked: self.set_organ_visible("lkidney", checked))
-        self.btn_organ_lkidney.setVisible(False)
-        row_top.addWidget(self.btn_organ_lkidney)
-
-        self.btn_organ_liver = QPushButton("🫁 Liver")
-        self.btn_organ_liver.setCheckable(True)
-        self.btn_organ_liver.setChecked(True)
-        self.btn_organ_liver.setFixedHeight(24)
-        self.btn_organ_liver.setStyleSheet(
-            btn_style_base +
-            "QPushButton:checked { background: #2b1810; color: #d7ccc8; border-color: #8d6e63; font-weight: bold; } "
-            "QPushButton:!checked { background: #1a1a1a; color: #666; border-color: #2a2a2a; }"
-        )
-        self.btn_organ_liver.clicked.connect(lambda checked: self.set_organ_visible("liver", checked))
-        self.btn_organ_liver.setVisible(False)
-        row_top.addWidget(self.btn_organ_liver)
-
-        self.btn_layers_reset = QPushButton("↺ Layers")
-        self.btn_layers_reset.setFixedHeight(24)
-        self.btn_layers_reset.setStyleSheet(btn_style_base)
-        self.btn_layers_reset.setToolTip("Reset all anatomical layers to default visible state")
-        self.btn_layers_reset.clicked.connect(self.reset_anatomical_layers)
-        self.btn_layers_reset.setVisible(False)
-        row_top.addWidget(self.btn_layers_reset)
-
-        # Cinematic Direct Volume Rendering (DVR) Mode
-        self.btn_dvr_mode = QPushButton("📽 Volume DVR: OFF ▼")
-        self.btn_dvr_mode.setFixedHeight(24)
-        self.btn_dvr_mode.setStyleSheet(
-            btn_style_base +
-            "QPushButton { background: #1a1728; color: #b39ddb; border-color: #512da8; font-weight: 700; } "
-            "QPushButton:hover { background: #262040; color: #d1c4e9; border-color: #673ab7; }"
-        )
-        self.menu_dvr = QMenu(self.btn_dvr_mode)
-        self.menu_dvr.setStyleSheet(menu_style)
-        self.act_dvr_soft = QAction("🩺 Soft Tissue & Organs", self)
-        self.act_dvr_soft.triggered.connect(lambda: self.set_dvr_preset("soft_tissue"))
-        self.menu_dvr.addAction(self.act_dvr_soft)
-        self.act_dvr_vascular = QAction("🩸 Contrast & Vascular", self)
-        self.act_dvr_vascular.triggered.connect(lambda: self.set_dvr_preset("vascular"))
-        self.menu_dvr.addAction(self.act_dvr_vascular)
-        self.act_dvr_bone = QAction("🦴 Bone & Volume Depth", self)
-        self.act_dvr_bone.triggered.connect(lambda: self.set_dvr_preset("bone_depth"))
-        self.menu_dvr.addAction(self.act_dvr_bone)
-        self.act_dvr_off = QAction("🚫 Turn Off DVR (Surface Meshes)", self)
-        self.act_dvr_off.triggered.connect(lambda: self.toggle_dvr_mode(False))
-        self.menu_dvr.addAction(self.act_dvr_off)
-        self.btn_dvr_mode.setMenu(self.menu_dvr)
-        row_top.addWidget(self.btn_dvr_mode)
+        # Retained organ/DVR references for backwards compatibility
+        self.btn_organ_heart = None
+        self.btn_organ_lungs = None
+        self.btn_organ_brain = None
+        self.btn_organ_kidneys = None
+        self.btn_organ_rkidney = None
+        self.btn_organ_lkidney = None
+        self.btn_organ_liver = None
+        self.btn_layers_reset = None
+        self.btn_dvr_mode = None
 
         # Retained spin/ghost buttons for backwards compatibility
         self.btn_start_spin = QPushButton("▶ Start Spin")
@@ -1768,40 +1632,14 @@ class Viewer3D(QWidget):
             light_type="scene light",
         ))
 
-        self.bone_actor, self.organ_actors = meshset.add_to_plotter(
+        self.bone_actor, _ = meshset.add_to_plotter(
             self.plotter,
             density_mode=self._density_active,
         )
-        self.organ_meshes = getattr(meshset, "organ_meshes", {})
-        self.organ_visible = {name: True for name in self.organ_meshes}
+        self.organ_actors = {}
+        self.organ_meshes = {}
+        self.organ_visible = {}
         self.skeleton_mode = "solid"
-        if hasattr(self, "btn_skeleton_mode"):
-            self.btn_skeleton_mode.setText("🦴 Skeleton: Solid ▼")
-
-        has_organs = bool(self.organ_meshes)
-        if hasattr(self, "btn_layers_reset"):
-            self.btn_layers_reset.setVisible(has_organs)
-
-        organ_buttons = {
-            "heart": getattr(self, "btn_organ_heart", None),
-            "lungs": getattr(self, "btn_organ_lungs", None),
-            "brain": getattr(self, "btn_organ_brain", None),
-            "kidneys": getattr(self, "btn_organ_kidneys", None),
-            "rkidney": getattr(self, "btn_organ_rkidney", None),
-            "lkidney": getattr(self, "btn_organ_lkidney", None),
-            "liver": getattr(self, "btn_organ_liver", None),
-        }
-        has_separate_kidneys = "rkidney" in self.organ_meshes or "lkidney" in self.organ_meshes
-        for oname, obtn in organ_buttons.items():
-            if obtn is not None:
-                if oname == "kidneys" and has_separate_kidneys:
-                    present = False
-                else:
-                    present = oname in self.organ_meshes
-                obtn.setVisible(present)
-                obtn.blockSignals(True)
-                obtn.setChecked(True)
-                obtn.blockSignals(False)
 
         self.mesh_bounds = meshset.bone_mesh.bounds
         # Kept so cross-section clipping and the density colormap can re-add the
@@ -2407,65 +2245,7 @@ class Viewer3D(QWidget):
             "toggle scan metadata": "toggle study info",
             "toggle study information": "toggle study info",
 
-            # Anatomical layers and organ voice aliases
-            "show heart": "show heart",
-            "heart view": "show heart",
-            "enable heart": "show heart",
-            "hide heart": "hide heart",
-            "disable heart": "hide heart",
-            "isolate heart": "isolate heart",
-            "heart only": "isolate heart",
-
-            "show lungs": "show lungs",
-            "lungs view": "show lungs",
-            "enable lungs": "show lungs",
-            "hide lungs": "hide lungs",
-            "disable lungs": "hide lungs",
-            "isolate lungs": "isolate lungs",
-            "lungs only": "isolate lungs",
-
-            "show brain": "show brain",
-            "brain view": "show brain",
-            "enable brain": "show brain",
-            "hide brain": "hide brain",
-            "disable brain": "hide brain",
-            "isolate brain": "isolate brain",
-            "brain only": "isolate brain",
-
-            "show kidneys": "show kidneys",
-            "kidneys view": "show kidneys",
-            "enable kidneys": "show kidneys",
-            "hide kidneys": "hide kidneys",
-            "disable kidneys": "hide kidneys",
-            "isolate kidneys": "isolate kidneys",
-            "kidneys only": "isolate kidneys",
-
-            "show liver": "show liver",
-            "liver view": "show liver",
-            "enable liver": "show liver",
-            "hide liver": "hide liver",
-            "disable liver": "hide liver",
-            "isolate liver": "isolate liver",
-            "liver only": "isolate liver",
-
-            "show right kidney": "show right kidney",
-            "hide right kidney": "hide right kidney",
-            "isolate right kidney": "isolate right kidney",
-            "show left kidney": "show left kidney",
-            "hide left kidney": "hide left kidney",
-            "isolate left kidney": "isolate left kidney",
-
-            "cinematic volume": "enable dvr",
-            "volume rendering": "enable dvr",
-            "dvr mode": "enable dvr",
-            "enable dvr": "enable dvr",
-            "disable dvr": "disable dvr",
-            "turn off dvr": "disable dvr",
-            "surface mode": "disable dvr",
-            "soft tissue volume": "dvr soft tissue",
-            "vascular volume": "dvr vascular",
-            "bone volume": "dvr bone",
-
+            # Skeleton transparency aliases
             "ghost skeleton": "ghost skeleton",
             "ghost bone": "ghost skeleton",
             "translucent skeleton": "ghost skeleton",
@@ -2475,102 +2255,11 @@ class Viewer3D(QWidget):
             "hide bone": "hide skeleton",
             "show skeleton": "solid skeleton",
             "show bone": "solid skeleton",
-
-            "reset layers": "reset layers",
-            "show all layers": "reset layers",
-            "show all organs": "reset layers",
-            "reset organs": "reset layers",
         }
 
         command = aliases.get(command, command)
 
-        # Anatomical layer & organ voice actions
-        if command == "show heart":
-            self.set_organ_visible("heart", True)
-            return
-        if command == "hide heart":
-            self.set_organ_visible("heart", False)
-            return
-        if command == "isolate heart":
-            self.isolate_organ("heart")
-            return
-
-        if command == "show lungs":
-            self.set_organ_visible("lungs", True)
-            return
-        if command == "hide lungs":
-            self.set_organ_visible("lungs", False)
-            return
-        if command == "isolate lungs":
-            self.isolate_organ("lungs")
-            return
-
-        if command == "show brain":
-            self.set_organ_visible("brain", True)
-            return
-        if command == "hide brain":
-            self.set_organ_visible("brain", False)
-            return
-        if command == "isolate brain":
-            self.isolate_organ("brain")
-            return
-
-        if command == "show kidneys":
-            self.set_organ_visible("kidneys", True)
-            return
-        if command == "hide kidneys":
-            self.set_organ_visible("kidneys", False)
-            return
-        if command == "isolate kidneys":
-            self.isolate_organ("kidneys")
-            return
-
-        if command == "show liver":
-            self.set_organ_visible("liver", True)
-            return
-        if command == "hide liver":
-            self.set_organ_visible("liver", False)
-            return
-        if command == "isolate liver":
-            self.isolate_organ("liver")
-            return
-
-        if command == "show right kidney":
-            self.set_organ_visible("rkidney", True)
-            return
-        if command == "hide right kidney":
-            self.set_organ_visible("rkidney", False)
-            return
-        if command == "isolate right kidney":
-            self.isolate_organ("rkidney")
-            return
-
-        if command == "show left kidney":
-            self.set_organ_visible("lkidney", True)
-            return
-        if command == "hide left kidney":
-            self.set_organ_visible("lkidney", False)
-            return
-        if command == "isolate left kidney":
-            self.isolate_organ("lkidney")
-            return
-
-        if command == "enable dvr":
-            self.toggle_dvr_mode(True)
-            return
-        if command == "disable dvr":
-            self.toggle_dvr_mode(False)
-            return
-        if command == "dvr soft tissue":
-            self.set_dvr_preset("soft_tissue")
-            return
-        if command == "dvr vascular":
-            self.set_dvr_preset("vascular")
-            return
-        if command == "dvr bone":
-            self.set_dvr_preset("bone_depth")
-            return
-
+        # Skeleton transparency voice actions
         if command == "ghost skeleton":
             self.set_skeleton_mode("ghost")
             return
@@ -2579,9 +2268,6 @@ class Viewer3D(QWidget):
             return
         if command == "hide skeleton":
             self.set_skeleton_mode("hidden")
-            return
-        if command == "reset layers":
-            self.reset_anatomical_layers()
             return
 
         # Density heatmap commands
@@ -3264,9 +2950,6 @@ class Viewer3D(QWidget):
                 if hasattr(self, "legend_card"):
                     self.legend_card.setVisible(False)
 
-            # Re-apply synchronous clipping and visibility to organ layers
-            self._update_organ_actors()
-
             self.plotter.render()
         except Exception as exc:
             print(f"[Viewer3D] _apply_bone_rendering failed: {exc}")
@@ -3400,27 +3083,15 @@ class Viewer3D(QWidget):
     # ── Anatomical Layers & Multi-Organ Management ────────────────────────────
 
     def set_skeleton_mode(self, mode: str):
-        """Sets skeleton rendering mode:
-        - 'solid': 100% opacity bone
-        - 'ghost': 28% opacity bone with natural shading so internal organs are visible inside
-        - 'hidden': 0% opacity / hidden bone so only soft-tissue organs are seen
-        """
+        """Sets skeleton rendering mode: 'solid', 'ghost', or 'hidden'."""
         mode = str(mode).lower().strip()
         if mode not in ("solid", "ghost", "hidden"):
             mode = "solid"
         self.skeleton_mode = mode
 
-        if hasattr(self, "btn_skeleton_mode"):
-            label_map = {
-                "solid": "🦴 Skeleton: Solid ▼",
-                "ghost": "👻 Skeleton: Ghost ▼",
-                "hidden": "🚫 Skeleton: Off ▼",
-            }
-            self.btn_skeleton_mode.setText(label_map.get(mode, "🦴 Skeleton: Solid ▼"))
-
         if mode == "hidden":
             self._bone_opacity = 0.0
-            if self.bone_actor is not None:
+            if getattr(self, "bone_actor", None) is not None:
                 try:
                     self.bone_actor.prop.opacity = 0.0
                 except Exception:
@@ -3434,245 +3105,44 @@ class Viewer3D(QWidget):
                 self.slider_opacity.blockSignals(True)
                 self.slider_opacity.setValue(0)
                 self.slider_opacity.blockSignals(False)
+            if hasattr(self, "plotter"):
+                self.plotter.render()
         elif mode == "ghost":
             self.set_bone_opacity(0.28)
-        else:  # solid
+        else:
             self.set_bone_opacity(1.0)
 
-        self._apply_bone_rendering()
-
     def set_organ_visible(self, organ_name: str, visible: bool):
-        """Sets visibility of a specific anatomical organ."""
-        organ_name = str(organ_name).lower().strip()
-        self.organ_visible[organ_name] = bool(visible)
-
-        # If user toggled 'kidneys', also sync rkidney and lkidney if present
-        if organ_name == "kidneys":
-            if "rkidney" in self.organ_meshes:
-                self.organ_visible["rkidney"] = bool(visible)
-            if "lkidney" in self.organ_meshes:
-                self.organ_visible["lkidney"] = bool(visible)
-
-        btn_map = {
-            "heart": getattr(self, "btn_organ_heart", None),
-            "lungs": getattr(self, "btn_organ_lungs", None),
-            "brain": getattr(self, "btn_organ_brain", None),
-            "kidneys": getattr(self, "btn_organ_kidneys", None),
-            "rkidney": getattr(self, "btn_organ_rkidney", None),
-            "lkidney": getattr(self, "btn_organ_lkidney", None),
-            "liver": getattr(self, "btn_organ_liver", None),
-        }
-        btn = btn_map.get(organ_name)
-        if btn is not None:
-            btn.blockSignals(True)
-            btn.setChecked(bool(visible))
-            btn.blockSignals(False)
-
-        # Also update child buttons if kidneys was toggled
-        if organ_name == "kidneys":
-            for child_name in ("rkidney", "lkidney"):
-                cbtn = btn_map.get(child_name)
-                if cbtn is not None:
-                    cbtn.blockSignals(True)
-                    cbtn.setChecked(bool(visible))
-                    cbtn.blockSignals(False)
-
-        self._update_organ_actors()
-        self._notify_metadata_changed()
+        """Compatibility stub."""
+        pass
 
     def toggle_organ(self, organ_name: str):
-        """Toggles visibility of an anatomical organ."""
-        current = self.organ_visible.get(organ_name, True)
-        self.set_organ_visible(organ_name, not current)
+        """Compatibility stub."""
+        pass
 
     def isolate_organ(self, organ_name: str):
-        """Isolates an organ by hiding the skeleton and all other organs."""
-        organ_name = str(organ_name).lower().strip()
-        self.set_skeleton_mode("hidden")
-        for oname in list(self.organ_meshes.keys()):
-            self.set_organ_visible(oname, oname == organ_name)
+        """Compatibility stub."""
+        pass
 
     def reset_anatomical_layers(self):
-        """Restores full anatomical view: solid skeleton and all organs visible."""
+        """Compatibility stub."""
         self.set_skeleton_mode("solid")
-        for oname in list(self.organ_meshes.keys()):
-            self.set_organ_visible(oname, True)
 
     def toggle_dvr_mode(self, enabled: bool | None = None, preset: str | None = None):
-        """Toggles or sets the Cinematic Direct Volume Rendering (DVR) mode."""
-        if enabled is None:
-            enabled = not getattr(self, "_dvr_active", False)
-        self._dvr_active = bool(enabled)
-        if preset is not None:
-            self._dvr_preset = str(preset)
-
-        if hasattr(self, "btn_dvr_mode"):
-            if self._dvr_active:
-                pname = DVR_PRESETS.get(self._dvr_preset, {}).get("name", "DVR")
-                self.btn_dvr_mode.setText(f"📽 Volume DVR: ON ({pname}) ▼")
-                self.btn_dvr_mode.setStyleSheet(
-                    "QPushButton { background: #3b1b60; color: #e1bee7; border: 1px solid #8e24aa; font-weight: 700; border-radius: 4px; padding: 2px 8px; } "
-                    "QPushButton:hover { background: #4a2378; color: #f3e5f5; border-color: #ab47bc; }"
-                )
-            else:
-                self.btn_dvr_mode.setText("📽 Volume DVR: OFF ▼")
-                self.btn_dvr_mode.setStyleSheet(
-                    "QPushButton { background: #1a1728; color: #b39ddb; border: 1px solid #512da8; font-weight: 700; border-radius: 4px; padding: 2px 8px; } "
-                    "QPushButton:hover { background: #262040; color: #d1c4e9; border-color: #673ab7; }"
-                )
-
-        self._apply_dvr_rendering()
-        self._notify_metadata_changed()
+        """Compatibility stub."""
+        pass
 
     def set_dvr_preset(self, preset_name: str):
-        """Switches the active DVR transfer function preset and enables DVR mode."""
-        self._dvr_preset = str(preset_name)
-        self.toggle_dvr_mode(True, preset=preset_name)
+        """Compatibility stub."""
+        pass
 
     def _apply_dvr_rendering(self):
-        """Applies or disables Direct Volume Rendering actor in the 3D plotter."""
-        if not hasattr(self, "plotter") or self.plotter is None:
-            return
-
-        if self._dvr_active:
-            # 1. Hide surface bone mesh and organ meshes
-            if self.bone_actor is not None:
-                try:
-                    self.bone_actor.SetVisibility(False)
-                except Exception:
-                    pass
-            for oname, oactor in self.organ_actors.items():
-                if oactor is not None:
-                    try:
-                        oactor.SetVisibility(False)
-                    except Exception:
-                        pass
-
-            # 2. Build or fetch pyvista volume grid
-            active_path = getattr(self, "_active_path", "")
-            if active_path:
-                try:
-                    vol_data, (sy, sx), sz, _ = load_volume_for_mpr(active_path)
-                    grid = pv.ImageData()
-                    grid.dimensions = vol_data.shape
-                    grid.spacing = (sx, sy, sz)
-                    grid.origin = (0, 0, 0)
-                    grid.point_data["HU"] = vol_data.flatten(order="F")
-
-                    preset_info = DVR_PRESETS.get(self._dvr_preset, DVR_PRESETS.get("soft_tissue"))
-                    if self._dvr_actor is not None:
-                        try:
-                            self.plotter.remove_actor(self._dvr_actor, render=False)
-                        except Exception:
-                            pass
-                        self._dvr_actor = None
-
-                    self._dvr_actor = self.plotter.add_volume(
-                        grid,
-                        scalars="HU",
-                        cmap=preset_info["colors"],
-                        opacity=preset_info["opacities"],
-                        clim=preset_info["clim"],
-                        shade=True,
-                        ambient=0.35,
-                        diffuse=0.65,
-                        specular=0.25,
-                        name="dvr_volume",
-                    )
-                except Exception as exc:
-                    print(f"[Viewer3D] Error applying DVR volume: {exc}")
-        else:
-            # Remove DVR volume actor if present
-            if self._dvr_actor is not None:
-                try:
-                    self.plotter.remove_actor("dvr_volume", render=False)
-                    self.plotter.remove_actor(self._dvr_actor, render=False)
-                except Exception:
-                    pass
-                self._dvr_actor = None
-
-            # Restore surface mesh visibility
-            if self.bone_actor is not None and self.skeleton_mode != "hidden":
-                try:
-                    self.bone_actor.SetVisibility(True)
-                except Exception:
-                    pass
-            self._update_organ_actors()
-
-        self.plotter.render()
+        """Compatibility stub."""
+        pass
 
     def _update_organ_actors(self):
-        """Re-syncs organ actors with active visibility, colors, and clipping planes."""
-        if not hasattr(self, "plotter") or self.plotter is None:
-            return
-        if getattr(self, "_dvr_active", False):
-            return
-
-        for name, oinfo in self.organ_meshes.items():
-            # Remove old actor if present
-            if name in self.organ_actors and self.organ_actors[name] is not None:
-                try:
-                    self.plotter.remove_actor(self.organ_actors[name], render=False)
-                except Exception:
-                    pass
-                self.organ_actors[name] = None
-
-            if not self.organ_visible.get(name, True):
-                continue
-
-            omesh = oinfo["mesh"]
-            try:
-                omesh.clear_cell_data()
-            except Exception:
-                pass
-            if getattr(self, "_clip_active", False):
-                try:
-                    axis = getattr(self, "_clip_axis", "y").lower().strip()
-                    mesh_bone = getattr(self, "_bone_mesh", None)
-                    if mesh_bone is not None:
-                        bounds = mesh_bone.bounds
-                        if axis == "x":
-                            lo, hi = bounds[0], bounds[1]
-                        elif axis == "y":
-                            lo, hi = bounds[2], bounds[3]
-                        else:
-                            lo, hi = bounds[4], bounds[5]
-                        fraction = float(np.clip(self._clip_fraction, 0.005, 0.995))
-                        pos = lo + fraction * (hi - lo)
-                        cx, cy, cz = mesh_bone.center
-                        if axis == "x":
-                            origin = (pos, cy, cz)
-                        elif axis == "y":
-                            origin = (cx, pos, cz)
-                        else:
-                            origin = (cx, cy, pos)
-                        omesh = omesh.clip(normal=axis, origin=origin, invert=getattr(self, "_clip_inverted", False))
-                        try:
-                            omesh.clear_cell_data()
-                        except Exception:
-                            pass
-                except Exception as exc:
-                    print(f"[Viewer3D] Organ clipping warning for {name}: {exc}")
-
-            if omesh.n_cells > 0:
-                try:
-                    act = self.plotter.add_mesh(
-                        omesh,
-                        color=oinfo.get("color", "#ff5555"),
-                        smooth_shading=True,
-                        ambient=0.30,
-                        diffuse=0.80,
-                        specular=0.25,
-                        specular_power=15,
-                        opacity=oinfo.get("opacity", 1.0),
-                        name=f"organ_{name}",
-                    )
-                    self.organ_actors[name] = act
-                except Exception as exc:
-                    print(f"[Viewer3D] Organ render warning for {name}: {exc}")
-
-        if hasattr(self, "plotter"):
-            self.plotter.render()
+        """Compatibility stub."""
+        pass
 
     def set_density_colormap(self, active: bool):
         """Toggle density-based heatmap coloring using genuine CT Hounsfield Units (HU).

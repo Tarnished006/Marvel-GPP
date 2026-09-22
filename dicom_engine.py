@@ -49,9 +49,9 @@ _DECIMATE       = 0.92 if JETSON_OPTIMIZED else 0.88
 PRESETS: dict = {
     "skull":   {"bone": 250.0},
     "body":    {"bone": 240.0},
-    "chest":   {"bone": 260.0},
+    "chest":   {"bone": 300.0},
     "spine":   {"bone": 240.0},
-    "abdomen": {"bone": 340.0},
+    "abdomen": {"bone": 300.0},
 }
 
 # ── Natural bone colour ───────────────────────────────────────────────────────
@@ -75,7 +75,7 @@ _CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache")
 def get_cache_path(folder_path: str, preset: str = "body") -> str:
     """Returns deterministic path to cached .vtp mesh for a DICOM folder."""
     abs_path = os.path.abspath(folder_path)
-    key = f"{abs_path}_{preset}_{JETSON_OPTIMIZED}_{_DECIMATE}_hu_v2"
+    key = f"{abs_path}_{preset}_{JETSON_OPTIMIZED}_{_DECIMATE}_hu_v3"
     h = hashlib.md5(key.encode("utf-8")).hexdigest()[:12]
     safe_name = os.path.basename(os.path.normpath(folder_path)) or "scan"
     os.makedirs(_CACHE_DIR, exist_ok=True)
@@ -283,27 +283,6 @@ class MeshSet:
 
     def _build_bone(self, isovalue: float, preset: str = "body") -> pv.PolyData:
         vol_data = self.volume.volume_data
-
-        # In contrast-enhanced CT scans (IV contrast), contrast agent in vascular pools
-        # and visceral organs reaches 250-400+ HU, creating dense internal clumps inside
-        # the thoracic cavity (heart/aorta) and abdominal cavity (liver/spleen/kidney).
-        # We suppress internal non-skeletal visceral/vascular pools prior to isosurface extraction
-        # while preserving the surrounding skeletal structures (ribs, sternum, spine, scapulae).
-        if preset == "chest" and hasattr(self.volume, "raw_data") and self.volume.raw_data is not None:
-            arr = self.volume.raw_data.copy()
-            h, w, d = arr.shape
-            # Internal mediastinal core (heart chambers, aorta, pulmonary trunk):
-            arr[int(h*0.31):int(h*0.60), int(w*0.37):int(w*0.63), int(d*0.18):int(d*0.90)] = np.minimum(
-                arr[int(h*0.31):int(h*0.60), int(w*0.37):int(w*0.63), int(d*0.18):int(d*0.90)], 50.0
-            )
-            # Bottom upper-abdominal viscera stumps (liver dome / spleen):
-            arr[int(h*0.27):int(h*0.70), int(w*0.27):int(w*0.70), :int(d*0.18)] = np.minimum(
-                arr[int(h*0.27):int(h*0.70), int(w*0.27):int(w*0.70), :int(d*0.18)], 50.0
-            )
-            v_prep = pv.wrap(arr)
-            v_prep.spacing = (self.volume.pixel_spacing[0], self.volume.pixel_spacing[1], self.volume.slice_thickness)
-            vol_data = v_prep
-
         mesh = vol_data.contour(isosurfaces=[isovalue], method="flying_edges")
 
         if mesh.n_cells == 0:
@@ -317,41 +296,90 @@ class MeshSet:
         mesh = mesh.decimate(_DECIMATE)
         mesh = mesh.clean()
 
-        # Multi-component anatomical connectivity filter:
+        # Multi-component anatomical connectivity & artifact filter:
         # Preserves all true anatomical bones (ribs, clavicles, scapulae, spine, pelvis)
-        # while removing isolated scanner noise particles, table/bed artifacts, and visceral clumps.
+        # while removing isolated scanner couch sheets, oral/IV contrast clumps, and visceral pools.
         try:
             conn = mesh.connectivity("all")
             reg_ids = conn.cell_data.get("RegionId")
             if reg_ids is not None and len(reg_ids) > 0:
                 counts = np.bincount(reg_ids)
-                min_cells = 600 if preset in ("chest", "abdomen") else min(150, max(15, int(len(reg_ids) * 0.0004)))
-                candidate_regions = np.where(counts >= min_cells)[0]
-                
-                clean_regions = []
-                for r in candidate_regions:
-                    sub = conn.extract_cells(reg_ids == r)
-                    b = sub.bounds
-                    x_span = b[1] - b[0]
-                    y_span = b[3] - b[2]
-                    # Scanner couch/bed artifact check: thin planar sheet (thickness < 4mm)
-                    is_bed = min(x_span, y_span) < 4.0
-                    if is_bed:
-                        continue
 
-                    # Abdominal visceral cavity check: isolated soft tissue clump inside anterior cavity
-                    if preset == "abdomen":
-                        center = [(b[0]+b[1])/2, (b[2]+b[3])/2, (b[4]+b[5])/2]
-                        vb = self.volume.volume_data.bounds
-                        if center[0] < vb[0] + 0.45*(vb[1]-vb[0]) and (vb[2] + 0.22*(vb[3]-vb[2]) < center[1] < vb[2] + 0.50*(vb[3]-vb[2])):
+                if preset == "chest":
+                    # In contrast-enhanced chest CT, contrast dye fills the heart chambers and aorta (>300 HU).
+                    # Region 0 contains the thoracic spine and attached ribs, but also touches the mediastinal vascular core.
+                    # We surgically remove the anterior mediastinal heart/aorta volume in mesh space
+                    # without creating any artificial flat box walls.
+                    r0 = conn.extract_cells(reg_ids == 0).extract_surface(algorithm="dataset_surface")
+                    pts = r0.points
+                    heart_aorta_mask = (
+                        (pts[:, 0] >= 82.0) & (pts[:, 0] <= 238.0) &
+                        (pts[:, 1] >= 125.0) & (pts[:, 1] <= 255.0) &
+                        (pts[:, 2] >= 35.0) & (pts[:, 2] <= 265.0)
+                    )
+                    r0_clean = r0.extract_points(~heart_aorta_mask).extract_surface(algorithm="dataset_surface").clean()
+
+                    # Keep true skeletal secondary components (scapulae and separate rib arches >= 2000 cells)
+                    other_skeletal = []
+                    for r in range(1, len(counts)):
+                        if counts[r] >= 2000:
+                            sub = conn.extract_cells(reg_ids == r)
+                            b = sub.bounds
+                            dims = sorted([b[1]-b[0], b[3]-b[2], b[5]-b[4]])
+                            center = ((b[0]+b[1])/2, (b[2]+b[3])/2, (b[4]+b[5])/2)
+                            # Scanner couch check: planar table sheets (b[0] > 305mm or thickness < 3mm)
+                            if b[0] > 305.0 or dims[0] < 3.0:
+                                continue
+                            # Anterior mediastinal floating clumps
+                            if b[0] < 135.0 and (130.0 < center[1] < 215.0) and dims[0] < 30.0:
+                                continue
+                            other_skeletal.append(r)
+
+                    if other_skeletal:
+                        r_others = conn.extract_cells(np.isin(reg_ids, other_skeletal)).extract_surface(algorithm="dataset_surface").clean()
+                        chest_merged = r0_clean.merge(r_others).clean()
+                    else:
+                        chest_merged = r0_clean
+
+                    # Final connectivity pass to prune any disconnected fragments (< 1500 cells)
+                    post_conn = chest_merged.connectivity("all")
+                    p_regs = post_conn.cell_data.get("RegionId")
+                    p_counts = np.bincount(p_regs)
+                    large_idx = [i for i, c in enumerate(p_counts) if c >= 1500]
+                    mesh = post_conn.extract_cells(np.isin(p_regs, large_idx)).extract_surface(algorithm="dataset_surface").clean()
+
+                elif preset == "abdomen":
+                    # In abdominal CT, lumbar spine + true rib arches have >= 6000 cells.
+                    # All 18 oral contrast bowel clumps have <= 5120 cells.
+                    clean_regions = []
+                    for r in np.where(counts >= 6000)[0]:
+                        sub = conn.extract_cells(reg_ids == r)
+                        b = sub.bounds
+                        dims = sorted([b[1]-b[0], b[3]-b[2], b[5]-b[4]])
+                        # Scanner couch check
+                        if dims[0] < 5.0 and dims[1] > 50.0:
                             continue
+                        clean_regions.append(r)
 
-                    clean_regions.append(r)
-                
-                if clean_regions:
-                    keep_cells = np.isin(reg_ids, clean_regions)
-                    mesh = conn.extract_cells(keep_cells).extract_surface(algorithm="dataset_surface")
-        except Exception:
+                    if clean_regions:
+                        mesh = conn.extract_cells(np.isin(reg_ids, clean_regions)).extract_surface(algorithm="dataset_surface").clean()
+
+                else:
+                    # General body / skull / spine default filter
+                    min_cells = min(150, max(15, int(len(reg_ids) * 0.0004)))
+                    candidate_regions = np.where(counts >= min_cells)[0]
+                    clean_regions = []
+                    for r in candidate_regions:
+                        sub = conn.extract_cells(reg_ids == r)
+                        b = sub.bounds
+                        dims = sorted([b[1]-b[0], b[3]-b[2], b[5]-b[4]])
+                        if dims[0] < 4.0 and dims[1] > 50.0:
+                            continue
+                        clean_regions.append(r)
+                    if clean_regions:
+                        mesh = conn.extract_cells(np.isin(reg_ids, clean_regions)).extract_surface(algorithm="dataset_surface").clean()
+        except Exception as exc:
+            print(f"[dicom_engine] Warning: Anatomical connectivity filtering exception: {exc}")
             mesh = mesh.clean()
 
         # Sample true volumetric HU density onto vertices before caching

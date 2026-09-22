@@ -541,6 +541,7 @@ class GestureWorker(QThread):
                 d_ring_2d  = min(float(np.linalg.norm(thumb_px - ring_px)), float(np.linalg.norm(thumb_pad - ring_px)))
                 d_pinky_2d = min(float(np.linalg.norm(thumb_px - pinky_px)), float(np.linalg.norm(thumb_pad - pinky_px)))
                 mid_ratio  = d_mid_2d / ref_2d
+                ring_ratio = d_ring_2d / ref_2d
 
                 # 3D normalized distances for camera perspective invariance:
                 d_3d       = float(np.linalg.norm(sm[4] - sm[8]))
@@ -695,6 +696,19 @@ class GestureWorker(QThread):
                                     (palm_px_pos[0]-40, palm_px_pos[1]-20),
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.55,
                                     (0,255,255), 2)
+
+                    elif (d_ring_2d < d_2d) and (ring_ratio < 0.18):    # thumb+ring pinch → 2D pan
+                        if label in self.prev_palm:
+                            px0, py0 = self.prev_palm[label]
+                            dx = float(np.clip(palm_x - px0, -0.06, 0.06))
+                            dy = float(np.clip(palm_y - py0, -0.06, 0.06))
+                            if abs(dx) > 0.003 or abs(dy) > 0.003:
+                                signal_bus.pan_command.emit(dx, dy)
+                                cv2.putText(frame, "PAN / DRAG",
+                                            (palm_px_pos[0]-40, palm_px_pos[1]-20),
+                                            cv2.FONT_HERSHEY_SIMPLEX, 0.55,
+                                            (0,255,100), 2)
+                        self.prev_palm[label] = (palm_x, palm_y)
 
                     else:                       # open palm → 3D camera rotation
                         if label in self.prev_palm:

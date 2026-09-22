@@ -88,13 +88,27 @@ class Viewer2D(QWidget):
         self.cine_timer = QTimer(self)
         self.cine_timer.timeout.connect(self._next_slice)
         
-        # Connect gesture zoom
+        # Connect gesture zoom & pan
         signal_bus.zoom_command.connect(self._handle_gesture_zoom)
+        signal_bus.pan_command.connect(self._handle_gesture_pan)
         
         self._build_ui()
 
+    def _handle_gesture_pan(self, dx: float, dy: float):
+        """Called by the gesture thread when a thumb+ring gesture is detected in Viewer Mode."""
+        if not self.isVisible():
+            return
+            
+        # dx, dy are typically -0.06 to 0.06. Scale up for scrolling.
+        sensitivity = 3000
+        h_bar = self.view.horizontalScrollBar()
+        v_bar = self.view.verticalScrollBar()
+        
+        h_bar.setValue(h_bar.value() - int(dx * sensitivity))
+        v_bar.setValue(v_bar.value() - int(dy * sensitivity))
+
     def _handle_gesture_zoom(self, direction: int):
-        """Called by the gesture thread when a two-hand zoom gesture is detected."""
+        """Called by the gesture thread when a zoom gesture is detected."""
         # Ensure we only zoom if this widget is visible
         if not self.isVisible():
             return

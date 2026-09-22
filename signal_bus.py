@@ -15,6 +15,7 @@ class SignalBus(QObject):
                                                        # to match gesture.py's emit(dx, dy, 0.0) and
                                                        # Viewer3D.rotate_camera(delta_x, delta_y, delta_z=0.0))
     zoom_command = pyqtSignal(int)                    # +1 (Zoom In) or -1 (Zoom Out)
+    pan_command = pyqtSignal(float, float)            # dx, dy for panning in 2D
     tissue_melt = pyqtSignal(float)                   # melt_factor (0.0 - 1.0)
 
     # System & Camera Overlay Signals

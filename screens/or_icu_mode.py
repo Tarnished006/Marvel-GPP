@@ -3663,6 +3663,97 @@ class QuickSurgicalViewsCard(QFrame):
             btn.setEnabled(bool(avail.get(preset, False)))
 
 
+class WorkflowRailItem(QFrame):
+    """Touch-friendly workflow rail item with number, title, badge/status, and active state."""
+    clicked = pyqtSignal(int)
+
+    def __init__(self, index: int, step_num: str, title: str, status_text: str = "●", parent=None):
+        super().__init__(parent)
+        self.index = index
+        self.is_active = False
+        self._accent_color = "#00e5ff"
+        self.setFixedHeight(46)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(10, 4, 10, 4)
+        layout.setSpacing(8)
+
+        # Step Number (e.g., "01", "02")
+        self.lbl_num = QLabel(step_num)
+        self.lbl_num.setStyleSheet("color: #586069; font-size: 11px; font-weight: 700; font-family: monospace;")
+        self.lbl_num.setFixedWidth(22)
+        layout.addWidget(self.lbl_num)
+
+        # Title Label (e.g., "Current vs Previous Scan")
+        self.lbl_title = QLabel(title)
+        self.lbl_title.setStyleSheet("color: #c9d1d9; font-size: 12px; font-weight: 600;")
+        layout.addWidget(self.lbl_title, stretch=1)
+
+        # Status / Badge Label (e.g., "●", "2", "ON", "—")
+        self.lbl_status = QLabel(status_text)
+        self.lbl_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_status.setStyleSheet("""
+            color: #8b949e; font-size: 10px; font-weight: bold;
+            background: #161b22; border-radius: 3px; padding: 2px 6px;
+        """)
+        layout.addWidget(self.lbl_status)
+
+        self._update_style()
+
+    def set_active(self, active: bool, accent_color: str = None):
+        self.is_active = active
+        if accent_color:
+            self._accent_color = accent_color
+        self._update_style()
+
+    def set_status(self, text: str, color: str = None, bg_color: str = None):
+        self.lbl_status.setText(text)
+        style = "font-size: 10px; font-weight: bold; border-radius: 3px; padding: 2px 6px;"
+        if color:
+            style += f" color: {color};"
+        else:
+            style += " color: #8b949e;"
+        if bg_color:
+            style += f" background: {bg_color};"
+        else:
+            style += " background: #161b22;"
+        self.lbl_status.setStyleSheet(style)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit(self.index)
+        super().mousePressEvent(event)
+
+    def _update_style(self):
+        accent = self._accent_color
+        if self.is_active:
+            self.setStyleSheet(f"""
+                WorkflowRailItem {{
+                    background: #161b22;
+                    border: 1px solid {accent};
+                    border-left: 3px solid {accent};
+                    border-radius: 4px;
+                }}
+            """)
+            self.lbl_num.setStyleSheet(f"color: {accent}; font-size: 11px; font-weight: 700; font-family: monospace;")
+            self.lbl_title.setStyleSheet("color: #ffffff; font-size: 12px; font-weight: bold;")
+        else:
+            self.setStyleSheet("""
+                WorkflowRailItem {{
+                    background: transparent;
+                    border: 1px solid transparent;
+                    border-radius: 4px;
+                }}
+                WorkflowRailItem:hover {{
+                    background: #161b22;
+                    border: 1px solid #30363d;
+                }}
+            """)
+            self.lbl_num.setStyleSheet("color: #586069; font-size: 11px; font-weight: 700; font-family: monospace;")
+            self.lbl_title.setStyleSheet("color: #c9d1d9; font-size: 12px; font-weight: 600;")
+
+
 class OrIcuMode(QWidget):
     # Signal emitted when clinician chooses to open/return to 3D Viewer
     open_in_viewer_requested = pyqtSignal(dict, dict)  # (patient, scan)
@@ -3760,6 +3851,9 @@ class OrIcuMode(QWidget):
         self.current_scan: dict = {}
         self.current_mode: str = "ICU"  # "ICU" or "OR"
         self.surgical_plan = None
+        self._active_icu_index: int = 0
+        self._active_or_index: int = 0
+
         self.entry_target_card = None
         self.planned_route_card = None
         self.current_previous_card = None
@@ -3775,13 +3869,11 @@ class OrIcuMode(QWidget):
         self.plan_versions_card = None
         self.before_after_card = None
         self.quick_views_card = None
-
-
+        self.quick_handoff_card = None
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
-
 
         self.state_stack = QStackedWidget()
         outer.addWidget(self.state_stack)
@@ -3808,7 +3900,7 @@ class OrIcuMode(QWidget):
             return
 
         self.current_patient = dict(patient)
-        
+
         # Resolve scan if not provided directly
         if not scan:
             if "_scan" in self.current_patient and self.current_patient["_scan"]:
@@ -3829,6 +3921,11 @@ class OrIcuMode(QWidget):
             self.surgical_plan.reset_for_scan(scan_id)
             if hasattr(self, "plan_versions_card") and self.plan_versions_card:
                 self.plan_versions_card.update_versions(self.surgical_plan, scan_id)
+            if hasattr(self, "entry_target_card") and self.entry_target_card:
+                self.entry_target_card.update_landmarks(
+                    self.surgical_plan.entry_point,
+                    self.surgical_plan.target_point
+                )
 
         if hasattr(self, "quick_views_card") and self.quick_views_card:
             self.quick_views_card.set_active_preset(None)
@@ -3871,30 +3968,32 @@ class OrIcuMode(QWidget):
         if hasattr(self, "quick_views_card") and self.quick_views_card is not None:
             self.quick_views_card.update_availability(plan)
 
-
+        self._sync_rail_badges()
 
     # ── Page Builders ─────────────────────────────────────────────────────────
 
     def _build_select_state(self) -> QWidget:
         page = QWidget()
+        page.setStyleSheet("background: #090a0d;")
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setContentsMargins(28, 28, 28, 28)
         layout.setSpacing(14)
 
-        header = QLabel("<b>ICU / OR WORKSPACE — PATIENT SELECT</b>")
-        header.setStyleSheet("font-size: 16px; color: #00e5ff; font-weight: bold;")
+        header = QLabel("<b>AEGIS-TOUCH — WORKSPACE SELECTION</b>")
+        header.setStyleSheet("font-size: 16px; color: #00e5ff; font-weight: bold; letter-spacing: 0.5px;")
         layout.addWidget(header)
 
-        sub = QLabel("Select a patient below, or open a scan directly from the Dashboard or 3D Viewer.")
-        sub.setStyleSheet("font-size: 12px; color: #888888;")
+        sub = QLabel("Select an active clinical case below to enter the ICU / OR workspace.")
+        sub.setStyleSheet("font-size: 12px; color: #8b949e;")
         layout.addWidget(sub)
 
         self.search_box = QLineEdit()
         self.search_box.setPlaceholderText("Search patient name or MRN...")
+        self.search_box.setFixedHeight(38)
         self.search_box.setStyleSheet("""
             QLineEdit {
-                background: #1a1a1a; color: #fff; border: 1px solid #333;
-                border-radius: 4px; padding: 8px; font-size: 12px;
+                background: #161b22; color: #fff; border: 1px solid #30363d;
+                border-radius: 4px; padding: 0 12px; font-size: 12px;
             }
             QLineEdit:focus { border-color: #00e5ff; }
         """)
@@ -3904,7 +4003,9 @@ class OrIcuMode(QWidget):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setStyleSheet("QScrollArea { background: transparent; }")
         scroll_content = QWidget()
+        scroll_content.setStyleSheet("background: transparent;")
         self.patient_grid = QGridLayout(scroll_content)
         self.patient_grid.setSpacing(12)
         scroll.setWidget(scroll_content)
@@ -3942,120 +4043,202 @@ class OrIcuMode(QWidget):
 
     def _build_session_state(self) -> QWidget:
         page = QWidget()
+        page.setStyleSheet("background: #090a0d;")
         outer = QVBoxLayout(page)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
-        # ── 1. Top Clinical Header Bar ─────────────────────────────────────────
+        # ── 1. Compact Top Bar ────────────────────────────────────────────────
         top_bar = QFrame()
-        top_bar.setStyleSheet("background: #0a0a0a; border-bottom: 1px solid #1c1c1c;")
+        top_bar.setFixedHeight(50)
+        top_bar.setStyleSheet("background: #0d0f14; border-bottom: 1px solid #1c212b;")
         top_layout = QHBoxLayout(top_bar)
-        top_layout.setContentsMargins(14, 10, 14, 10)
-        top_layout.setSpacing(16)
+        top_layout.setContentsMargins(14, 0, 14, 0)
+        top_layout.setSpacing(14)
+
+        # Brand block
+        brand_block = QVBoxLayout()
+        brand_block.setSpacing(0)
+        brand_block.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+        brand_title = QLabel("AEGIS-TOUCH")
+        brand_title.setStyleSheet("color: #00e5ff; font-size: 13px; font-weight: 900; letter-spacing: 1.5px;")
+        brand_sub = QLabel("WORKSTATION")
+        brand_sub.setStyleSheet("color: #586069; font-size: 8px; font-weight: 700; letter-spacing: 1px;")
+        brand_block.addWidget(brand_title)
+        brand_block.addWidget(brand_sub)
+        top_layout.addLayout(brand_block)
+
+        div1 = QFrame()
+        div1.setFrameShape(QFrame.Shape.VLine)
+        div1.setStyleSheet("color: #21262d;")
+        top_layout.addWidget(div1)
 
         # Patient Info Block
-        info_block = QVBoxLayout()
-        info_block.setSpacing(2)
+        patient_block = QVBoxLayout()
+        patient_block.setSpacing(1)
+        patient_block.setAlignment(Qt.AlignmentFlag.AlignVCenter)
         self.top_patient_name = QLabel("<b>No Patient Loaded</b>")
-        self.top_patient_name.setStyleSheet("font-size: 15px; color: #ffffff;")
+        self.top_patient_name.setStyleSheet("font-size: 13px; color: #ffffff;")
         self.top_patient_meta = QLabel("MRN: —  ·  Age/Sex: —")
-        self.top_patient_meta.setStyleSheet("font-size: 11px; color: #888888;")
-        info_block.addWidget(self.top_patient_name)
-        info_block.addWidget(self.top_patient_meta)
-        top_layout.addLayout(info_block)
+        self.top_patient_meta.setStyleSheet("font-size: 11px; color: #8b949e;")
+        patient_block.addWidget(self.top_patient_name)
+        patient_block.addWidget(self.top_patient_meta)
+        top_layout.addLayout(patient_block)
+
+        div2 = QFrame()
+        div2.setFrameShape(QFrame.Shape.VLine)
+        div2.setStyleSheet("color: #21262d;")
+        top_layout.addWidget(div2)
 
         # Study Info Block
         study_block = QVBoxLayout()
-        study_block.setSpacing(2)
+        study_block.setSpacing(1)
+        study_block.setAlignment(Qt.AlignmentFlag.AlignVCenter)
         self.top_study_desc = QLabel("Study: —")
-        self.top_study_desc.setStyleSheet("font-size: 12px; color: #00e5ff; font-weight: 600;")
+        self.top_study_desc.setStyleSheet("font-size: 12px; color: #58a6ff; font-weight: 600;")
         self.top_study_meta = QLabel("Modality: —  ·  Date: —  ·  Slices: —")
-        self.top_study_meta.setStyleSheet("font-size: 11px; color: #888888;")
+        self.top_study_meta.setStyleSheet("font-size: 11px; color: #8b949e;")
         study_block.addWidget(self.top_study_desc)
         study_block.addWidget(self.top_study_meta)
         top_layout.addLayout(study_block)
 
+        div3 = QFrame()
+        div3.setFrameShape(QFrame.Shape.VLine)
+        div3.setStyleSheet("color: #21262d;")
+        top_layout.addWidget(div3)
+
+        # Current vs Previous Scan Info
+        scan_block = QVBoxLayout()
+        scan_block.setSpacing(1)
+        scan_block.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+        self.top_scan_info = QLabel("CURRENT: —")
+        self.top_scan_info.setStyleSheet("font-size: 11px; color: #c9d1d9; font-weight: 600;")
+        self.top_prev_info = QLabel("PREVIOUS: None on file")
+        self.top_prev_info.setStyleSheet("font-size: 10px; color: #6e7681;")
+        scan_block.addWidget(self.top_scan_info)
+        scan_block.addWidget(self.top_prev_info)
+        top_layout.addLayout(scan_block)
+
         top_layout.addStretch(1)
 
-        # Mode Selector Buttons: [ ICU MODE ]  [ OR MODE ]
+        # Mode Selector Buttons: [ VIEWER ]  [ ICU ]  [ OR ]
         mode_btn_container = QHBoxLayout()
         mode_btn_container.setSpacing(4)
 
-        self.btn_icu_mode = QPushButton("🏥 ICU MODE")
-        self.btn_icu_mode.setFixedHeight(30)
+        self.btn_viewer_mode = QPushButton("👁 VIEWER")
+        self.btn_viewer_mode.setFixedHeight(32)
+        self.btn_viewer_mode.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_viewer_mode.setStyleSheet("""
+            QPushButton {
+                background: #161b22; color: #c9d1d9; border: 1px solid #30363d;
+                border-radius: 4px; padding: 0 12px; font-size: 11px; font-weight: bold;
+            }
+            QPushButton:hover { background: #21262d; color: #ffffff; border-color: #58a6ff; }
+        """)
+        self.btn_viewer_mode.clicked.connect(self._on_open_viewer_clicked)
+        mode_btn_container.addWidget(self.btn_viewer_mode)
+
+        self.btn_icu_mode = QPushButton("🏥 ICU")
+        self.btn_icu_mode.setFixedHeight(32)
         self.btn_icu_mode.setCheckable(True)
         self.btn_icu_mode.setChecked(True)
+        self.btn_icu_mode.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_icu_mode.clicked.connect(lambda: self.set_mode("ICU"))
         mode_btn_container.addWidget(self.btn_icu_mode)
 
-        self.btn_or_mode = QPushButton("🔪 OR MODE")
-        self.btn_or_mode.setFixedHeight(30)
+        self.btn_or_mode = QPushButton("🔪 OR")
+        self.btn_or_mode.setFixedHeight(32)
         self.btn_or_mode.setCheckable(True)
         self.btn_or_mode.setChecked(False)
+        self.btn_or_mode.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_or_mode.clicked.connect(lambda: self.set_mode("OR"))
         mode_btn_container.addWidget(self.btn_or_mode)
 
         top_layout.addLayout(mode_btn_container)
 
+        div4 = QFrame()
+        div4.setFrameShape(QFrame.Shape.VLine)
+        div4.setStyleSheet("color: #21262d;")
+        top_layout.addWidget(div4)
+
+        # Status Pills
+        status_layout = QHBoxLayout()
+        status_layout.setSpacing(6)
+
+        self.lbl_voice_status = QLabel("VOICE ●")
+        self.lbl_voice_status.setStyleSheet("""
+            color: #3fb950; font-size: 10px; font-weight: bold;
+            background: #0d2116; border: 1px solid #238636; border-radius: 3px; padding: 2px 6px;
+        """)
+        status_layout.addWidget(self.lbl_voice_status)
+
+        self.lbl_cam_status = QLabel("CAM ●")
+        self.lbl_cam_status.setStyleSheet("""
+            color: #3fb950; font-size: 10px; font-weight: bold;
+            background: #0d2116; border: 1px solid #238636; border-radius: 3px; padding: 2px 6px;
+        """)
+        status_layout.addWidget(self.lbl_cam_status)
+
+        self.lbl_sys_status = QLabel("SYS ●")
+        self.lbl_sys_status.setStyleSheet("""
+            color: #3fb950; font-size: 10px; font-weight: bold;
+            background: #0d2116; border: 1px solid #238636; border-radius: 3px; padding: 2px 6px;
+        """)
+        status_layout.addWidget(self.lbl_sys_status)
+
+        top_layout.addLayout(status_layout)
+
         # Switch Patient Button
         switch_btn = QPushButton("Switch Patient")
-        switch_btn.setFixedHeight(28)
+        switch_btn.setFixedHeight(30)
+        switch_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         switch_btn.setStyleSheet("""
             QPushButton {
-                background: #1a1a1a; color: #aaa; border: 1px solid #333;
+                background: #161b22; color: #8b949e; border: 1px solid #30363d;
                 border-radius: 4px; padding: 0 10px; font-size: 11px;
             }
-            QPushButton:hover { background: #2a2a2a; color: #fff; border-color: #555; }
+            QPushButton:hover { background: #21262d; color: #fff; border-color: #586069; }
         """)
         switch_btn.clicked.connect(self.switch_patient)
         top_layout.addWidget(switch_btn)
 
         outer.addWidget(top_bar)
 
-        # ── 2. Workspace Body: Left (Patient / Scans) | Center | Right (Workflow)
+        # ── 2. Workspace Body ─────────────────────────────────────────────────
         body = QHBoxLayout()
         body.setContentsMargins(0, 0, 0, 0)
         body.setSpacing(0)
 
-        # Left Toggle
-        self.left_toggle_btn = QPushButton("<")
-        self.left_toggle_btn.setFixedWidth(20)
-        self.left_toggle_btn.setStyleSheet("""
-            QPushButton { background: #0f0f0f; color: #666; border: none; }
-            QPushButton:hover { color: #00e5ff; background: #161616; }
-        """)
-        self.left_toggle_btn.clicked.connect(self._toggle_left)
-        body.addWidget(self.left_toggle_btn)
-
-        # Left Panel: Patient Details, Scan List, Clinical Notes
+        # Collapsible Case Drawer: Patient Details, Scan List, Clinical Notes
         self.left_panel = QWidget()
         self.left_panel.setFixedWidth(240)
-        self.left_panel.setStyleSheet("background: #111111; border-right: 1px solid #1c1c1c;")
+        self.left_panel.setVisible(False)  # default collapsed to maximize viewer
+        self.left_panel.setStyleSheet("background: #0d0f14; border-right: 1px solid #1c212b;")
         left_layout = QVBoxLayout(self.left_panel)
         left_layout.setContentsMargins(12, 12, 12, 12)
         left_layout.setSpacing(10)
 
         lbl_summary_title = QLabel("CLINICAL SUMMARY")
-        lbl_summary_title.setStyleSheet("color: #666; font-size: 10px; font-weight: 700; letter-spacing: 0.5px;")
+        lbl_summary_title.setStyleSheet("color: #8b949e; font-size: 10px; font-weight: 700; letter-spacing: 0.5px;")
         left_layout.addWidget(lbl_summary_title)
 
         self.patient_details_card = QFrame()
-        self.patient_details_card.setStyleSheet("background: #161616; border-radius: 4px; padding: 6px;")
+        self.patient_details_card.setStyleSheet("background: #161b22; border: 1px solid #21262d; border-radius: 4px; padding: 6px;")
         card_layout = QVBoxLayout(self.patient_details_card)
         card_layout.setSpacing(4)
         self.lbl_card_name = QLabel("—")
         self.lbl_card_name.setStyleSheet("color: #fff; font-size: 12px; font-weight: bold;")
         self.lbl_card_mrn = QLabel("MRN: —")
-        self.lbl_card_mrn.setStyleSheet("color: #888; font-size: 11px;")
+        self.lbl_card_mrn.setStyleSheet("color: #8b949e; font-size: 11px;")
         self.lbl_card_demographics = QLabel("Demographics: —")
-        self.lbl_card_demographics.setStyleSheet("color: #888; font-size: 11px;")
+        self.lbl_card_demographics.setStyleSheet("color: #8b949e; font-size: 11px;")
         card_layout.addWidget(self.lbl_card_name)
         card_layout.addWidget(self.lbl_card_mrn)
         card_layout.addWidget(self.lbl_card_demographics)
         left_layout.addWidget(self.patient_details_card)
 
         lbl_scans_title = QLabel("AVAILABLE STUDIES")
-        lbl_scans_title.setStyleSheet("color: #666; font-size: 10px; font-weight: 700; letter-spacing: 0.5px;")
+        lbl_scans_title.setStyleSheet("color: #8b949e; font-size: 10px; font-weight: 700; letter-spacing: 0.5px;")
         left_layout.addWidget(lbl_scans_title)
 
         self.scans_scroll = QScrollArea()
@@ -4069,7 +4252,7 @@ class OrIcuMode(QWidget):
         left_layout.addWidget(self.scans_scroll, stretch=1)
 
         lbl_notes_title = QLabel("CLINICAL NOTES")
-        lbl_notes_title.setStyleSheet("color: #666; font-size: 10px; font-weight: 700; letter-spacing: 0.5px;")
+        lbl_notes_title.setStyleSheet("color: #8b949e; font-size: 10px; font-weight: 700; letter-spacing: 0.5px;")
         left_layout.addWidget(lbl_notes_title)
 
         self.notes_scroll = QScrollArea()
@@ -4084,36 +4267,151 @@ class OrIcuMode(QWidget):
 
         body.addWidget(self.left_panel)
 
-        # ── Center Area: Clean Workspace Placeholder & Navigation Hub ────────
-        center_widget = QWidget()
-        center_widget.setStyleSheet("background: #0d0d0d;")
-        center_layout = QVBoxLayout(center_widget)
-        center_layout.setContentsMargins(30, 30, 30, 30)
-        center_layout.setSpacing(16)
-        center_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # Case Drawer Toggle
+        self.left_toggle_btn = QPushButton(">")
+        self.left_toggle_btn.setToolTip("Toggle Clinical Case Info")
+        self.left_toggle_btn.setFixedWidth(18)
+        self.left_toggle_btn.setStyleSheet("""
+            QPushButton { background: #0b0d11; color: #586069; border: none; font-size: 11px; font-weight: bold; }
+            QPushButton:hover { color: #00e5ff; background: #161b22; }
+        """)
+        self.left_toggle_btn.clicked.connect(self._toggle_left)
+        body.addWidget(self.left_toggle_btn)
 
-        # Center Card
+        # ── Left Workflow Rail Panel ──────────────────────────────────────────
+        self.workflow_rail_panel = QWidget()
+        self.workflow_rail_panel.setFixedWidth(230)
+        self.workflow_rail_panel.setStyleSheet("background: #0d0f14; border-right: 1px solid #1c212b;")
+        rail_layout = QVBoxLayout(self.workflow_rail_panel)
+        rail_layout.setContentsMargins(10, 12, 10, 12)
+        rail_layout.setSpacing(8)
+
+        self.workflow_header = QLabel("ICU WORKFLOW")
+        self.workflow_header.setStyleSheet("color: #00e5ff; font-size: 11px; font-weight: 800; letter-spacing: 0.8px;")
+        rail_layout.addWidget(self.workflow_header)
+
+        self.workflow_scroll = QScrollArea()
+        self.workflow_scroll.setWidgetResizable(True)
+        self.workflow_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.workflow_scroll.setStyleSheet("QScrollArea { background: transparent; }")
+
+        self.workflow_container = QWidget()
+        self.workflow_container.setStyleSheet("background: transparent;")
+        self.workflow_items_layout = QVBoxLayout(self.workflow_container)
+        self.workflow_items_layout.setContentsMargins(0, 0, 0, 0)
+        self.workflow_items_layout.setSpacing(4)
+
+        # Container for ICU Rail Items
+        self.icu_rail_container = QWidget()
+        self.icu_rail_container.setStyleSheet("background: transparent;")
+        self.icu_rail_layout = QVBoxLayout(self.icu_rail_container)
+        self.icu_rail_layout.setContentsMargins(0, 0, 0, 0)
+        self.icu_rail_layout.setSpacing(4)
+        self.workflow_items_layout.addWidget(self.icu_rail_container)
+
+        # Container for OR Rail Items
+        self.or_rail_container = QWidget()
+        self.or_rail_container.setStyleSheet("background: transparent;")
+        self.or_rail_layout = QVBoxLayout(self.or_rail_container)
+        self.or_rail_layout.setContentsMargins(0, 0, 0, 0)
+        self.or_rail_layout.setSpacing(4)
+        self.workflow_items_layout.addWidget(self.or_rail_container)
+
+        self.workflow_items_layout.addStretch(1)
+        self.workflow_scroll.setWidget(self.workflow_container)
+        rail_layout.addWidget(self.workflow_scroll, stretch=1)
+
+        body.addWidget(self.workflow_rail_panel)
+
+        # ── Center Dominant Main Viewer Workspace ─────────────────────────────
+        center_widget = QWidget()
+        center_widget.setStyleSheet("background: #040507;")
+        center_main_layout = QVBoxLayout(center_widget)
+        center_main_layout.setContentsMargins(16, 14, 16, 14)
+        center_main_layout.setSpacing(0)
+
+        viewport_frame = QFrame()
+        viewport_frame.setStyleSheet("""
+            QFrame {
+                background: #07090d;
+                border: 1px solid #161b22;
+                border-radius: 6px;
+            }
+        """)
+        viewport_layout = QVBoxLayout(viewport_frame)
+        viewport_layout.setContentsMargins(14, 12, 14, 12)
+        viewport_layout.setSpacing(0)
+
+        # HUD Top Overlay (Top-Left: Patient metadata, Top-Right: Study metadata)
+        hud_top = QHBoxLayout()
+        hud_top.setSpacing(12)
+
+        hud_tl = QVBoxLayout()
+        hud_tl.setSpacing(1)
+        self.hud_patient_name = QLabel("—")
+        self.hud_patient_name.setStyleSheet("color: #00e5ff; font-size: 11px; font-weight: bold; font-family: monospace;")
+        self.hud_patient_meta = QLabel("MRN: —")
+        self.hud_patient_meta.setStyleSheet("color: #8b949e; font-size: 10px; font-family: monospace;")
+        hud_tl.addWidget(self.hud_patient_name)
+        hud_tl.addWidget(self.hud_patient_meta)
+        hud_top.addLayout(hud_tl)
+
+        # Anatomical Marker Top: Superior (S)
+        self.lbl_anat_s = QLabel("S")
+        self.lbl_anat_s.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_anat_s.setStyleSheet("color: #30363d; font-size: 13px; font-weight: bold; font-family: monospace;")
+        hud_top.addStretch(1)
+        hud_top.addWidget(self.lbl_anat_s)
+        hud_top.addStretch(1)
+
+        hud_tr = QVBoxLayout()
+        hud_tr.setSpacing(1)
+        hud_tr.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self.hud_study_desc = QLabel("—")
+        self.hud_study_desc.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self.hud_study_desc.setStyleSheet("color: #58a6ff; font-size: 11px; font-weight: bold; font-family: monospace;")
+        self.hud_study_meta = QLabel("Modality: CT")
+        self.hud_study_meta.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self.hud_study_meta.setStyleSheet("color: #8b949e; font-size: 10px; font-family: monospace;")
+        hud_tr.addWidget(self.hud_study_desc)
+        hud_tr.addWidget(self.hud_study_meta)
+        hud_top.addLayout(hud_tr)
+
+        viewport_layout.addLayout(hud_top)
+
+        # Viewport Mid Area: Anatomical Left (R) - Center Command Hub - Anatomical Right (L)
+        hud_mid = QHBoxLayout()
+        hud_mid.setSpacing(0)
+
+        # Anatomical Marker: Right (R)
+        self.lbl_anat_r = QLabel("R")
+        self.lbl_anat_r.setStyleSheet("color: #30363d; font-size: 13px; font-weight: bold; font-family: monospace;")
+        hud_mid.addWidget(self.lbl_anat_r)
+
+        hud_mid.addStretch(1)
+
+        # Center Interactive Command Hub
         self.center_card = QFrame()
         self.center_card.setStyleSheet("""
             QFrame {
-                background: #141414;
-                border: 1px solid #222222;
+                background: rgba(13, 17, 23, 0.9);
+                border: 1px solid #21262d;
                 border-radius: 8px;
-                padding: 30px;
-                max-width: 580px;
+                padding: 24px;
+                max-width: 520px;
             }
         """)
         card_inner = QVBoxLayout(self.center_card)
-        card_inner.setSpacing(14)
+        card_inner.setSpacing(12)
         card_inner.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         self.center_icon = QLabel("🏥")
-        self.center_icon.setStyleSheet("font-size: 36px;")
+        self.center_icon.setStyleSheet("font-size: 32px;")
         self.center_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
         card_inner.addWidget(self.center_icon)
 
         self.center_title = QLabel("Imaging Review Workspace")
-        self.center_title.setStyleSheet("color: #ffffff; font-size: 18px; font-weight: bold;")
+        self.center_title.setStyleSheet("color: #ffffff; font-size: 17px; font-weight: bold;")
         self.center_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         card_inner.addWidget(self.center_title)
 
@@ -4122,63 +4420,241 @@ class OrIcuMode(QWidget):
             "visualization are handled in the high-performance 3D Viewer."
         )
         self.center_desc.setWordWrap(True)
-        self.center_desc.setStyleSheet("color: #888888; font-size: 12px; line-height: 1.4;")
+        self.center_desc.setStyleSheet("color: #8b949e; font-size: 12px; line-height: 1.4;")
         self.center_desc.setAlignment(Qt.AlignmentFlag.AlignCenter)
         card_inner.addWidget(self.center_desc)
 
+        # Main Open in 3D Viewer Touch Button (44px min height)
         self.btn_open_in_viewer = QPushButton("🔍 Open in 3D Viewer")
-        self.btn_open_in_viewer.setFixedHeight(36)
+        self.btn_open_in_viewer.setFixedHeight(44)
         self.btn_open_in_viewer.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_open_in_viewer.setStyleSheet("""
             QPushButton {
-                background: #002e3b; color: #00e5ff; border: 1px solid #00e5ff;
-                border-radius: 4px; padding: 0 20px; font-size: 13px; font-weight: bold;
+                background: #003647; color: #00e5ff; border: 1px solid #00e5ff;
+                border-radius: 4px; padding: 0 24px; font-size: 13px; font-weight: bold;
             }
             QPushButton:hover {
-                background: #003d4f; color: #ffffff; border-color: #66efff;
+                background: #004d66; color: #ffffff; border-color: #66efff;
             }
         """)
         self.btn_open_in_viewer.clicked.connect(self._on_open_viewer_clicked)
         card_inner.addWidget(self.btn_open_in_viewer)
 
-        center_layout.addWidget(self.center_card)
-        body.addWidget(center_widget, stretch=3)
+        quick_views_layout = QHBoxLayout()
+        quick_views_layout.setSpacing(8)
+        quick_views_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        # ── Right Panel: ICU / OR Workflow Entry Points ────────────────────────
-        self.right_panel = QWidget()
-        self.right_panel.setFixedWidth(280)
-        self.right_panel.setStyleSheet("background: #111111; border-left: 1px solid #1c1c1c;")
-        self.right_layout = QVBoxLayout(self.right_panel)
-        self.right_layout.setContentsMargins(12, 12, 12, 12)
-        self.right_layout.setSpacing(10)
+        for mode_name in ("2D Axial", "MPR Ortho", "3D Volume"):
+            btn_q = QPushButton(mode_name)
+            btn_q.setFixedHeight(30)
+            btn_q.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn_q.setStyleSheet("""
+                QPushButton {
+                    background: #161b22; color: #8b949e; border: 1px solid #30363d;
+                    border-radius: 4px; padding: 0 12px; font-size: 11px;
+                }
+                QPushButton:hover { background: #21262d; color: #c9d1d9; border-color: #58a6ff; }
+            """)
+            btn_q.clicked.connect(self._on_open_viewer_clicked)
+            quick_views_layout.addWidget(btn_q)
 
-        self.workflow_header = QLabel("ICU WORKFLOW")
-        self.workflow_header.setStyleSheet("color: #00e5ff; font-size: 11px; font-weight: 700; letter-spacing: 0.6px;")
-        self.right_layout.addWidget(self.workflow_header)
+        card_inner.addLayout(quick_views_layout)
+        hud_mid.addWidget(self.center_card)
 
-        self.workflow_scroll = QScrollArea()
-        self.workflow_scroll.setWidgetResizable(True)
-        self.workflow_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self.workflow_container = QWidget()
-        self.workflow_items_layout = QVBoxLayout(self.workflow_container)
-        self.workflow_items_layout.setContentsMargins(0, 0, 0, 0)
-        self.workflow_items_layout.setSpacing(6)
-        self.workflow_scroll.setWidget(self.workflow_container)
-        self.right_layout.addWidget(self.workflow_scroll, stretch=1)
+        hud_mid.addStretch(1)
 
-        body.addWidget(self.right_panel)
+        # Anatomical Marker: Left (L)
+        self.lbl_anat_l = QLabel("L")
+        self.lbl_anat_l.setStyleSheet("color: #30363d; font-size: 13px; font-weight: bold; font-family: monospace;")
+        hud_mid.addWidget(self.lbl_anat_l)
 
-        # Right Toggle
+        viewport_layout.addLayout(hud_mid, stretch=1)
+
+        # HUD Bottom Overlay (Bottom-Left: W/L info, Bottom-Right: Engine info)
+        hud_bot = QHBoxLayout()
+        hud_bot.setSpacing(12)
+
+        hud_bl = QVBoxLayout()
+        hud_bl.setSpacing(1)
+        self.hud_viewport_info = QLabel("WL: 40  WW: 400 (Brain/Soft Tissue)")
+        self.hud_viewport_info.setStyleSheet("color: #6e7681; font-size: 10px; font-family: monospace;")
+        self.hud_slice_info = QLabel("Thickness: 1.0mm  ·  Matrix: 512×512")
+        self.hud_slice_info.setStyleSheet("color: #6e7681; font-size: 10px; font-family: monospace;")
+        hud_bl.addWidget(self.hud_viewport_info)
+        hud_bl.addWidget(self.hud_slice_info)
+        hud_bot.addLayout(hud_bl)
+
+        # Anatomical Marker Bottom: Inferior (I)
+        self.lbl_anat_i = QLabel("I")
+        self.lbl_anat_i.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_anat_i.setStyleSheet("color: #30363d; font-size: 13px; font-weight: bold; font-family: monospace;")
+        hud_bot.addStretch(1)
+        hud_bot.addWidget(self.lbl_anat_i)
+        hud_bot.addStretch(1)
+
+        hud_br = QVBoxLayout()
+        hud_br.setSpacing(1)
+        hud_br.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self.hud_system_info = QLabel("Aegis-Touch Imaging Engine")
+        self.hud_system_info.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self.hud_system_info.setStyleSheet("color: #6e7681; font-size: 10px; font-family: monospace;")
+        self.hud_render_mode = QLabel("Touch Interface Active")
+        self.hud_render_mode.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self.hud_render_mode.setStyleSheet("color: #6e7681; font-size: 10px; font-family: monospace;")
+        hud_br.addWidget(self.hud_system_info)
+        hud_br.addWidget(self.hud_render_mode)
+        hud_bot.addLayout(hud_br)
+
+        viewport_layout.addLayout(hud_bot)
+        center_main_layout.addWidget(viewport_frame, stretch=1)
+        body.addWidget(center_widget, stretch=4)
+
+        # Inspector Toggle Button
         self.right_toggle_btn = QPushButton(">")
-        self.right_toggle_btn.setFixedWidth(20)
+        self.right_toggle_btn.setToolTip("Toggle Inspector Panel")
+        self.right_toggle_btn.setFixedWidth(18)
         self.right_toggle_btn.setStyleSheet("""
-            QPushButton { background: #0f0f0f; color: #666; border: none; }
-            QPushButton:hover { color: #00e5ff; background: #161616; }
+            QPushButton { background: #0b0d11; color: #586069; border: none; font-size: 11px; font-weight: bold; }
+            QPushButton:hover { color: #00e5ff; background: #161b22; }
         """)
         self.right_toggle_btn.clicked.connect(self._toggle_right)
         body.addWidget(self.right_toggle_btn)
 
-        outer.addLayout(body)
+        # ── Right Inspector Panel ─────────────────────────────────────────────
+        self.right_panel = QWidget()
+        self.right_panel.setFixedWidth(380)
+        self.right_panel.setStyleSheet("background: #0d0f14; border-left: 1px solid #1c212b;")
+        self.right_layout = QVBoxLayout(self.right_panel)
+        self.right_layout.setContentsMargins(12, 12, 12, 12)
+        self.right_layout.setSpacing(8)
+
+        # Inspector Header
+        insp_hdr = QHBoxLayout()
+        insp_hdr.setSpacing(6)
+
+        self.inspector_breadcrumb = QLabel("ICU / 01")
+        self.inspector_breadcrumb.setStyleSheet("color: #586069; font-size: 10px; font-weight: 700; font-family: monospace;")
+        insp_hdr.addWidget(self.inspector_breadcrumb)
+
+        insp_hdr.addStretch(1)
+
+        self.inspector_status = QLabel("● ACTIVE")
+        self.inspector_status.setStyleSheet("""
+            color: #00e5ff; font-size: 10px; font-weight: bold;
+            background: #002e3b; border: 1px solid #00e5ff; border-radius: 3px; padding: 2px 6px;
+        """)
+        insp_hdr.addWidget(self.inspector_status)
+
+        self.right_layout.addLayout(insp_hdr)
+
+        self.inspector_title = QLabel("CURRENT VS PREVIOUS SCAN")
+        self.inspector_title.setStyleSheet("color: #ffffff; font-size: 13px; font-weight: 800; letter-spacing: 0.5px;")
+        self.right_layout.addWidget(self.inspector_title)
+
+        insp_div = QFrame()
+        insp_div.setFrameShape(QFrame.Shape.HLine)
+        insp_div.setStyleSheet("color: #21262d; margin-top: 2px; margin-bottom: 4px;")
+        self.right_layout.addWidget(insp_div)
+
+        # Inspector Scroll Area hosting the Stack of Cards
+        self.inspector_scroll = QScrollArea()
+        self.inspector_scroll.setWidgetResizable(True)
+        self.inspector_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.inspector_scroll.setStyleSheet("QScrollArea { background: transparent; }")
+
+        self.inspector_stack = QStackedWidget()
+        self.inspector_stack.setStyleSheet("QStackedWidget { background: transparent; }")
+        self.inspector_scroll.setWidget(self.inspector_stack)
+        self.right_layout.addWidget(self.inspector_scroll, stretch=1)
+
+        body.addWidget(self.right_panel)
+
+        outer.addLayout(body, stretch=1)
+
+        # ── 3. Bottom Action Bar ──────────────────────────────────────────────
+        bottom_bar = QFrame()
+        bottom_bar.setFixedHeight(40)
+        bottom_bar.setStyleSheet("background: #0d0f14; border-top: 1px solid #1c212b;")
+        bot_layout = QHBoxLayout(bottom_bar)
+        bot_layout.setContentsMargins(14, 0, 14, 0)
+        bot_layout.setSpacing(12)
+
+        # Left: Current Mode & Feature
+        self.bottom_mode_lbl = QLabel("ICU WORKFLOW  ·  01 CURRENT VS PREVIOUS SCAN")
+        self.bottom_mode_lbl.setStyleSheet("color: #00e5ff; font-size: 11px; font-weight: bold; font-family: monospace;")
+        bot_layout.addWidget(self.bottom_mode_lbl)
+
+        bot_div1 = QFrame()
+        bot_div1.setFrameShape(QFrame.Shape.VLine)
+        bot_div1.setStyleSheet("color: #21262d;")
+        bot_layout.addWidget(bot_div1)
+
+        # Center: Contextual Case Info
+        self.bottom_context_lbl = QLabel("Patient: —  ·  Study: —")
+        self.bottom_context_lbl.setStyleSheet("color: #8b949e; font-size: 11px;")
+        bot_layout.addWidget(self.bottom_context_lbl)
+
+        bot_layout.addStretch(1)
+
+        # Right: Quick View Actions
+        self.btn_reset_view = QPushButton("⟲ Reset View")
+        self.btn_reset_view.setFixedHeight(28)
+        self.btn_reset_view.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_reset_view.setStyleSheet("""
+            QPushButton {
+                background: #161b22; color: #8b949e; border: 1px solid #30363d;
+                border-radius: 4px; padding: 0 10px; font-size: 11px;
+            }
+            QPushButton:hover { background: #21262d; color: #c9d1d9; border-color: #58a6ff; }
+        """)
+        self.btn_reset_view.clicked.connect(self._on_open_viewer_clicked)
+        bot_layout.addWidget(self.btn_reset_view)
+
+        self.btn_2d_view = QPushButton("2D")
+        self.btn_2d_view.setFixedHeight(28)
+        self.btn_2d_view.setFixedWidth(40)
+        self.btn_2d_view.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_2d_view.setStyleSheet("""
+            QPushButton {
+                background: #161b22; color: #8b949e; border: 1px solid #30363d;
+                border-radius: 4px; font-size: 11px; font-weight: bold;
+            }
+            QPushButton:hover { background: #21262d; color: #00e5ff; border-color: #00e5ff; }
+        """)
+        self.btn_2d_view.clicked.connect(self._on_open_viewer_clicked)
+        bot_layout.addWidget(self.btn_2d_view)
+
+        self.btn_mpr_view = QPushButton("MPR")
+        self.btn_mpr_view.setFixedHeight(28)
+        self.btn_mpr_view.setFixedWidth(46)
+        self.btn_mpr_view.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_mpr_view.setStyleSheet("""
+            QPushButton {
+                background: #161b22; color: #8b949e; border: 1px solid #30363d;
+                border-radius: 4px; font-size: 11px; font-weight: bold;
+            }
+            QPushButton:hover { background: #21262d; color: #00e5ff; border-color: #00e5ff; }
+        """)
+        self.btn_mpr_view.clicked.connect(self._on_open_viewer_clicked)
+        bot_layout.addWidget(self.btn_mpr_view)
+
+        self.btn_3d_view = QPushButton("3D")
+        self.btn_3d_view.setFixedHeight(28)
+        self.btn_3d_view.setFixedWidth(40)
+        self.btn_3d_view.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_3d_view.setStyleSheet("""
+            QPushButton {
+                background: #161b22; color: #8b949e; border: 1px solid #30363d;
+                border-radius: 4px; font-size: 11px; font-weight: bold;
+            }
+            QPushButton:hover { background: #21262d; color: #00e5ff; border-color: #00e5ff; }
+        """)
+        self.btn_3d_view.clicked.connect(self._on_open_viewer_clicked)
+        bot_layout.addWidget(self.btn_3d_view)
+
+        outer.addWidget(bottom_bar)
+
+        self._init_workflow_cards()
         self._update_mode_appearance()
         return page
 
@@ -4204,12 +4680,34 @@ class OrIcuMode(QWidget):
         self.top_study_desc.setText(f"Study: {desc}")
         self.top_study_meta.setText(f"Modality: {modality}  ·  Date: {date}  ·  {slice_cnt} slices")
 
-        # 2. Left Panel Details
+        if hasattr(self, "top_scan_info"):
+            self.top_scan_info.setText(f"CURRENT: {modality} ({date})")
+        prev_scan = get_previous_scan_for_patient(mrn, scan) if mrn != "—" else None
+        if hasattr(self, "top_prev_info"):
+            if prev_scan:
+                p_date = prev_scan.get("date", "Date Unk")
+                p_type = prev_scan.get("type", "Scan")
+                self.top_prev_info.setText(f"PREVIOUS: {p_type} ({p_date})")
+            else:
+                self.top_prev_info.setText("PREVIOUS: None on file")
+
+        # 2. Viewport HUD Overlays
+        if hasattr(self, "hud_patient_name"):
+            self.hud_patient_name.setText(name)
+            self.hud_patient_meta.setText(f"MRN: {mrn}  ·  {age} {sex}")
+            self.hud_study_desc.setText(f"{modality}: {desc}")
+            self.hud_study_meta.setText(f"Date: {date}  ·  {slice_cnt} slices")
+
+        # 3. Bottom Context
+        if hasattr(self, "bottom_context_lbl"):
+            self.bottom_context_lbl.setText(f"Patient: {name} ({mrn})  ·  Study: {desc} ({date})")
+
+        # 4. Left Panel Details
         self.lbl_card_name.setText(name)
         self.lbl_card_mrn.setText(f"MRN: {mrn}")
         self.lbl_card_demographics.setText(f"{age} {sex} · {modality}")
 
-        # 3. Left Panel Studies
+        # 5. Left Panel Studies
         while self.scans_list_layout.count():
             item = self.scans_list_layout.takeAt(0)
             if item.widget():
@@ -4229,9 +4727,9 @@ class OrIcuMode(QWidget):
                 "QPushButton { background: #002e3b; color: #00e5ff; border: 1px solid #00e5ff; "
                 "border-radius: 4px; text-align: left; padding-left: 8px; font-size: 11px; font-weight: 600; }"
                 if is_active else
-                "QPushButton { background: #181818; color: #aaa; border: 1px solid #282828; "
+                "QPushButton { background: #161b22; color: #8b949e; border: 1px solid #21262d; "
                 "border-radius: 4px; text-align: left; padding-left: 8px; font-size: 11px; }"
-                "QPushButton:hover { background: #222; color: #fff; border-color: #444; }"
+                "QPushButton:hover { background: #21262d; color: #fff; border-color: #30363d; }"
             )
             btn.setStyleSheet(btn_style)
             btn.clicked.connect(lambda checked, selected_scan=s: self._select_scan(selected_scan))
@@ -4242,7 +4740,7 @@ class OrIcuMode(QWidget):
             empty_lbl.setStyleSheet("color: #555; font-size: 11px; font-style: italic;")
             self.scans_list_layout.addWidget(empty_lbl)
 
-        # 4. Left Panel Real Notes
+        # 6. Left Panel Real Notes
         while self.notes_layout.count():
             item = self.notes_layout.takeAt(0)
             if item.widget():
@@ -4252,14 +4750,14 @@ class OrIcuMode(QWidget):
         if notes:
             for n in notes:
                 note_card = QFrame()
-                note_card.setStyleSheet("background: #181818; border-radius: 4px; padding: 6px;")
+                note_card.setStyleSheet("background: #161b22; border: 1px solid #21262d; border-radius: 4px; padding: 6px;")
                 n_layout = QVBoxLayout(note_card)
                 n_layout.setSpacing(2)
                 lbl_author = QLabel(f"<b>{n.get('author', 'Clinician')}</b> · {n.get('timestamp', '')[:10]}")
                 lbl_author.setStyleSheet("color: #00e5ff; font-size: 10px;")
                 lbl_content = QLabel(str(n.get("content", "")))
                 lbl_content.setWordWrap(True)
-                lbl_content.setStyleSheet("color: #ccc; font-size: 11px;")
+                lbl_content.setStyleSheet("color: #c9d1d9; font-size: 11px;")
                 n_layout.addWidget(lbl_author)
                 n_layout.addWidget(lbl_content)
                 self.notes_layout.addWidget(note_card)
@@ -4270,24 +4768,299 @@ class OrIcuMode(QWidget):
 
         self._update_mode_appearance()
 
+    def _init_workflow_cards(self):
+        """Initializes all ICU and OR workflow cards once to ensure persistent object lifecycles."""
+        self.icu_cards_group = []
+        self.or_cards_group = []
+        self.icu_rail_items = []
+        self.or_rail_items = []
+
+        # ── 1. ICU Feature Cards & Rail Items (7 items) ───────────────────────
+        icu_defs = [
+            ("01", "Current vs Previous Scan", "● READY"),
+            ("02", "Same-location Review", "●"),
+            ("03", "Measurement Tracking", "—"),
+            ("04", "Annotation Carry-forward", "—"),
+            ("05", "What Changed?", "—"),
+            ("06", "Device Markers", "—"),
+            ("07", "Quick Handoff", "—"),
+        ]
+        for idx, (num, title, status) in enumerate(icu_defs):
+            rail_item = WorkflowRailItem(idx, num, title, status)
+            rail_item.clicked.connect(self._select_icu_item)
+            self.icu_rail_items.append(rail_item)
+            self.icu_rail_layout.addWidget(rail_item)
+
+        # Card 0: Current vs Previous Scan
+        self.current_previous_card = CurrentPreviousScanCard()
+        self.current_previous_card.view_previous_requested.connect(
+            lambda: self.icu_view_previous_requested.emit(
+                self.current_previous_card.previous_scan or {}, self.current_scan or {}
+            )
+        )
+        self.current_previous_card.view_current_requested.connect(
+            self.icu_view_current_requested.emit
+        )
+        self.current_previous_card.toggle_requested.connect(
+            lambda: self.icu_toggle_requested.emit(
+                self.current_previous_card.previous_scan or {}, self.current_scan or {}
+            )
+        )
+        self.current_previous_card.exit_comparison_requested.connect(
+            self.icu_exit_comparison_requested.emit
+        )
+        self.icu_cards_group.append(self.current_previous_card)
+        self.inspector_stack.addWidget(self.current_previous_card)
+
+        # Card 1: Same-location Review
+        self.same_location_card = SameLocationReviewCard()
+        self.same_location_card.mark_location_requested.connect(
+            self.icu_mark_same_location_requested.emit
+        )
+        self.same_location_card.view_current_requested.connect(
+            self.icu_view_same_location_current_requested.emit
+        )
+        self.same_location_card.view_previous_requested.connect(
+            self.icu_view_same_location_previous_requested.emit
+        )
+        self.same_location_card.clear_location_requested.connect(
+            self.icu_clear_same_location_requested.emit
+        )
+        self.icu_cards_group.append(self.same_location_card)
+        self.inspector_stack.addWidget(self.same_location_card)
+
+        # Card 2: Measurement Tracking
+        self.measurement_tracking_card = MeasurementTrackingCard()
+        self.measurement_tracking_card.track_measurement_requested.connect(
+            self.icu_track_measurement_requested.emit
+        )
+        self.measurement_tracking_card.delete_tracked_measurement_requested.connect(
+            self.icu_delete_tracked_measurement_requested.emit
+        )
+        self.measurement_tracking_card.selection_changed.connect(
+            self.icu_measurement_selection_changed.emit
+        )
+        self.icu_cards_group.append(self.measurement_tracking_card)
+        self.inspector_stack.addWidget(self.measurement_tracking_card)
+
+        # Card 3: Annotation Carry-forward
+        self.annotation_carry_forward_card = AnnotationCarryForwardCard()
+        self.annotation_carry_forward_card.create_annotation_requested.connect(
+            self.icu_create_annotation_requested.emit
+        )
+        self.annotation_carry_forward_card.select_annotation_requested.connect(
+            self.icu_select_annotation_requested.emit
+        )
+        self.annotation_carry_forward_card.carry_forward_requested.connect(
+            self.icu_carry_forward_requested.emit
+        )
+        self.annotation_carry_forward_card.view_source_requested.connect(
+            self.icu_view_annotation_source_requested.emit
+        )
+        self.annotation_carry_forward_card.view_target_requested.connect(
+            self.icu_view_annotation_target_requested.emit
+        )
+        self.annotation_carry_forward_card.delete_annotation_requested.connect(
+            self.icu_delete_annotation_requested.emit
+        )
+        self.annotation_carry_forward_card.clear_selection_requested.connect(
+            self.icu_clear_annotation_selection_requested.emit
+        )
+        self.icu_cards_group.append(self.annotation_carry_forward_card)
+        self.inspector_stack.addWidget(self.annotation_carry_forward_card)
+
+        # Card 4: What Changed?
+        self.what_changed_card = WhatChangedCard()
+        self.what_changed_card.review_differences_requested.connect(
+            self.icu_review_differences_requested.emit
+        )
+        self.what_changed_card.show_current_requested.connect(
+            self.icu_show_current_requested.emit
+        )
+        self.what_changed_card.show_previous_requested.connect(
+            self.icu_show_previous_requested.emit
+        )
+        self.what_changed_card.difference_threshold_changed.connect(
+            self.icu_difference_threshold_changed.emit
+        )
+        self.what_changed_card.clear_difference_requested.connect(
+            self.icu_clear_difference_requested.emit
+        )
+        self.icu_cards_group.append(self.what_changed_card)
+        self.inspector_stack.addWidget(self.what_changed_card)
+
+        # Card 5: Device Markers
+        self.device_markers_card = DeviceMarkersCard()
+        self.device_markers_card.mark_device_requested.connect(
+            self.icu_mark_device_requested.emit
+        )
+        self.device_markers_card.view_device_marker_requested.connect(
+            self.icu_view_device_marker_requested.emit
+        )
+        self.device_markers_card.delete_device_marker_requested.connect(
+            self.icu_delete_device_marker_requested.emit
+        )
+        self.device_markers_card.clear_device_marker_selection_requested.connect(
+            self.icu_clear_device_marker_selection_requested.emit
+        )
+        self.icu_cards_group.append(self.device_markers_card)
+        self.inspector_stack.addWidget(self.device_markers_card)
+
+        # Card 6: Quick Handoff
+        self.quick_handoff_card = QuickHandoffCard()
+        self.quick_handoff_card.generate_handoff_requested.connect(
+            self.icu_generate_handoff_requested.emit
+        )
+        self.quick_handoff_card.copy_handoff_requested.connect(
+            self.icu_copy_handoff_requested.emit
+        )
+        self.quick_handoff_card.view_handoff_requested.connect(
+            self.icu_view_handoff_requested.emit
+        )
+        self.quick_handoff_card.clear_handoff_requested.connect(
+            self.icu_clear_handoff_requested.emit
+        )
+        self.icu_cards_group.append(self.quick_handoff_card)
+        self.inspector_stack.addWidget(self.quick_handoff_card)
+
+        # ── 2. OR Feature Cards & Rail Items (9 items with progression headers)
+        or_defs = [
+            ("PLAN", [
+                ("01", "Entry + Target", "●"),
+                ("02", "Planned Route", "—"),
+                ("03", "Structures to Avoid", "—"),
+            ]),
+            ("VERIFY", [
+                ("04", "Surgical Corridor", "—"),
+            ]),
+            ("REHEARSE", [
+                ("05", "Virtual Instrument", "—"),
+            ]),
+            ("MONITOR", [
+                ("06", "Live Deviation", "—"),
+            ]),
+            ("REVIEW", [
+                ("07", "Plan Saving / Versions", "—"),
+                ("08", "Before vs After", "—"),
+                ("09", "Quick Surgical Views", "—"),
+            ]),
+        ]
+
+        or_item_idx = 0
+        for group_name, items in or_defs:
+            lbl_grp = QLabel(group_name)
+            lbl_grp.setStyleSheet("color: #484f58; font-size: 10px; font-weight: 800; letter-spacing: 1px; padding-top: 6px; padding-bottom: 2px; padding-left: 4px;")
+            self.or_rail_layout.addWidget(lbl_grp)
+            for num, title, status in items:
+                rail_item = WorkflowRailItem(or_item_idx, num, title, status)
+                rail_item.clicked.connect(self._select_or_item)
+                self.or_rail_items.append(rail_item)
+                self.or_rail_layout.addWidget(rail_item)
+                or_item_idx += 1
+
+        # Card 7: Entry + Target
+        self.entry_target_card = EntryTargetCard()
+        self.entry_target_card.set_entry_requested.connect(self.set_entry_requested.emit)
+        self.entry_target_card.set_target_requested.connect(self.set_target_requested.emit)
+        self.entry_target_card.view_entry_requested.connect(self.view_entry_requested.emit)
+        self.entry_target_card.view_target_requested.connect(self.view_target_requested.emit)
+        self.entry_target_card.clear_entry_requested.connect(self.clear_entry_requested.emit)
+        self.entry_target_card.clear_target_requested.connect(self.clear_target_requested.emit)
+        self.entry_target_card.clear_both_requested.connect(self.clear_both_requested.emit)
+        self.or_cards_group.append(self.entry_target_card)
+        self.inspector_stack.addWidget(self.entry_target_card)
+
+        # Card 8: Planned Route
+        self.planned_route_card = PlannedRouteCard()
+        self.planned_route_card.view_route_requested.connect(self.view_route_requested.emit)
+        self.planned_route_card.clear_route_requested.connect(self.clear_route_requested.emit)
+        self.or_cards_group.append(self.planned_route_card)
+        self.inspector_stack.addWidget(self.planned_route_card)
+
+        # Card 9: Structures to Avoid
+        self.structures_to_avoid_card = StructuresToAvoidCard()
+        self.structures_to_avoid_card.add_structure_requested.connect(self.add_structure_requested.emit)
+        self.structures_to_avoid_card.view_structure_requested.connect(self.view_structure_requested.emit)
+        self.structures_to_avoid_card.remove_structure_requested.connect(self.remove_structure_requested.emit)
+        self.structures_to_avoid_card.clear_structures_requested.connect(self.clear_structures_requested.emit)
+        self.or_cards_group.append(self.structures_to_avoid_card)
+        self.inspector_stack.addWidget(self.structures_to_avoid_card)
+
+        # Card 10: Surgical Corridor
+        self.surgical_corridor_card = SurgicalCorridorCard()
+        self.surgical_corridor_card.visibility_changed.connect(self.corridor_visibility_changed.emit)
+        self.surgical_corridor_card.radius_changed.connect(self.corridor_radius_changed.emit)
+        self.or_cards_group.append(self.surgical_corridor_card)
+        self.inspector_stack.addWidget(self.surgical_corridor_card)
+
+        # Card 11: Virtual Instrument
+        self.virtual_instrument_card = VirtualInstrumentCard()
+        self.virtual_instrument_card.visibility_changed.connect(self.instrument_visibility_changed.emit)
+        self.virtual_instrument_card.depth_changed.connect(self.instrument_depth_changed.emit)
+        self.virtual_instrument_card.diameter_changed.connect(self.instrument_diameter_changed.emit)
+        self.virtual_instrument_card.view_instrument_requested.connect(self.view_instrument_requested.emit)
+        self.or_cards_group.append(self.virtual_instrument_card)
+        self.inspector_stack.addWidget(self.virtual_instrument_card)
+
+        # Card 12: Live Deviation
+        self.live_deviation_card = LiveDeviationCard()
+        self.live_deviation_card.visibility_changed.connect(self.deviation_visibility_changed.emit)
+        self.live_deviation_card.offsets_changed.connect(self.deviation_offsets_changed.emit)
+        self.live_deviation_card.angles_changed.connect(self.deviation_angles_changed.emit)
+        self.live_deviation_card.reset_deviation_requested.connect(self.reset_deviation_requested.emit)
+        self.or_cards_group.append(self.live_deviation_card)
+        self.inspector_stack.addWidget(self.live_deviation_card)
+
+        # Card 13: Plan Versions
+        self.plan_versions_card = PlanVersionsCard()
+        self.plan_versions_card.save_plan_clicked.connect(self.save_plan_requested.emit)
+        self.plan_versions_card.save_as_new_clicked.connect(self.save_as_new_requested.emit)
+        self.plan_versions_card.restore_plan_clicked.connect(self.restore_plan_requested.emit)
+        self.plan_versions_card.delete_plan_clicked.connect(self.delete_plan_requested.emit)
+        self.plan_versions_card.rename_plan_clicked.connect(self.rename_plan_requested.emit)
+        self.or_cards_group.append(self.plan_versions_card)
+        self.inspector_stack.addWidget(self.plan_versions_card)
+
+        # Card 14: Before vs After
+        self.before_after_card = BeforeAfterCard()
+        self.before_after_card.select_before_requested.connect(self.select_before_requested.emit)
+        self.before_after_card.select_after_requested.connect(self.select_after_requested.emit)
+        self.before_after_card.start_comparison_requested.connect(self.start_comparison_requested.emit)
+        self.before_after_card.exit_comparison_requested.connect(self.exit_comparison_requested.emit)
+        self.before_after_card.toggle_comparison_view_requested.connect(self.toggle_comparison_view_requested.emit)
+        self.before_after_card.comparison_mode_changed.connect(self.comparison_mode_changed.emit)
+        self.before_after_card.overlay_opacity_changed.connect(self.overlay_opacity_changed.emit)
+        self.or_cards_group.append(self.before_after_card)
+        self.inspector_stack.addWidget(self.before_after_card)
+
+        # Card 15: Quick Surgical Views
+        self.quick_views_card = QuickSurgicalViewsCard()
+        self.quick_views_card.quick_view_requested.connect(self.quick_view_requested.emit)
+        self.or_cards_group.append(self.quick_views_card)
+        self.inspector_stack.addWidget(self.quick_views_card)
+
     def _update_mode_appearance(self):
-        """Updates styling and right workflow entries for active mode (ICU vs OR)."""
+        """Updates styling and workflow rail/inspector entries for active mode (ICU vs OR)."""
         is_icu = (self.current_mode == "ICU")
 
-        active_btn_style = (
+        active_icu_style = (
             "QPushButton { background: #002e3b; color: #00e5ff; border: 1px solid #00e5ff; "
             "border-radius: 4px; padding: 0 14px; font-size: 11px; font-weight: bold; }"
         )
+        active_or_style = (
+            "QPushButton { background: #0d2818; color: #00e676; border: 1px solid #00e676; "
+            "border-radius: 4px; padding: 0 14px; font-size: 11px; font-weight: bold; }"
+        )
         inactive_btn_style = (
-            "QPushButton { background: #141414; color: #888; border: 1px solid #282828; "
+            "QPushButton { background: #161b22; color: #8b949e; border: 1px solid #30363d; "
             "border-radius: 4px; padding: 0 14px; font-size: 11px; }"
-            "QPushButton:hover { background: #222; color: #ccc; border-color: #444; }"
+            "QPushButton:hover { background: #21262d; color: #c9d1d9; border-color: #58a6ff; }"
         )
 
         self.btn_icu_mode.setChecked(is_icu)
         self.btn_or_mode.setChecked(not is_icu)
-        self.btn_icu_mode.setStyleSheet(active_btn_style if is_icu else inactive_btn_style)
-        self.btn_or_mode.setStyleSheet(inactive_btn_style if is_icu else active_btn_style)
+        self.btn_icu_mode.setStyleSheet(active_icu_style if is_icu else inactive_btn_style)
+        self.btn_or_mode.setStyleSheet(inactive_btn_style if is_icu else active_or_style)
 
         # Center Card Configuration
         if is_icu:
@@ -4298,7 +5071,7 @@ class OrIcuMode(QWidget):
                 "cross-study comparison, and clinical handoff."
             )
             self.workflow_header.setText("ICU WORKFLOW")
-            self.workflow_header.setStyleSheet("color: #00e5ff; font-size: 11px; font-weight: 700; letter-spacing: 0.6px;")
+            self.workflow_header.setStyleSheet("color: #00e5ff; font-size: 11px; font-weight: 800; letter-spacing: 0.8px;")
         else:
             self.center_icon.setText("🔪")
             self.center_title.setText("Surgical Planning Workspace")
@@ -4307,234 +5080,205 @@ class OrIcuMode(QWidget):
                 "clearance, and virtual instrument verification."
             )
             self.workflow_header.setText("OR SURGICAL WORKFLOW")
-            self.workflow_header.setStyleSheet("color: #7cfc00; font-size: 11px; font-weight: 700; letter-spacing: 0.6px;")
+            self.workflow_header.setStyleSheet("color: #00e676; font-size: 11px; font-weight: 800; letter-spacing: 0.8px;")
 
-        # Populate Right Workflow Entries
-        while self.workflow_items_layout.count():
-            item = self.workflow_items_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+        # Toggle rail container visibility
+        if hasattr(self, "icu_rail_container"):
+            self.icu_rail_container.setVisible(is_icu)
+        if hasattr(self, "or_rail_container"):
+            self.or_rail_container.setVisible(not is_icu)
 
+        # Switch to active rail selection
         if is_icu:
-            # 1. Interactive Current vs Previous Scan Card (ICU Feature 1)
-            self.current_previous_card = CurrentPreviousScanCard()
-            self.current_previous_card.view_previous_requested.connect(
-                lambda: self.icu_view_previous_requested.emit(
-                    self.current_previous_card.previous_scan or {}, self.current_scan or {}
-                )
-            )
-            self.current_previous_card.view_current_requested.connect(
-                self.icu_view_current_requested.emit
-            )
-            self.current_previous_card.toggle_requested.connect(
-                lambda: self.icu_toggle_requested.emit(
-                    self.current_previous_card.previous_scan or {}, self.current_scan or {}
-                )
-            )
-            self.current_previous_card.exit_comparison_requested.connect(
-                self.icu_exit_comparison_requested.emit
-            )
-            self.current_previous_card.update_scans(self.current_patient, self.current_scan)
-            self.workflow_items_layout.addWidget(self.current_previous_card)
-
-            # 2. Dedicated ICU Feature 2: Same-location Review Card
-            self.same_location_card = SameLocationReviewCard()
-            self.same_location_card.mark_location_requested.connect(
-                self.icu_mark_same_location_requested.emit
-            )
-            self.same_location_card.view_current_requested.connect(
-                self.icu_view_same_location_current_requested.emit
-            )
-            self.same_location_card.view_previous_requested.connect(
-                self.icu_view_same_location_previous_requested.emit
-            )
-            self.same_location_card.clear_location_requested.connect(
-                self.icu_clear_same_location_requested.emit
-            )
-            self.workflow_items_layout.addWidget(self.same_location_card)
-
-            # 3. Dedicated ICU Feature 3: Measurement Tracking Card
-            self.measurement_tracking_card = MeasurementTrackingCard()
-            self.measurement_tracking_card.track_measurement_requested.connect(
-                self.icu_track_measurement_requested.emit
-            )
-            self.measurement_tracking_card.delete_tracked_measurement_requested.connect(
-                self.icu_delete_tracked_measurement_requested.emit
-            )
-            self.measurement_tracking_card.selection_changed.connect(
-                self.icu_measurement_selection_changed.emit
-            )
-            self.workflow_items_layout.addWidget(self.measurement_tracking_card)
-
-            # 4. Dedicated ICU Feature 4: Annotation Carry-forward Card
-            self.annotation_carry_forward_card = AnnotationCarryForwardCard()
-            self.annotation_carry_forward_card.create_annotation_requested.connect(
-                self.icu_create_annotation_requested.emit
-            )
-            self.annotation_carry_forward_card.select_annotation_requested.connect(
-                self.icu_select_annotation_requested.emit
-            )
-            self.annotation_carry_forward_card.carry_forward_requested.connect(
-                self.icu_carry_forward_requested.emit
-            )
-            self.annotation_carry_forward_card.view_source_requested.connect(
-                self.icu_view_annotation_source_requested.emit
-            )
-            self.annotation_carry_forward_card.view_target_requested.connect(
-                self.icu_view_annotation_target_requested.emit
-            )
-            self.annotation_carry_forward_card.delete_annotation_requested.connect(
-                self.icu_delete_annotation_requested.emit
-            )
-            self.annotation_carry_forward_card.clear_selection_requested.connect(
-                self.icu_clear_annotation_selection_requested.emit
-            )
-            self.workflow_items_layout.addWidget(self.annotation_carry_forward_card)
-
-            # 5. Dedicated ICU Feature 5: What Changed? Card
-            self.what_changed_card = WhatChangedCard()
-            self.what_changed_card.review_differences_requested.connect(
-                self.icu_review_differences_requested.emit
-            )
-            self.what_changed_card.show_current_requested.connect(
-                self.icu_show_current_requested.emit
-            )
-            self.what_changed_card.show_previous_requested.connect(
-                self.icu_show_previous_requested.emit
-            )
-            self.what_changed_card.difference_threshold_changed.connect(
-                self.icu_difference_threshold_changed.emit
-            )
-            self.what_changed_card.clear_difference_requested.connect(
-                self.icu_clear_difference_requested.emit
-            )
-            self.workflow_items_layout.addWidget(self.what_changed_card)
-
-            # 6. Dedicated ICU Feature 6: Device Markers Card
-            self.device_markers_card = DeviceMarkersCard()
-            self.device_markers_card.mark_device_requested.connect(
-                self.icu_mark_device_requested.emit
-            )
-            self.device_markers_card.view_device_marker_requested.connect(
-                self.icu_view_device_marker_requested.emit
-            )
-            self.device_markers_card.delete_device_marker_requested.connect(
-                self.icu_delete_device_marker_requested.emit
-            )
-            self.device_markers_card.clear_device_marker_selection_requested.connect(
-                self.icu_clear_device_marker_selection_requested.emit
-            )
-            self.workflow_items_layout.addWidget(self.device_markers_card)
-
-            # 7. Dedicated ICU Feature 7: Quick Handoff Card
-            self.quick_handoff_card = QuickHandoffCard()
-            self.quick_handoff_card.generate_handoff_requested.connect(
-                self.icu_generate_handoff_requested.emit
-            )
-            self.quick_handoff_card.copy_handoff_requested.connect(
-                self.icu_copy_handoff_requested.emit
-            )
-            self.quick_handoff_card.view_handoff_requested.connect(
-                self.icu_view_handoff_requested.emit
-            )
-            self.quick_handoff_card.clear_handoff_requested.connect(
-                self.icu_clear_handoff_requested.emit
-            )
-            self.workflow_items_layout.addWidget(self.quick_handoff_card)
+            self._select_icu_item(getattr(self, "_active_icu_index", 0))
         else:
-            # 1. Dedicated Interactive Entry + Target Card
-            self.entry_target_card = EntryTargetCard()
-            self.entry_target_card.set_entry_requested.connect(self.set_entry_requested.emit)
-            self.entry_target_card.set_target_requested.connect(self.set_target_requested.emit)
-            self.entry_target_card.view_entry_requested.connect(self.view_entry_requested.emit)
-            self.entry_target_card.view_target_requested.connect(self.view_target_requested.emit)
-            self.entry_target_card.clear_entry_requested.connect(self.clear_entry_requested.emit)
-            self.entry_target_card.clear_target_requested.connect(self.clear_target_requested.emit)
-            self.entry_target_card.clear_both_requested.connect(self.clear_both_requested.emit)
+            self._select_or_item(getattr(self, "_active_or_index", 0))
 
+        # Toggle visibility of cards in groups to maintain compatibility
+        if hasattr(self, "icu_cards_group"):
+            for card in self.icu_cards_group:
+                card.setVisible(is_icu)
+
+        if hasattr(self, "or_cards_group"):
+            for card in self.or_cards_group:
+                card.setVisible(not is_icu)
+
+        if hasattr(self, "workflow_scroll") and self.workflow_scroll:
+            self.workflow_scroll.verticalScrollBar().setValue(0)
+
+        # Refresh state on active mode cards
+        if is_icu:
+            if hasattr(self, "current_previous_card") and self.current_previous_card:
+                self.current_previous_card.update_scans(self.current_patient, self.current_scan)
+        else:
             if self.surgical_plan:
-                self.entry_target_card.update_landmarks(
-                    self.surgical_plan.entry_point,
-                    self.surgical_plan.target_point
-                )
-            self.workflow_items_layout.addWidget(self.entry_target_card)
+                if hasattr(self, "entry_target_card") and self.entry_target_card:
+                    self.entry_target_card.update_landmarks(
+                        self.surgical_plan.entry_point,
+                        self.surgical_plan.target_point
+                    )
+                if hasattr(self, "planned_route_card") and self.planned_route_card:
+                    self.planned_route_card.update_route(self.surgical_plan)
+                if hasattr(self, "structures_to_avoid_card") and self.structures_to_avoid_card:
+                    self.structures_to_avoid_card.update_structures(self.surgical_plan)
+                if hasattr(self, "surgical_corridor_card") and self.surgical_corridor_card:
+                    self.surgical_corridor_card.update_corridor(self.surgical_plan)
+                if hasattr(self, "virtual_instrument_card") and self.virtual_instrument_card:
+                    self.virtual_instrument_card.update_instrument(self.surgical_plan)
+                if hasattr(self, "live_deviation_card") and self.live_deviation_card:
+                    self.live_deviation_card.update_deviation(self.surgical_plan)
+                if hasattr(self, "quick_views_card") and self.quick_views_card:
+                    self.quick_views_card.update_availability(self.surgical_plan)
 
-            # 2. Dedicated Interactive Planned Route Card
-            self.planned_route_card = PlannedRouteCard()
-            self.planned_route_card.view_route_requested.connect(self.view_route_requested.emit)
-            self.planned_route_card.clear_route_requested.connect(self.clear_route_requested.emit)
-            if self.surgical_plan:
-                self.planned_route_card.update_route(self.surgical_plan)
-            self.workflow_items_layout.addWidget(self.planned_route_card)
-
-            # 3. Dedicated Interactive Structures to Avoid Card
-            self.structures_to_avoid_card = StructuresToAvoidCard()
-            self.structures_to_avoid_card.add_structure_requested.connect(self.add_structure_requested.emit)
-            self.structures_to_avoid_card.view_structure_requested.connect(self.view_structure_requested.emit)
-            self.structures_to_avoid_card.remove_structure_requested.connect(self.remove_structure_requested.emit)
-            self.structures_to_avoid_card.clear_structures_requested.connect(self.clear_structures_requested.emit)
-            if self.surgical_plan:
-                self.structures_to_avoid_card.update_structures(self.surgical_plan)
-            self.workflow_items_layout.addWidget(self.structures_to_avoid_card)
-
-            # 4. Dedicated Interactive Surgical Corridor Card
-            self.surgical_corridor_card = SurgicalCorridorCard()
-            self.surgical_corridor_card.visibility_changed.connect(self.corridor_visibility_changed.emit)
-            self.surgical_corridor_card.radius_changed.connect(self.corridor_radius_changed.emit)
-            if self.surgical_plan:
-                self.surgical_corridor_card.update_corridor(self.surgical_plan)
-            self.workflow_items_layout.addWidget(self.surgical_corridor_card)
-
-            # 5. Dedicated Interactive Virtual Instrument Card
-            self.virtual_instrument_card = VirtualInstrumentCard()
-            self.virtual_instrument_card.visibility_changed.connect(self.instrument_visibility_changed.emit)
-            self.virtual_instrument_card.depth_changed.connect(self.instrument_depth_changed.emit)
-            self.virtual_instrument_card.diameter_changed.connect(self.instrument_diameter_changed.emit)
-            self.virtual_instrument_card.view_instrument_requested.connect(self.view_instrument_requested.emit)
-            if self.surgical_plan:
-                self.virtual_instrument_card.update_instrument(self.surgical_plan)
-            self.workflow_items_layout.addWidget(self.virtual_instrument_card)
-
-            # 6. Dedicated Interactive Live Deviation Card
-            self.live_deviation_card = LiveDeviationCard()
-            self.live_deviation_card.visibility_changed.connect(self.deviation_visibility_changed.emit)
-            self.live_deviation_card.offsets_changed.connect(self.deviation_offsets_changed.emit)
-            self.live_deviation_card.angles_changed.connect(self.deviation_angles_changed.emit)
-            self.live_deviation_card.reset_deviation_requested.connect(self.reset_deviation_requested.emit)
-            if self.surgical_plan:
-                self.live_deviation_card.update_deviation(self.surgical_plan)
-            self.workflow_items_layout.addWidget(self.live_deviation_card)
-
-            # 7. Dedicated Interactive Plan Versions Card
-            self.plan_versions_card = PlanVersionsCard()
-            self.plan_versions_card.save_plan_clicked.connect(self.save_plan_requested.emit)
-            self.plan_versions_card.save_as_new_clicked.connect(self.save_as_new_requested.emit)
-            self.plan_versions_card.restore_plan_clicked.connect(self.restore_plan_requested.emit)
-            self.plan_versions_card.delete_plan_clicked.connect(self.delete_plan_requested.emit)
-            self.plan_versions_card.rename_plan_clicked.connect(self.rename_plan_requested.emit)
             scan_id = (self.current_scan.get("file_path") if self.current_scan else "") or str(self.current_scan.get("id", "") if self.current_scan else "")
-            self.plan_versions_card.update_versions(self.surgical_plan, scan_id)
-            self.workflow_items_layout.addWidget(self.plan_versions_card)
+            if hasattr(self, "plan_versions_card") and self.plan_versions_card:
+                self.plan_versions_card.update_versions(self.surgical_plan, scan_id)
+            if hasattr(self, "before_after_card") and self.before_after_card:
+                self.before_after_card.on_patient_changed(self.current_patient, self.current_scan)
 
-            # 8. Dedicated Interactive Before vs After Card
-            self.before_after_card = BeforeAfterCard()
-            self.before_after_card.select_before_requested.connect(self.select_before_requested.emit)
-            self.before_after_card.select_after_requested.connect(self.select_after_requested.emit)
-            self.before_after_card.start_comparison_requested.connect(self.start_comparison_requested.emit)
-            self.before_after_card.exit_comparison_requested.connect(self.exit_comparison_requested.emit)
-            self.before_after_card.toggle_comparison_view_requested.connect(self.toggle_comparison_view_requested.emit)
-            self.before_after_card.comparison_mode_changed.connect(self.comparison_mode_changed.emit)
-            self.before_after_card.overlay_opacity_changed.connect(self.overlay_opacity_changed.emit)
-            self.before_after_card.on_patient_changed(self.current_patient, self.current_scan)
-            self.workflow_items_layout.addWidget(self.before_after_card)
+        self._sync_rail_badges()
 
-            # 9. Dedicated Interactive Quick Surgical Views Card
-            self.quick_views_card = QuickSurgicalViewsCard()
-            self.quick_views_card.quick_view_requested.connect(self.quick_view_requested.emit)
-            self.quick_views_card.update_availability(self.surgical_plan)
-            self.workflow_items_layout.addWidget(self.quick_views_card)
+    def _select_icu_item(self, idx: int):
+        if idx < 0 or idx >= len(self.icu_rail_items):
+            return
+        self._active_icu_index = idx
+        for i, item in enumerate(self.icu_rail_items):
+            item.set_active(i == idx, accent_color="#00e5ff")
 
+        icu_titles = [
+            ("ICU / 01", "CURRENT VS PREVIOUS SCAN", "● READY"),
+            ("ICU / 02", "SAME-LOCATION REVIEW", "● AVAILABLE"),
+            ("ICU / 03", "MEASUREMENT TRACKING", "● ACTIVE"),
+            ("ICU / 04", "ANNOTATION CARRY-FORWARD", "● ACTIVE"),
+            ("ICU / 05", "WHAT CHANGED? (DIFF REVIEW)", "● READY"),
+            ("ICU / 06", "DEVICE MARKERS", "● ACTIVE"),
+            ("ICU / 07", "QUICK HANDOFF SUMMARY", "● READY"),
+        ]
+        bc, title, status = icu_titles[idx]
+        self.inspector_breadcrumb.setText(bc)
+        self.inspector_title.setText(title)
+        self.inspector_status.setText(status)
+        self.inspector_status.setStyleSheet("""
+            color: #00e5ff; font-size: 10px; font-weight: bold;
+            background: #002e3b; border: 1px solid #00e5ff; border-radius: 3px; padding: 2px 6px;
+        """)
+        self.inspector_stack.setCurrentIndex(idx)
+        self.bottom_mode_lbl.setText(f"ICU WORKFLOW  ·  {bc.split('/')[-1].strip()} {title}")
+        self.bottom_mode_lbl.setStyleSheet("color: #00e5ff; font-size: 11px; font-weight: bold; font-family: monospace;")
+        if hasattr(self, "inspector_scroll") and self.inspector_scroll:
+            self.inspector_scroll.verticalScrollBar().setValue(0)
 
+    def _select_or_item(self, idx: int):
+        if idx < 0 or idx >= len(self.or_rail_items):
+            return
+        self._active_or_index = idx
+        for i, item in enumerate(self.or_rail_items):
+            item.set_active(i == idx, accent_color="#00e676")
+
+        or_titles = [
+            ("OR / 01", "ENTRY + TARGET LANDMARKS", "● ACTIVE"),
+            ("OR / 02", "PLANNED ROUTE TRAJECTORY", "● ACTIVE"),
+            ("OR / 03", "STRUCTURES TO AVOID", "● ACTIVE"),
+            ("OR / 04", "SURGICAL CORRIDOR", "● ACTIVE"),
+            ("OR / 05", "VIRTUAL INSTRUMENT", "● ACTIVE"),
+            ("OR / 06", "LIVE DEVIATION MONITOR", "● ACTIVE"),
+            ("OR / 07", "PLAN SAVING & VERSIONS", "● ACTIVE"),
+            ("OR / 08", "BEFORE VS AFTER COMPARISON", "● ACTIVE"),
+            ("OR / 09", "QUICK SURGICAL VIEWS", "● ACTIVE"),
+        ]
+        bc, title, status = or_titles[idx]
+        self.inspector_breadcrumb.setText(bc)
+        self.inspector_title.setText(title)
+        self.inspector_status.setText(status)
+        self.inspector_status.setStyleSheet("""
+            color: #00e676; font-size: 10px; font-weight: bold;
+            background: #0d2818; border: 1px solid #00e676; border-radius: 3px; padding: 2px 6px;
+        """)
+        self.inspector_stack.setCurrentIndex(7 + idx)
+        self.bottom_mode_lbl.setText(f"OR SURGICAL WORKFLOW  ·  {bc.split('/')[-1].strip()} {title}")
+        self.bottom_mode_lbl.setStyleSheet("color: #00e676; font-size: 11px; font-weight: bold; font-family: monospace;")
+        if hasattr(self, "inspector_scroll") and self.inspector_scroll:
+            self.inspector_scroll.verticalScrollBar().setValue(0)
+
+    def _sync_rail_badges(self):
+        """Synchronizes status badges on rail items with current card/session states."""
+        if not hasattr(self, "icu_rail_items") or not hasattr(self, "or_rail_items"):
+            return
+
+        is_icu = (self.current_mode == "ICU")
+        if is_icu and len(self.icu_rail_items) >= 7:
+            # ICU 0: Current vs Previous
+            if hasattr(self, "current_previous_card") and self.current_previous_card and getattr(self.current_previous_card, "previous_scan", None):
+                self.icu_rail_items[0].set_status("● READY", "#00e5ff")
+            else:
+                self.icu_rail_items[0].set_status("—", "#8b949e")
+
+            # ICU 1: Same-location Review
+            if hasattr(self, "same_location_card") and self.same_location_card and getattr(self.same_location_card, "active_location", None):
+                self.icu_rail_items[1].set_status("● MARKED", "#00e5ff")
+            else:
+                self.icu_rail_items[1].set_status("—", "#8b949e")
+
+            # ICU 2: Measurement Tracking
+            if hasattr(self, "measurement_tracking_card") and self.measurement_tracking_card:
+                mc = getattr(self.measurement_tracking_card, "tracked_count", 0)
+                self.icu_rail_items[2].set_status(str(mc) if mc else "—", "#00e5ff" if mc else "#8b949e")
+
+            # ICU 3: Annotation Carry-forward
+            if hasattr(self, "annotation_carry_forward_card") and self.annotation_carry_forward_card:
+                ac = getattr(self.annotation_carry_forward_card, "annotation_count", 0)
+                self.icu_rail_items[3].set_status(str(ac) if ac else "—", "#00e5ff" if ac else "#8b949e")
+
+            # ICU 4: What Changed?
+            self.icu_rail_items[4].set_status("READY", "#00e5ff")
+
+            # ICU 5: Device Markers
+            if hasattr(self, "device_markers_card") and self.device_markers_card:
+                dc = len(getattr(self.device_markers_card, "markers", []))
+                self.icu_rail_items[5].set_status(str(dc) if dc else "—", "#00e5ff" if dc else "#8b949e")
+
+            # ICU 6: Quick Handoff
+            self.icu_rail_items[6].set_status("READY", "#00e5ff")
+        elif not is_icu and len(self.or_rail_items) >= 9:
+            plan = self.surgical_plan
+            # OR 0: Entry + Target
+            has_entry = bool(plan and plan.entry_point is not None)
+            has_target = bool(plan and plan.target_point is not None)
+            if has_entry and has_target:
+                self.or_rail_items[0].set_status("● BOTH", "#00e676")
+            elif has_entry or has_target:
+                self.or_rail_items[0].set_status("● 1/2", "#f59e0b")
+            else:
+                self.or_rail_items[0].set_status("—", "#8b949e")
+
+            # OR 1: Planned Route
+            has_route = bool(plan and (plan.has_planned_route() if hasattr(plan, "has_planned_route") else (plan.entry_point is not None and plan.target_point is not None)))
+            self.or_rail_items[1].set_status("● READY" if has_route else "—", "#00e676" if has_route else "#8b949e")
+
+            # OR 2: Structures to Avoid
+            struct_count = len(plan.get_avoid_structures()) if (plan and hasattr(plan, "get_avoid_structures")) else 0
+            self.or_rail_items[2].set_status(str(struct_count) if struct_count else "0", "#00e676" if struct_count else "#8b949e")
+
+            # OR 3: Surgical Corridor
+            corr_vis = bool(plan and getattr(plan, "corridor_enabled", getattr(plan, "corridor_visible", False)))
+            self.or_rail_items[3].set_status("ON" if corr_vis else "OFF", "#00e676" if corr_vis else "#8b949e")
+
+            # OR 4: Virtual Instrument
+            inst_vis = bool(plan and getattr(plan, "instrument_visible", False))
+            self.or_rail_items[4].set_status("ON" if inst_vis else "OFF", "#00e676" if inst_vis else "#8b949e")
+
+            # OR 5: Live Deviation
+            dev_vis = bool(plan and getattr(plan, "deviation_visible", False))
+            self.or_rail_items[5].set_status("ON" if dev_vis else "OFF", "#00e676" if dev_vis else "#8b949e")
+
+            # OR 6: Plan Versions
+            self.or_rail_items[6].set_status("●", "#8b949e")
+
+            # OR 7: Before vs After
+            self.or_rail_items[7].set_status("●", "#8b949e")
+
+            # OR 8: Quick Views
+            self.or_rail_items[8].set_status("●", "#8b949e")
 
     def _add_workflow_action_card(self, title: str, status_text: str, accent_color: str):
         card = QFrame()
@@ -4587,7 +5331,7 @@ class OrIcuMode(QWidget):
     def _toggle_left(self):
         visible = self.left_panel.isVisible()
         self.left_panel.setVisible(not visible)
-        self.left_toggle_btn.setText(">" if visible else "<")
+        self.left_toggle_btn.setText("<" if not visible else ">")
 
     def _toggle_right(self):
         visible = self.right_panel.isVisible()

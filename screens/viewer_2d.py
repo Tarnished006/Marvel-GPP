@@ -113,7 +113,7 @@ class Viewer2D(QWidget):
         if not self.isVisible():
             return
             
-        zoom_in_factor = 1.25
+        zoom_in_factor = 1.03
         zoom_out_factor = 1.0 / zoom_in_factor
         
         if direction > 0:

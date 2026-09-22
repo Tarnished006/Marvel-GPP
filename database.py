@@ -3,7 +3,7 @@ import sqlite3
 import json
 import uuid
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, Any, List, Dict
 
 DB_PATH = "aegis.db"
 
@@ -514,6 +514,302 @@ def delete_tracked_measurement(measurement_id: str, patient_mrn: Optional[str] =
             cursor = conn.execute(
                 "DELETE FROM tracked_measurements WHERE id = ?",
                 (str(measurement_id),)
+            )
+        conn.commit()
+        deleted = cursor.rowcount > 0
+        conn.close()
+        return deleted
+    except Exception:
+        return False
+
+
+# --- Scan Annotations Persistence (ICU Mode: Feature 4) -----------------
+
+def _ensure_scan_annotations_table(conn):
+    """Defensively ensures scan_annotations table exists."""
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS scan_annotations ("
+        "  id TEXT PRIMARY KEY,"
+        "  patient_mrn TEXT NOT NULL,"
+        "  scan_id TEXT NOT NULL,"
+        "  label TEXT NOT NULL,"
+        "  text TEXT DEFAULT '',"
+        "  physical_x_mm REAL NOT NULL,"
+        "  physical_y_mm REAL NOT NULL,"
+        "  physical_z_mm REAL NOT NULL,"
+        "  created_at TEXT NOT NULL,"
+        "  metadata_json TEXT DEFAULT '{}',"
+        "  FOREIGN KEY (patient_mrn) REFERENCES patients(mrn)"
+        ")"
+    )
+
+def save_scan_annotation(
+    annotation_id: str,
+    patient_mrn: str,
+    scan_id: str,
+    label: str,
+    text: str = "",
+    physical_x_mm: float = 0.0,
+    physical_y_mm: float = 0.0,
+    physical_z_mm: float = 0.0,
+    metadata: Optional[dict] = None
+) -> dict:
+    """Saves or updates a spatial scan annotation in the database."""
+    conn = get_connection()
+    _ensure_scan_annotations_table(conn)
+    now_str = datetime.now(timezone.utc).isoformat()
+    meta_json = json.dumps(metadata or {})
+    conn.execute(
+        "INSERT OR REPLACE INTO scan_annotations ("
+        "  id, patient_mrn, scan_id, label, text, physical_x_mm, physical_y_mm, physical_z_mm, created_at, metadata_json"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            str(annotation_id), str(patient_mrn), str(scan_id), str(label), str(text),
+            float(physical_x_mm), float(physical_y_mm), float(physical_z_mm), now_str, meta_json
+        )
+    )
+    conn.commit()
+    conn.close()
+    return {
+        "id": str(annotation_id),
+        "patient_mrn": str(patient_mrn),
+        "scan_id": str(scan_id),
+        "label": str(label),
+        "text": str(text),
+        "physical_x_mm": float(physical_x_mm),
+        "physical_y_mm": float(physical_y_mm),
+        "physical_z_mm": float(physical_z_mm),
+        "created_at": now_str,
+        "metadata": metadata or {}
+    }
+
+def get_scan_annotations_for_scan(scan_id: str, patient_mrn: Optional[str] = None) -> list[dict]:
+    """Retrieves all annotations for a scan and optionally patient MRN."""
+    try:
+        conn = get_connection()
+        _ensure_scan_annotations_table(conn)
+        if patient_mrn:
+            rows = conn.execute(
+                "SELECT * FROM scan_annotations WHERE scan_id = ? AND patient_mrn = ? ORDER BY created_at ASC",
+                (str(scan_id), str(patient_mrn))
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM scan_annotations WHERE scan_id = ? ORDER BY created_at ASC",
+                (str(scan_id),)
+            ).fetchall()
+        conn.close()
+        results = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["metadata"] = json.loads(d.get("metadata_json", "{}"))
+            except Exception:
+                d["metadata"] = {}
+            results.append(d)
+        return results
+    except Exception:
+        return []
+
+def get_scan_annotations_for_patient(patient_mrn: str) -> list[dict]:
+    """Retrieves all annotations for a patient MRN."""
+    try:
+        conn = get_connection()
+        _ensure_scan_annotations_table(conn)
+        rows = conn.execute(
+            "SELECT * FROM scan_annotations WHERE patient_mrn = ? ORDER BY created_at ASC",
+            (str(patient_mrn),)
+        ).fetchall()
+        conn.close()
+        results = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["metadata"] = json.loads(d.get("metadata_json", "{}"))
+            except Exception:
+                d["metadata"] = {}
+            results.append(d)
+        return results
+    except Exception:
+        return []
+
+def delete_scan_annotation(annotation_id: str, patient_mrn: Optional[str] = None) -> bool:
+    """Deletes a scan annotation by ID, optionally scoped to patient MRN."""
+    try:
+        conn = get_connection()
+        _ensure_scan_annotations_table(conn)
+        if patient_mrn:
+            cursor = conn.execute(
+                "DELETE FROM scan_annotations WHERE id = ? AND patient_mrn = ?",
+                (str(annotation_id), str(patient_mrn))
+            )
+        else:
+            cursor = conn.execute(
+                "DELETE FROM scan_annotations WHERE id = ?",
+                (str(annotation_id),)
+            )
+        conn.commit()
+        deleted = cursor.rowcount > 0
+        conn.close()
+        return deleted
+    except Exception:
+        return False
+
+
+# --- Device Markers Persistence (ICU Mode: Feature 6) -------------------
+
+def _ensure_device_markers_table(conn):
+    """Defensively ensures device_markers table exists."""
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS device_markers ("
+        "  id TEXT PRIMARY KEY,"
+        "  patient_mrn TEXT NOT NULL,"
+        "  scan_id TEXT NOT NULL,"
+        "  device_type TEXT NOT NULL,"
+        "  label TEXT NOT NULL,"
+        "  physical_x_mm REAL NOT NULL,"
+        "  physical_y_mm REAL NOT NULL,"
+        "  physical_z_mm REAL NOT NULL,"
+        "  created_at TEXT NOT NULL,"
+        "  metadata_json TEXT DEFAULT '{}',"
+        "  FOREIGN KEY (patient_mrn) REFERENCES patients(mrn)"
+        ")"
+    )
+
+def save_device_marker(
+    marker_id_or_data: Any,
+    patient_mrn: Optional[str] = None,
+    scan_id: Optional[str] = None,
+    device_type: Optional[str] = None,
+    label: Optional[str] = None,
+    physical_x_mm: float = 0.0,
+    physical_y_mm: float = 0.0,
+    physical_z_mm: float = 0.0,
+    metadata: Optional[dict] = None
+) -> dict:
+    """Saves or updates a device marker in the database. Supports dict, model object, or keyword arguments."""
+    conn = get_connection()
+    _ensure_device_markers_table(conn)
+
+    if isinstance(marker_id_or_data, dict):
+        d = marker_id_or_data
+        m_id = str(d.get("id", ""))
+        p_mrn = str(d.get("patient_mrn", ""))
+        s_id = str(d.get("scan_id", ""))
+        d_type = str(d.get("device_type", "Other"))
+        lbl = str(d.get("label", "Device"))
+        x = float(d.get("physical_x_mm", 0.0))
+        y = float(d.get("physical_y_mm", 0.0))
+        z = float(d.get("physical_z_mm", 0.0))
+        meta = d.get("metadata", {})
+    elif hasattr(marker_id_or_data, "id") and hasattr(marker_id_or_data, "patient_mrn"):
+        obj = marker_id_or_data
+        m_id = str(obj.id)
+        p_mrn = str(obj.patient_mrn)
+        s_id = str(obj.scan_id)
+        d_type = str(getattr(obj, "device_type", "Other"))
+        lbl = str(getattr(obj, "label", "Device"))
+        x = float(getattr(obj, "physical_x_mm", 0.0))
+        y = float(getattr(obj, "physical_y_mm", 0.0))
+        z = float(getattr(obj, "physical_z_mm", 0.0))
+        meta = getattr(obj, "metadata", {})
+    else:
+        m_id = str(marker_id_or_data)
+        p_mrn = str(patient_mrn or "")
+        s_id = str(scan_id or "")
+        d_type = str(device_type or "Other")
+        lbl = str(label or "Device")
+        x = float(physical_x_mm)
+        y = float(physical_y_mm)
+        z = float(physical_z_mm)
+        meta = metadata or {}
+
+    now_str = datetime.now(timezone.utc).isoformat()
+    meta_json = json.dumps(meta or {})
+    conn.execute(
+        "INSERT OR REPLACE INTO device_markers (id, patient_mrn, scan_id, device_type, label, physical_x_mm, physical_y_mm, physical_z_mm, created_at, metadata_json) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (m_id, p_mrn, s_id, d_type, lbl, x, y, z, now_str, meta_json)
+    )
+    conn.commit()
+    conn.close()
+    return {
+        "id": m_id,
+        "patient_mrn": p_mrn,
+        "scan_id": s_id,
+        "device_type": d_type,
+        "label": lbl,
+        "physical_x_mm": x,
+        "physical_y_mm": y,
+        "physical_z_mm": z,
+        "created_at": now_str,
+        "metadata": meta or {}
+    }
+
+def get_device_markers_for_scan(scan_id: str, patient_mrn: Optional[str] = None) -> list[dict]:
+    """Retrieves all device markers for a scan and optionally patient MRN."""
+    try:
+        conn = get_connection()
+        _ensure_device_markers_table(conn)
+        if patient_mrn:
+            rows = conn.execute(
+                "SELECT * FROM device_markers WHERE scan_id = ? AND patient_mrn = ? ORDER BY created_at ASC",
+                (str(scan_id), str(patient_mrn))
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM device_markers WHERE scan_id = ? ORDER BY created_at ASC",
+                (str(scan_id),)
+            ).fetchall()
+        conn.close()
+        results = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["metadata"] = json.loads(d.get("metadata_json", "{}"))
+            except Exception:
+                d["metadata"] = {}
+            results.append(d)
+        return results
+    except Exception:
+        return []
+
+def get_device_markers_for_patient(patient_mrn: str) -> list[dict]:
+    """Retrieves all device markers for a patient MRN."""
+    try:
+        conn = get_connection()
+        _ensure_device_markers_table(conn)
+        rows = conn.execute(
+            "SELECT * FROM device_markers WHERE patient_mrn = ? ORDER BY created_at ASC",
+            (str(patient_mrn),)
+        ).fetchall()
+        conn.close()
+        results = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["metadata"] = json.loads(d.get("metadata_json", "{}"))
+            except Exception:
+                d["metadata"] = {}
+            results.append(d)
+        return results
+    except Exception:
+        return []
+
+def delete_device_marker(marker_id: str, patient_mrn: Optional[str] = None) -> bool:
+    """Deletes a device marker by ID, optionally scoped to patient MRN."""
+    try:
+        conn = get_connection()
+        _ensure_device_markers_table(conn)
+        if patient_mrn:
+            cursor = conn.execute(
+                "DELETE FROM device_markers WHERE id = ? AND patient_mrn = ?",
+                (str(marker_id), str(patient_mrn))
+            )
+        else:
+            cursor = conn.execute(
+                "DELETE FROM device_markers WHERE id = ?",
+                (str(marker_id),)
             )
         conn.commit()
         deleted = cursor.rowcount > 0

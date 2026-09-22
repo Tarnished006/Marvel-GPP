@@ -136,6 +136,13 @@ class MPRSliceWidget(QFrame):
         self.vol_dims: tuple[int, int, int] = (1, 1, 1)
         self.spacings: tuple[float, float, float] = (1.0, 1.0, 1.0)
 
+        # ICU Feature 5: What Changed? state
+        self.difference_active: bool = False
+        self.difference_slice: np.ndarray | None = None
+        self.difference_threshold: float = 50.0
+        self._diff_pixmap: QPixmap | None = None
+        self._diff_pixmap_dirty: bool = True
+
         self.setMouseTracking(True)
 
     def set_planned_route(self, entry: tuple[float, float, float] | None, target: tuple[float, float, float] | None, vol_dims: tuple[int, int, int] = (1, 1, 1), spacings: tuple[float, float, float] = (1.0, 1.0, 1.0)):
@@ -179,6 +186,35 @@ class MPRSliceWidget(QFrame):
         self._raw_shape = raw_shape
         self.mm_per_pixel_x = mm_x
         self.mm_per_pixel_y = mm_y
+        self.update()
+
+    # ── ICU Feature 5: What Changed? Methods ─────────────────────────────────
+    def set_difference_slice(self, active: bool, diff_slice: np.ndarray | None, threshold: float = 50.0):
+        """Sets difference review slice and threshold for MPR orthogonal overlay."""
+        self.difference_active = bool(active) and (diff_slice is not None)
+        self.difference_slice = diff_slice
+        self.difference_threshold = float(threshold)
+        self._diff_pixmap = None
+        self._diff_pixmap_dirty = True
+        self.update()
+
+    def clear_difference_slice(self):
+        """Clears difference review slice from MPR viewport."""
+        self.difference_active = False
+        self.difference_slice = None
+        self._diff_pixmap = None
+        self._diff_pixmap_dirty = True
+        self.update()
+
+    # ── ICU Feature 6: Device Markers MPR Methods ────────────────────────────
+    def set_active_device_markers(self, markers: list[dict] | None, vol_dims: tuple[int, int, int] = (1, 1, 1), spacings: tuple[float, float, float] = (1.0, 1.0, 1.0)):
+        self.active_device_markers = list(markers) if markers else []
+        self.vol_dims = vol_dims
+        self.spacings = spacings
+        self.update()
+
+    def clear_active_device_markers(self):
+        self.active_device_markers = []
         self.update()
 
     def set_crosshairs(self, u: float, v: float):
@@ -499,6 +535,38 @@ class MPRSliceWidget(QFrame):
             painter.drawRoundedRect(b_rect, 3, 3)
             painter.setPen(QColor(0, 0, 0))
             painter.drawText(b_rect, Qt.AlignmentFlag.AlignCenter, badge_txt)
+            painter.restore()
+
+        # Difference Overlay (ICU Mode: Feature 5)
+        if getattr(self, "difference_active", False) and getattr(self, "difference_slice", None) is not None:
+            if getattr(self, "_diff_pixmap", None) is None or getattr(self, "_diff_pixmap_dirty", True):
+                diff_sl = self.difference_slice
+                thresh = getattr(self, "difference_threshold", 50.0)
+                mask = diff_sl >= thresh
+                h, w = diff_sl.shape
+                rgba = np.zeros((h, w, 4), dtype=np.uint8)
+                # Vibrant semi-transparent coral/orange #ff5722 (R=255, G=87, B=34, A=130)
+                rgba[mask, 0] = 255
+                rgba[mask, 1] = 87
+                rgba[mask, 2] = 34
+                rgba[mask, 3] = 130
+                qimg = QImage(rgba.data, w, h, w * 4, QImage.Format.Format_RGBA8888)
+                self._diff_pixmap = QPixmap.fromImage(qimg.copy())
+                self._diff_pixmap_dirty = False
+
+            if self._diff_pixmap and not self._diff_pixmap.isNull():
+                painter.drawPixmap(rect.toRect(), self._diff_pixmap)
+
+            # Difference badge
+            painter.save()
+            font_diff = QFont("sans-serif", 8, QFont.Weight.Bold)
+            painter.setFont(font_diff)
+            d_rect = QRectF(rect.right() - 175, rect.bottom() - 28, 165, 20)
+            painter.setBrush(QBrush(QColor(20, 20, 20, 220)))
+            painter.setPen(QPen(QColor(255, 87, 34), 1))
+            painter.drawRoundedRect(d_rect, 3, 3)
+            painter.setPen(QColor(255, 87, 34))
+            painter.drawText(d_rect, Qt.AlignmentFlag.AlignCenter, f"DIFF: ≥ {self.difference_threshold:.0f} HU")
             painter.restore()
 
         # ── ROI Diagnostic Magnifying Loupe (2.0x Digital Zoom with Micro-Reticle) ────
@@ -886,6 +954,45 @@ class MPRSliceWidget(QFrame):
                 painter.setPen(QColor(255, 255, 255))
                 painter.drawText(badge_r, Qt.AlignmentFlag.AlignCenter, s_name)
 
+        # 7.6. ICU Device Markers Projection (ICU Mode: Feature 6)
+        if getattr(self, "active_device_markers", None):
+            H, W, D = self.vol_dims
+            dy, dx, dz = self.spacings
+            p_name = self.plane_name.lower()
+
+            for dm in self.active_device_markers:
+                x_d = dm.get("x") if "x" in dm else dm.get("physical_x_mm")
+                y_d = dm.get("y") if "y" in dm else dm.get("physical_y_mm")
+                z_d = dm.get("z") if "z" in dm else dm.get("physical_z_mm")
+                if x_d is None or y_d is None or z_d is None:
+                    continue
+
+                dtype = dm.get("device_type", "Device")
+                lbl = dm.get("label", "")
+                display_txt = f"{dtype}: {lbl}" if lbl and lbl != dtype else dtype
+
+                if "axial" in p_name:
+                    u_d = float(np.clip(x_d / max(1e-4, W * dx), 0.0, 1.0))
+                    v_d = float(np.clip(y_d / max(1e-4, H * dy), 0.0, 1.0))
+                elif "coronal" in p_name:
+                    u_d = float(np.clip(x_d / max(1e-4, W * dx), 0.0, 1.0))
+                    v_d = float(np.clip((D - 1 - (z_d / max(1e-4, dz))) / max(1.0, float(D)), 0.0, 1.0))
+                else:  # sagittal
+                    u_d = float(np.clip(y_d / max(1e-4, H * dy), 0.0, 1.0))
+                    v_d = float(np.clip((D - 1 - (z_d / max(1e-4, dz))) / max(1.0, float(D)), 0.0, 1.0))
+
+                cxd = rect.left() + u_d * rect.width()
+                cyd = rect.top()  + v_d * rect.height()
+
+                # Draw teal device marker
+                c_teal = QColor(0, 191, 165, 240)
+                c_fill = QColor(0, 191, 165, 60)
+                painter.setPen(QPen(c_teal, 1.8))
+                painter.setBrush(QBrush(c_fill))
+                painter.drawEllipse(QPointF(cxd, cyd), 6.0, 6.0)
+                painter.setBrush(QBrush(c_teal))
+                painter.drawEllipse(QPointF(cxd, cyd), 2.0, 2.0)
+
         # 8. Anatomical Badges & Orientation Guides
         painter.setPen(QColor(240, 240, 240))
         painter.setFont(QFont("sans-serif", 8, QFont.Weight.Bold))
@@ -1015,6 +1122,11 @@ class MPRView(QWidget):
         self.saved_after_spacing: tuple | None = None
         self.saved_after_thickness: float | None = None
         self.comparison_view: str | None = None
+
+        # ICU Feature 5: What Changed? state
+        self.difference_active: bool = False
+        self.difference_volume: np.ndarray | None = None
+        self.difference_threshold: float = 50.0
 
         self._build_ui()
 
@@ -1531,6 +1643,74 @@ class MPRView(QWidget):
         if hasattr(self, "w_sagittal") and self.w_sagittal:
             self.w_sagittal.set_current_instrument_pose(pose, vol_dims, spacings)
 
+    # ── ICU Feature 5: What Changed? MPR Methods ─────────────────────────────
+    def set_difference_volume(self, diff_vol: np.ndarray | None, threshold: float = 50.0, active: bool = True):
+        """Sets volumetric difference map for MPR Axial, Coronal, and Sagittal orthogonal overlay."""
+        self.difference_active = bool(active) and (diff_vol is not None)
+        self.difference_volume = diff_vol
+        self.difference_threshold = float(threshold)
+        self._update_mpr_difference_slices()
+
+    def clear_difference_volume(self):
+        """Clears difference map overlay from all MPR viewports."""
+        self.difference_active = False
+        self.difference_volume = None
+        if hasattr(self, "w_axial"):
+            self.w_axial.clear_difference_slice()
+        if hasattr(self, "w_coronal"):
+            self.w_coronal.clear_difference_slice()
+        if hasattr(self, "w_sagittal"):
+            self.w_sagittal.clear_difference_slice()
+
+    # ── ICU Feature 6: Device Markers MPR Methods ────────────────────────────
+    def set_active_device_markers(self, markers: list[dict] | None):
+        """Passes active device markers to all 3 orthogonal viewports."""
+        self.active_device_markers = list(markers) if markers else []
+        H, W, D = self.vol_8bit.shape if self.vol_8bit is not None else (1, 1, 1)
+        dy = float(self.pixel_spacing[0])
+        dx = float(self.pixel_spacing[1])
+        dz = float(self.slice_thickness)
+        vol_dims = (H, W, D)
+        spacings = (dy, dx, dz)
+        if hasattr(self, "w_axial") and self.w_axial:
+            self.w_axial.set_active_device_markers(markers, vol_dims, spacings)
+        if hasattr(self, "w_coronal") and self.w_coronal:
+            self.w_coronal.set_active_device_markers(markers, vol_dims, spacings)
+        if hasattr(self, "w_sagittal") and self.w_sagittal:
+            self.w_sagittal.set_active_device_markers(markers, vol_dims, spacings)
+
+    def clear_active_device_markers(self):
+        """Clears active device markers from all 3 orthogonal viewports."""
+        self.active_device_markers = []
+        if hasattr(self, "w_axial") and self.w_axial:
+            self.w_axial.clear_active_device_markers()
+        if hasattr(self, "w_coronal") and self.w_coronal:
+            self.w_coronal.clear_active_device_markers()
+        if hasattr(self, "w_sagittal") and self.w_sagittal:
+            self.w_sagittal.clear_active_device_markers()
+
+    def _update_mpr_difference_slices(self):
+        """Extracts and updates difference slices for all 3 orthogonal viewports."""
+        if not self.difference_active or self.difference_volume is None:
+            self.clear_difference_volume()
+            return
+
+        H, W, D = self.difference_volume.shape
+        # 1. Axial difference slice
+        iz = int(np.clip(self.idx_z, 0, D - 1))
+        diff_ax = self.difference_volume[:, :, iz]
+        self.w_axial.set_difference_slice(True, diff_ax, self.difference_threshold)
+
+        # 2. Coronal difference slice
+        iy = int(np.clip(self.idx_y, 0, H - 1))
+        diff_cor = np.flipud(self.difference_volume[iy, :, :].T)
+        self.w_coronal.set_difference_slice(True, diff_cor, self.difference_threshold)
+
+        # 3. Sagittal difference slice
+        ix = int(np.clip(self.idx_x, 0, W - 1))
+        diff_sag = np.flipud(self.difference_volume[:, ix, :].T)
+        self.w_sagittal.set_difference_slice(True, diff_sag, self.difference_threshold)
+
 
 
     # ── Ultra-Fast Direct 8-Bit Slice Updaters (0.00ms per slice) ─────────────
@@ -1544,6 +1724,9 @@ class MPRView(QWidget):
         qimg = QImage(raw_ax.data, W, H, W, QImage.Format.Format_Grayscale8)
         self.w_axial.set_slice_image(QPixmap.fromImage(qimg), (H, W), float(self.pixel_spacing[1]), float(self.pixel_spacing[0]))
         self.lbl_axial.setText(f"Axial (Top-Down): Slice {self.idx_z + 1} / {D}  (Depth: {(self.idx_z * self.slice_thickness):.1f} mm)")
+        if self.difference_active and self.difference_volume is not None:
+            iz = int(np.clip(self.idx_z, 0, self.difference_volume.shape[2] - 1))
+            self.w_axial.set_difference_slice(True, self.difference_volume[:, :, iz], self.difference_threshold)
 
     def _refresh_coronal_slice(self):
         if self.vol_8bit is None:
@@ -1553,6 +1736,9 @@ class MPRView(QWidget):
         qimg = QImage(raw_cor.data, W, D, W, QImage.Format.Format_Grayscale8)
         self.w_coronal.set_slice_image(QPixmap.fromImage(qimg), raw_cor.shape, float(self.pixel_spacing[1]), float(self.slice_thickness))
         self.lbl_coronal.setText(f"Coronal (Frontal): Slice {self.idx_y + 1} / {H}  (Y: {(self.idx_y * self.pixel_spacing[0]):.1f} mm)")
+        if self.difference_active and self.difference_volume is not None:
+            iy = int(np.clip(self.idx_y, 0, self.difference_volume.shape[0] - 1))
+            self.w_coronal.set_difference_slice(True, np.flipud(self.difference_volume[iy, :, :].T), self.difference_threshold)
 
     def _refresh_sagittal_slice(self):
         if self.vol_8bit is None:
@@ -1562,6 +1748,9 @@ class MPRView(QWidget):
         qimg = QImage(raw_sag.data, H, D, H, QImage.Format.Format_Grayscale8)
         self.w_sagittal.set_slice_image(QPixmap.fromImage(qimg), raw_sag.shape, float(self.pixel_spacing[0]), float(self.slice_thickness))
         self.lbl_sagittal.setText(f"Sagittal (Side Profile): Slice {self.idx_x + 1} / {W}  (X: {(self.idx_x * self.pixel_spacing[1]):.1f} mm)")
+        if self.difference_active and self.difference_volume is not None:
+            ix = int(np.clip(self.idx_x, 0, self.difference_volume.shape[1] - 1))
+            self.w_sagittal.set_difference_slice(True, np.flipud(self.difference_volume[:, ix, :].T), self.difference_threshold)
 
     def refresh_all_slices(self):
         """Refreshes all 3 slices (called on scan load or W/L preset change)."""

@@ -2491,6 +2491,151 @@ class Viewer3D(QWidget):
         except Exception:
             pass
 
+    # ── ICU Feature 4: Annotation Carry-Forward 3D Marker ─────────────────────
+    def set_annotation_marker(self, x_mm: float, y_mm: float, z_mm: float, label: str = "Annotation", is_carried: bool = False):
+        """Renders 3D marker and text label for ICU Annotation Carry-Forward."""
+        if not hasattr(self, "plotter") or self.plotter is None:
+            return
+        self.clear_annotation_marker()
+        actor_name = "icu_annotation_marker"
+        label_name = "icu_annotation_label"
+        color = "#e040fb" if is_carried else "#ffb300"  # Magenta if carried, Amber if source
+        try:
+            sphere = pv.Sphere(radius=2.5, center=(float(x_mm), float(y_mm), float(z_mm)))
+            self.plotter.add_mesh(
+                sphere,
+                name=actor_name,
+                color=color,
+                opacity=0.9,
+                specular=0.8,
+                ambient=0.3,
+                render=False
+            )
+            display_text = f"{label} (Carried)" if is_carried else label
+            self.plotter.add_point_labels(
+                [[float(x_mm), float(y_mm), float(z_mm)]],
+                [display_text],
+                name=label_name,
+                point_color=color,
+                point_size=1,
+                text_color="#ffffff",
+                fill_shape=True,
+                shape_color="#101010",
+                shape_opacity=0.85,
+                font_size=10,
+                always_visible=True,
+                render=False
+            )
+            self.plotter.render()
+        except Exception as exc:
+            print(f"[Viewer3D] Error rendering annotation marker: {exc}")
+
+    def clear_annotation_marker(self):
+        """Removes the 3D marker and label for ICU Annotation Carry-Forward."""
+        if not hasattr(self, "plotter") or self.plotter is None:
+            return
+        try:
+            self.plotter.remove_actor("icu_annotation_marker", render=False)
+            self.plotter.remove_actor("icu_annotation_label", render=False)
+            if "icu_annotation_label-labels" in self.plotter.actors:
+                self.plotter.remove_actor("icu_annotation_label-labels", render=False)
+            if "icu_annotation_label-points" in self.plotter.actors:
+                self.plotter.remove_actor("icu_annotation_label-points", render=False)
+            self.plotter.render()
+        except Exception:
+            pass
+
+    # ── ICU Feature 6: Device Markers 3D Actors ──────────────────────────────
+    def set_device_marker(self, x_mm: float, y_mm: float, z_mm: float, device_type: str = "Device", label: str = "", marker_id: str = ""):
+        """Renders 3D marker and text label for a user-placed ICU Device Marker."""
+        if not hasattr(self, "plotter") or self.plotter is None:
+            return
+        mid = str(marker_id or "default")
+        actor_name = f"icu_device_marker_{mid}"
+        label_name = f"icu_device_label_{mid}"
+        color = "#00bfa5"  # Distinct Teal/Mint
+
+        # Remove existing actor if already present
+        self.remove_device_marker(mid)
+
+        try:
+            sphere = pv.Sphere(radius=2.5, center=(float(x_mm), float(y_mm), float(z_mm)))
+            self.plotter.add_mesh(
+                sphere,
+                name=actor_name,
+                color=color,
+                opacity=0.9,
+                specular=0.8,
+                ambient=0.3,
+                render=False
+            )
+            display_text = f"{device_type}: {label}" if label and label != device_type else device_type
+            self.plotter.add_point_labels(
+                [[float(x_mm), float(y_mm), float(z_mm)]],
+                [display_text],
+                name=label_name,
+                point_color=color,
+                point_size=1,
+                text_color="#ffffff",
+                fill_shape=True,
+                shape_color="#101010",
+                shape_opacity=0.85,
+                font_size=10,
+                always_visible=True,
+                render=False
+            )
+            self.plotter.render()
+        except Exception as exc:
+            print(f"[Viewer3D] Error rendering device marker: {exc}")
+
+    def set_device_markers(self, markers: list[dict] | None):
+        """Renders a collection of device markers in 3D view."""
+        self.clear_device_markers()
+        if not markers:
+            return
+        for m in markers:
+            mid = str(m.get("id", ""))
+            x = float(m.get("physical_x_mm", m.get("x", 0.0)))
+            y = float(m.get("physical_y_mm", m.get("y", 0.0)))
+            z = float(m.get("physical_z_mm", m.get("z", 0.0)))
+            dtype = str(m.get("device_type", "Device"))
+            lbl = str(m.get("label", ""))
+            self.set_device_marker(x, y, z, dtype, lbl, mid)
+
+    def remove_device_marker(self, marker_id: str):
+        """Removes an individual device marker and label actor by ID."""
+        if not hasattr(self, "plotter") or self.plotter is None:
+            return
+        mid = str(marker_id)
+        actor_name = f"icu_device_marker_{mid}"
+        label_name = f"icu_device_label_{mid}"
+        try:
+            self.plotter.remove_actor(actor_name, render=False)
+            self.plotter.remove_actor(label_name, render=False)
+            if f"{label_name}-labels" in self.plotter.actors:
+                self.plotter.remove_actor(f"{label_name}-labels", render=False)
+            if f"{label_name}-points" in self.plotter.actors:
+                self.plotter.remove_actor(f"{label_name}-points", render=False)
+            self.plotter.render()
+        except Exception:
+            pass
+
+    def clear_device_markers(self):
+        """Removes all 3D device marker and label actors."""
+        if not hasattr(self, "plotter") or self.plotter is None:
+            return
+        try:
+            actors_to_remove = [
+                act for act in self.plotter.actors
+                if str(act).startswith("icu_device_marker_") or str(act).startswith("icu_device_label_")
+            ]
+            for act in actors_to_remove:
+                self.plotter.remove_actor(act, render=False)
+            self.plotter.render()
+        except Exception:
+            pass
+
+
     # ── Quick Surgical Views Methods (OR Mode: Feature 9) ───────────────────
 
     def _center_camera_point(self, x: float, y: float, z: float, dist: float = 120.0):

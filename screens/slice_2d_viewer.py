@@ -63,6 +63,8 @@ class CTSliceCanvas(QWidget):
     physical_point_selected = pyqtSignal(int, float, float, float)  # point_num (1 or 2), x_mm, y_mm, z_mm
     planning_point_selected = pyqtSignal(str, float, float, float)  # point_type ("ENTRY" or "TARGET"), x_mm, y_mm, z_mm
     same_location_selected = pyqtSignal(float, float, float)        # physical x_mm, y_mm, z_mm
+    annotation_point_selected = pyqtSignal(float, float, float)   # physical x_mm, y_mm, z_mm
+    device_marker_selected = pyqtSignal(float, float, float)      # physical x_mm, y_mm, z_mm
     measurement_added = pyqtSignal(object)         # Measurement2D
     measurement_state_changed = pyqtSignal(str)    # status string
 
@@ -113,6 +115,21 @@ class CTSliceCanvas(QWidget):
         self.icu_same_location_picking: bool = False
         self.icu_same_location: dict | None = None
 
+        # ICU Feature 4: Annotation Carry-forward state
+        self.icu_annotation_picking: bool = False
+        self.active_annotations: list[dict] = []
+
+        # ICU Feature 5: What Changed? state
+        self.difference_active: bool = False
+        self.difference_slice: np.ndarray | None = None
+        self.difference_threshold: float = 50.0
+        self._diff_pixmap: QPixmap | None = None
+        self._diff_pixmap_dirty: bool = True
+
+        # ICU Feature 6: Device Markers state
+        self.icu_device_marker_picking: bool = False
+        self.active_device_markers: list[dict] = []
+
     def set_same_location_picking(self, enabled: bool):
         """Toggles picking mode for ICU Same-Location Review."""
         self.icu_same_location_picking = bool(enabled)
@@ -131,6 +148,65 @@ class CTSliceCanvas(QWidget):
         """Clears ICU same-location coordinates and removes marker display."""
         self.icu_same_location = None
         self.icu_same_location_picking = False
+        self.setCursor(Qt.CursorShape.ArrowCursor)
+        self.update()
+
+    def set_annotation_picking(self, enabled: bool):
+        """Toggles picking mode for ICU Annotation placement."""
+        self.icu_annotation_picking = bool(enabled)
+        if self.icu_annotation_picking:
+            self.setCursor(Qt.CursorShape.CrossCursor)
+        else:
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+        self.update()
+
+    def set_active_annotations(self, annots: list[dict] | None):
+        """Sets active annotations list to display on 2D slice."""
+        self.active_annotations = list(annots) if annots else []
+        self.update()
+
+    def clear_active_annotations(self):
+        """Clears active annotations and picking mode."""
+        self.active_annotations = []
+        self.icu_annotation_picking = False
+        self.setCursor(Qt.CursorShape.ArrowCursor)
+        self.update()
+
+    def set_difference_overlay(self, active: bool, diff_slice: np.ndarray | None = None, threshold: float = 50.0):
+        """Sets difference review overlay parameters and triggers re-render."""
+        self.difference_active = bool(active)
+        self.difference_slice = diff_slice
+        self.difference_threshold = float(threshold)
+        self._diff_pixmap = None
+        self._diff_pixmap_dirty = True
+        self.update()
+
+    def clear_difference_overlay(self):
+        """Clears difference review overlay."""
+        self.difference_active = False
+        self.difference_slice = None
+        self._diff_pixmap = None
+        self._diff_pixmap_dirty = True
+        self.update()
+
+    def set_device_marker_picking(self, enabled: bool):
+        """Toggles picking mode for ICU Device Marker placement."""
+        self.icu_device_marker_picking = bool(enabled)
+        if self.icu_device_marker_picking:
+            self.setCursor(Qt.CursorShape.CrossCursor)
+        else:
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+        self.update()
+
+    def set_active_device_markers(self, markers: list[dict] | None):
+        """Sets active device markers list to display on 2D slice."""
+        self.active_device_markers = list(markers) if markers else []
+        self.update()
+
+    def clear_active_device_markers(self):
+        """Clears active device markers and picking mode."""
+        self.active_device_markers = []
+        self.icu_device_marker_picking = False
         self.setCursor(Qt.CursorShape.ArrowCursor)
         self.update()
 
@@ -368,6 +444,41 @@ class CTSliceCanvas(QWidget):
                 painter.setPen(QColor(0, 0, 0))
                 painter.drawText(comp_rect, Qt.AlignmentFlag.AlignCenter, badge_txt)
                 painter.restore()
+
+        # Difference Overlay (ICU Mode: Feature 5)
+        if getattr(self, "difference_active", False) and getattr(self, "difference_slice", None) is not None:
+            if getattr(self, "_diff_pixmap", None) is None or getattr(self, "_diff_pixmap_dirty", True):
+                diff_sl = self.difference_slice
+                thresh = getattr(self, "difference_threshold", 50.0)
+                mask = diff_sl >= thresh
+                h, w = diff_sl.shape
+                rgba = np.zeros((h, w, 4), dtype=np.uint8)
+                # Vibrant semi-transparent coral/orange #ff5722 (R=255, G=87, B=34, A=130)
+                rgba[mask, 0] = 255
+                rgba[mask, 1] = 87
+                rgba[mask, 2] = 34
+                rgba[mask, 3] = 130
+                qimg = QImage(rgba.data, w, h, w * 4, QImage.Format.Format_RGBA8888)
+                self._diff_pixmap = QPixmap.fromImage(qimg.copy())
+                self._diff_pixmap_dirty = False
+
+            if self._diff_pixmap and not self._diff_pixmap.isNull():
+                if self.comparison_active and self.comparison_mode == "SIDE_BY_SIDE":
+                    painter.drawPixmap(right_rect.toRect(), self._diff_pixmap)
+                else:
+                    painter.drawPixmap(rect.toRect(), self._diff_pixmap)
+
+            # Difference badge
+            painter.save()
+            font_diff = QFont("sans-serif", 8, QFont.Weight.Bold)
+            painter.setFont(font_diff)
+            d_rect = QRectF(rect.right() - 175, rect.bottom() - 28, 165, 20)
+            painter.setBrush(QBrush(QColor(20, 20, 20, 220)))
+            painter.setPen(QPen(QColor(255, 87, 34), 1))
+            painter.drawRoundedRect(d_rect, 3, 3)
+            painter.setPen(QColor(255, 87, 34))
+            painter.drawText(d_rect, Qt.AlignmentFlag.AlignCenter, f"DIFF: ≥ {self.difference_threshold:.0f} HU")
+            painter.restore()
 
         # 1. Crosshair lines (dashed cyan) - drawn only when enabled
         if getattr(self, "show_crosshair", True):
@@ -957,6 +1068,135 @@ class CTSliceCanvas(QWidget):
                     painter.setPen(QColor(0, 229, 255))
                     painter.drawText(lbl_rect, Qt.AlignmentFlag.AlignCenter, lbl_text)
 
+        # 9. ICU Spatial Annotations (ICU Mode: Feature 4)
+        if getattr(self, "active_annotations", None):
+            for annot in self.active_annotations:
+                x_a = annot.get("x")
+                y_a = annot.get("y")
+                z_a = annot.get("z")
+                if x_a is None or y_a is None or z_a is None:
+                    continue
+
+                lbl = annot.get("label", "Annotation")
+                is_cf = annot.get("is_carried", False)
+
+                show_annot = False
+                u_a, v_a = 0.5, 0.5
+                if cur_orient == "axial":
+                    target_slice = int(np.clip(round(z_a / max(dz, 1e-4)), 0, D - 1))
+                    if abs(cur_slice - target_slice) <= 1:
+                        show_annot = True
+                        u_a = float(np.clip(x_a / max(1e-4, (W - 1) * dx), 0.0, 1.0))
+                        v_a = float(np.clip(y_a / max(1e-4, (H - 1) * dy), 0.0, 1.0))
+                elif cur_orient == "coronal":
+                    target_slice = int(np.clip(round(y_a / max(dy, 1e-4)), 0, H - 1))
+                    if abs(cur_slice - target_slice) <= 1:
+                        show_annot = True
+                        u_a = float(np.clip(x_a / max(1e-4, (W - 1) * dx), 0.0, 1.0))
+                        v_a = float(np.clip(1.0 - z_a / max(1e-4, (D - 1) * dz), 0.0, 1.0))
+                else:  # sagittal
+                    target_slice = int(np.clip(round(x_a / max(dx, 1e-4)), 0, W - 1))
+                    if abs(cur_slice - target_slice) <= 1:
+                        show_annot = True
+                        u_a = float(np.clip(y_a / max(1e-4, (H - 1) * dy), 0.0, 1.0))
+                        v_a = float(np.clip(1.0 - z_a / max(1e-4, (D - 1) * dz), 0.0, 1.0))
+
+                if show_annot:
+                    ax = rect.left() + u_a * rect.width()
+                    ay = rect.top() + v_a * rect.height()
+
+                    c_primary = QColor(224, 64, 251, 240) if is_cf else QColor(255, 179, 0, 240)
+                    c_fill = QColor(224, 64, 251, 60) if is_cf else QColor(255, 179, 0, 60)
+
+                    painter.setPen(QPen(c_primary, 1.8))
+                    painter.setBrush(QBrush(c_fill))
+                    diamond = [
+                        QPointF(ax, ay - 8.0),
+                        QPointF(ax + 8.0, ay),
+                        QPointF(ax, ay + 8.0),
+                        QPointF(ax - 8.0, ay)
+                    ]
+                    painter.drawPolygon(diamond)
+                    painter.setBrush(QBrush(c_primary))
+                    painter.drawEllipse(QPointF(ax, ay), 2.5, 2.5)
+
+                    font_tag = QFont("sans-serif", 8, QFont.Weight.Bold)
+                    painter.setFont(font_tag)
+                    fm = painter.fontMetrics()
+                    tag_text = f"📍 {lbl}"
+                    tw = fm.horizontalAdvance(tag_text) + 12
+                    th = 18
+                    tag_rect = QRectF(ax + 10, ay - th / 2.0, tw, th)
+                    painter.setPen(QPen(c_primary, 1))
+                    painter.setBrush(QBrush(QColor(15, 15, 15, 220)))
+                    painter.drawRoundedRect(tag_rect, 3, 3)
+                    painter.setPen(c_primary)
+                    painter.drawText(tag_rect, Qt.AlignmentFlag.AlignCenter, tag_text)
+
+        # 10. ICU Device Markers (ICU Mode: Feature 6)
+        if getattr(self, "active_device_markers", None):
+            for dm in self.active_device_markers:
+                x_d = dm.get("x") if "x" in dm else dm.get("physical_x_mm")
+                y_d = dm.get("y") if "y" in dm else dm.get("physical_y_mm")
+                z_d = dm.get("z") if "z" in dm else dm.get("physical_z_mm")
+                if x_d is None or y_d is None or z_d is None:
+                    continue
+
+                dtype = dm.get("device_type", "Device")
+                lbl = dm.get("label", "")
+                display_txt = f"{dtype}: {lbl}" if lbl and lbl != dtype else dtype
+
+                show_dm = False
+                u_d, v_d = 0.5, 0.5
+                if cur_orient == "axial":
+                    target_slice = int(np.clip(round(z_d / max(dz, 1e-4)), 0, D - 1))
+                    if abs(cur_slice - target_slice) <= 1:
+                        show_dm = True
+                        u_d = float(np.clip(x_d / max(1e-4, (W - 1) * dx), 0.0, 1.0))
+                        v_d = float(np.clip(y_d / max(1e-4, (H - 1) * dy), 0.0, 1.0))
+                elif cur_orient == "coronal":
+                    target_slice = int(np.clip(round(y_d / max(dy, 1e-4)), 0, H - 1))
+                    if abs(cur_slice - target_slice) <= 1:
+                        show_dm = True
+                        u_d = float(np.clip(x_d / max(1e-4, (W - 1) * dx), 0.0, 1.0))
+                        v_d = float(np.clip(1.0 - z_d / max(1e-4, (D - 1) * dz), 0.0, 1.0))
+                else:  # sagittal
+                    target_slice = int(np.clip(round(x_d / max(dx, 1e-4)), 0, W - 1))
+                    if abs(cur_slice - target_slice) <= 1:
+                        show_dm = True
+                        u_d = float(np.clip(y_d / max(1e-4, (H - 1) * dy), 0.0, 1.0))
+                        v_d = float(np.clip(1.0 - z_d / max(1e-4, (D - 1) * dz), 0.0, 1.0))
+
+                if show_dm:
+                    dx_px = rect.left() + u_d * rect.width()
+                    dy_px = rect.top() + v_d * rect.height()
+
+                    c_teal = QColor(0, 191, 165, 240)
+                    c_fill = QColor(0, 191, 165, 50)
+
+                    # Draw outer concentric circle
+                    painter.setPen(QPen(c_teal, 2.0))
+                    painter.setBrush(QBrush(c_fill))
+                    painter.drawEllipse(QPointF(dx_px, dy_px), 7.0, 7.0)
+
+                    # Draw inner dot
+                    painter.setBrush(QBrush(c_teal))
+                    painter.drawEllipse(QPointF(dx_px, dy_px), 2.5, 2.5)
+
+                    # Draw tag
+                    font_tag = QFont("sans-serif", 8, QFont.Weight.Bold)
+                    painter.setFont(font_tag)
+                    fm = painter.fontMetrics()
+                    tag_text = f"⚓ {display_txt}"
+                    tw = fm.horizontalAdvance(tag_text) + 12
+                    th = 18
+                    tag_rect = QRectF(dx_px + 10, dy_px - th / 2.0, tw, th)
+                    painter.setPen(QPen(c_teal, 1))
+                    painter.setBrush(QBrush(QColor(15, 15, 15, 220)))
+                    painter.drawRoundedRect(tag_rect, 3, 3)
+                    painter.setPen(c_teal)
+                    painter.drawText(tag_rect, Qt.AlignmentFlag.AlignCenter, tag_text)
+
     def mouseMoveEvent(self, event):
         rect = self._get_target_rect()
         if rect.width() <= 0 or rect.height() <= 0 or self._raw_slice is None:
@@ -1032,6 +1272,38 @@ class CTSliceCanvas(QWidget):
                 self.icu_same_location_picking = False
                 self.setCursor(Qt.CursorShape.ArrowCursor)
                 self.same_location_selected.emit(float(phys[0]), float(phys[1]), float(phys[2]))
+                self.cross_u = u
+                self.cross_v = v
+                self.crosshair_moved.emit(u, v)
+                self.update()
+                return
+
+            # ── ICU Feature 4: Annotation Picking Mode ───────────────────────
+            if getattr(self, "icu_annotation_picking", False):
+                parent_w = self.parent()
+                if hasattr(parent_w, "calc_physical_coords"):
+                    phys = parent_w.calc_physical_coords(self.plane_name, getattr(self, "current_slice_idx", 0), u, v)
+                else:
+                    phys = (u, v, 0.0)
+                self.icu_annotation_picking = False
+                self.setCursor(Qt.CursorShape.ArrowCursor)
+                self.annotation_point_selected.emit(float(phys[0]), float(phys[1]), float(phys[2]))
+                self.cross_u = u
+                self.cross_v = v
+                self.crosshair_moved.emit(u, v)
+                self.update()
+                return
+
+            # ── ICU Feature 6: Device Marker Picking Mode ────────────────────
+            if getattr(self, "icu_device_marker_picking", False):
+                parent_w = self.parent()
+                if hasattr(parent_w, "calc_physical_coords"):
+                    phys = parent_w.calc_physical_coords(self.plane_name, getattr(self, "current_slice_idx", 0), u, v)
+                else:
+                    phys = (u, v, 0.0)
+                self.icu_device_marker_picking = False
+                self.setCursor(Qt.CursorShape.ArrowCursor)
+                self.device_marker_selected.emit(float(phys[0]), float(phys[1]), float(phys[2]))
                 self.cross_u = u
                 self.cross_v = v
                 self.crosshair_moved.emit(u, v)
@@ -1155,6 +1427,8 @@ class Slice2DViewerWidget(QWidget):
     physical_point_selected = pyqtSignal(int, float, float, float)  # point_num (1 or 2), x_mm, y_mm, z_mm
     planning_point_selected = pyqtSignal(str, float, float, float)  # point_type ("ENTRY" or "TARGET"), x_mm, y_mm, z_mm
     same_location_selected = pyqtSignal(float, float, float)        # physical x_mm, y_mm, z_mm
+    annotation_point_selected = pyqtSignal(float, float, float)   # physical x_mm, y_mm, z_mm
+    device_marker_selected = pyqtSignal(float, float, float)      # physical x_mm, y_mm, z_mm
     measurement_cleared = pyqtSignal()
     measurement_state_changed = pyqtSignal(str)
     window_level_changed = pyqtSignal(float, float)  # window_width, window_level
@@ -1186,6 +1460,11 @@ class Slice2DViewerWidget(QWidget):
         self.comparison_view: str = "AFTER"
         self.comparison_before_vol: np.ndarray | None = None
         self.comparison_opacity: float = 0.5
+
+        # ICU Feature 5: What Changed? state
+        self.difference_active: bool = False
+        self.difference_volume: np.ndarray | None = None
+        self.difference_threshold: float = 50.0
 
         self._build_ui()
 
@@ -1363,6 +1642,8 @@ class Slice2DViewerWidget(QWidget):
         self.canvas.physical_point_selected.connect(self.physical_point_selected.emit)
         self.canvas.planning_point_selected.connect(self.planning_point_selected.emit)
         self.canvas.same_location_selected.connect(self.same_location_selected.emit)
+        self.canvas.annotation_point_selected.connect(self.annotation_point_selected.emit)
+        self.canvas.device_marker_selected.connect(self.device_marker_selected.emit)
         self.canvas.measurement_state_changed.connect(self._on_canvas_measurement_state_changed)
         layout.addWidget(self.canvas, stretch=1)
 
@@ -1522,6 +1803,72 @@ class Slice2DViewerWidget(QWidget):
         """Clears ICU same-location data from canvas."""
         if hasattr(self, "canvas"):
             self.canvas.clear_same_location()
+
+    # ── ICU Feature 4: Annotation Carry-forward Methods ───────────────────────
+    def set_annotation_picking_mode(self, enabled: bool):
+        """Sets active picking mode for ICU Annotation placement."""
+        if hasattr(self, "canvas"):
+            self.canvas.set_annotation_picking(enabled)
+
+    def set_active_annotations(self, annots: list[dict] | None):
+        """Passes ICU annotations list to canvas for visualization."""
+        if hasattr(self, "canvas"):
+            self.canvas.set_active_annotations(annots)
+
+    def clear_active_annotations(self):
+        """Clears ICU annotations from canvas."""
+        if hasattr(self, "canvas"):
+            self.canvas.clear_active_annotations()
+
+    # ── ICU Feature 6: Device Markers Methods ────────────────────────────────
+    def set_device_marker_picking_mode(self, enabled: bool):
+        """Sets active picking mode for ICU Device Marker placement."""
+        if hasattr(self, "canvas"):
+            self.canvas.set_device_marker_picking(enabled)
+
+    def set_active_device_markers(self, markers: list[dict] | None):
+        """Passes ICU device markers list to canvas for visualization."""
+        if hasattr(self, "canvas"):
+            self.canvas.set_active_device_markers(markers)
+
+    def clear_active_device_markers(self):
+        """Clears ICU device markers from canvas."""
+        if hasattr(self, "canvas"):
+            self.canvas.clear_active_device_markers()
+
+    # ── ICU Feature 5: What Changed? Methods ─────────────────────────────────
+    def set_difference_overlay(self, active: bool, diff_vol_or_slice: np.ndarray | None = None, threshold: float = 50.0):
+        """Sets volumetric or 2D difference data and threshold for 2D slice overlay."""
+        self.difference_active = bool(active)
+        self.difference_threshold = float(threshold)
+        if diff_vol_or_slice is not None and diff_vol_or_slice.ndim == 3:
+            self.difference_volume = diff_vol_or_slice
+            self._update_difference_slice()
+        elif diff_vol_or_slice is not None and diff_vol_or_slice.ndim == 2:
+            self.difference_volume = None
+            if hasattr(self, "canvas"):
+                self.canvas.set_difference_overlay(self.difference_active, diff_vol_or_slice, self.difference_threshold)
+        else:
+            self.difference_volume = None
+            if hasattr(self, "canvas"):
+                self.canvas.clear_difference_overlay()
+
+    def clear_difference_overlay(self):
+        """Clears difference review overlay from 2D slice view."""
+        self.difference_active = False
+        self.difference_volume = None
+        if hasattr(self, "canvas"):
+            self.canvas.clear_difference_overlay()
+
+    def _update_difference_slice(self):
+        """Extracts 2D difference slice matching current orientation and slice index."""
+        if not self.difference_active or self.difference_volume is None:
+            if hasattr(self, "canvas"):
+                self.canvas.clear_difference_overlay()
+            return
+        diff_slice, _, _ = self._extract_slice_from_vol(self.difference_volume)
+        if hasattr(self, "canvas"):
+            self.canvas.set_difference_overlay(self.difference_active, diff_slice, self.difference_threshold)
 
     def navigate_to_physical_point(self, x_mm: float, y_mm: float, z_mm: float):
         """Navigates current 2D orientation slice to physical coordinates (X, Y, Z)."""
@@ -1924,6 +2271,7 @@ class Slice2DViewerWidget(QWidget):
 
         self._sync_slider_range()
         self._render_current_slice()
+        self._update_difference_slice()
         self.orientation_changed.emit(orient)
 
     def get_slice_count(self) -> int:
@@ -2002,6 +2350,7 @@ class Slice2DViewerWidget(QWidget):
                 self.slider_slice.blockSignals(False)
             self._update_slice_label()
             self._render_current_slice()
+            self._update_difference_slice()
             self.slice_changed.emit(self.current_orientation, idx)
             pos = self.get_current_physical_position()
             self.reference_position_changed.emit(pos[0], pos[1], pos[2])

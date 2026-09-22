@@ -17,7 +17,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel,
     QLineEdit, QPushButton, QFrame, QStackedWidget, QScrollArea,
     QSizePolicy, QSlider, QInputDialog, QDialog, QListWidget,
-    QListWidgetItem, QComboBox
+    QListWidgetItem, QComboBox, QTextEdit
 )
 
 from PyQt6.QtCore import Qt, pyqtSignal
@@ -2073,7 +2073,1079 @@ class MeasurementTrackingCard(QFrame):
             self.delete_tracked_measurement_requested.emit(str(target_id))
 
 
+class AnnotationCarryForwardCard(QFrame):
+    """ICU Feature 4: ANNOTATION CARRY-FORWARD workflow card.
+
+    Allows selecting an existing user-created spatial annotation on one scan (Current or Previous)
+    and carrying it forward to the corresponding physical location in the other scan for the same patient.
+    Zero clinical interpretation; clearly indicates 'Approx. Correspondence' or 'Physical correspondence unavailable'.
+    """
+    create_annotation_requested = pyqtSignal()
+    select_annotation_requested = pyqtSignal(str)  # annotation_id
+    carry_forward_requested = pyqtSignal(str)      # target_scan_id
+    view_source_requested = pyqtSignal(str)        # annotation_id
+    view_target_requested = pyqtSignal(str)        # annotation_id
+    delete_annotation_requested = pyqtSignal(str)  # annotation_id
+    clear_selection_requested = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFrameShape(QFrame.Shape.Box)
+        self.setStyleSheet("""
+            QFrame {
+                background: #161616;
+                border: 1px solid #242424;
+                border-radius: 4px;
+                padding: 6px 8px;
+            }
+            QFrame:hover {
+                border-color: #00e5ff;
+            }
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(5)
+
+        # 1. Header
+        hdr_layout = QHBoxLayout()
+        hdr_layout.setSpacing(6)
+        self.lbl_title = QLabel("<b>Annotation Carry-forward</b>")
+        self.lbl_title.setStyleSheet("color: #00e5ff; font-size: 11px; font-weight: bold;")
+        hdr_layout.addWidget(self.lbl_title)
+        hdr_layout.addStretch(1)
+
+        self.lbl_status = QLabel("0 annotations")
+        self.lbl_status.setStyleSheet("color: #888888; font-size: 10px;")
+        hdr_layout.addWidget(self.lbl_status)
+        layout.addLayout(hdr_layout)
+
+        # 2. Selector Dropdown
+        lbl_sel_hdr = QLabel("Select Annotation:")
+        lbl_sel_hdr.setStyleSheet("color: #aaaaaa; font-size: 9px; font-weight: 600;")
+        layout.addWidget(lbl_sel_hdr)
+
+        self.combo_annotations = QComboBox()
+        self.combo_annotations.setStyleSheet("""
+            QComboBox {
+                background: #1f1f1f; color: #ffffff; border: 1px solid #333333;
+                border-radius: 3px; font-size: 9px; padding: 2px 5px;
+            }
+            QComboBox::drop-down { border: none; }
+            QComboBox QAbstractItemView {
+                background: #1f1f1f; color: #ffffff; selection-background-color: #00e5ff;
+                selection-color: #000000;
+            }
+        """)
+        self.combo_annotations.currentIndexChanged.connect(self._on_combo_changed)
+        layout.addWidget(self.combo_annotations)
+
+        # 3. Readout Box
+        readout_box = QFrame()
+        readout_box.setStyleSheet("background: #111111; border: 1px solid #222222; border-radius: 3px; padding: 4px;")
+        readout_layout = QVBoxLayout(readout_box)
+        readout_layout.setContentsMargins(4, 4, 4, 4)
+        readout_layout.setSpacing(2)
+
+        self.lbl_annot = QLabel("Annotation: None")
+        self.lbl_annot.setStyleSheet("color: #ffffff; font-size: 10px; font-weight: 600;")
+        readout_layout.addWidget(self.lbl_annot)
+
+        self.lbl_source = QLabel("No annotation selected")
+        self.lbl_source.setStyleSheet("color: #ffb300; font-size: 9px;")
+        readout_layout.addWidget(self.lbl_source)
+
+        self.lbl_target = QLabel("Target: N/A")
+        self.lbl_target.setStyleSheet("color: #b388ff; font-size: 9px;")
+        readout_layout.addWidget(self.lbl_target)
+
+        self.lbl_location = QLabel("Location: (0.0, 0.0, 0.0) mm")
+        self.lbl_location.setStyleSheet("color: #aaaaaa; font-size: 9px;")
+        readout_layout.addWidget(self.lbl_location)
+
+        self.lbl_slices = QLabel("")
+        self.lbl_slices.setStyleSheet("color: #888888; font-size: 9px;")
+        self.lbl_slices.setVisible(False)
+        readout_layout.addWidget(self.lbl_slices)
+
+        self.lbl_correspondence = QLabel("Status: Physical correspondence unavailable")
+        self.lbl_correspondence.setStyleSheet("color: #888888; font-size: 9px; font-weight: bold;")
+        readout_layout.addWidget(self.lbl_correspondence)
+
+        layout.addWidget(readout_box)
+
+        # 4. Buttons Row 1: [ ➕ New Annotation ] [ ➡️ Carry Forward ]
+        row1 = QHBoxLayout()
+        row1.setSpacing(5)
+
+        self.btn_new = QPushButton("➕ New Annotation")
+        self.btn_new.setStyleSheet("""
+            QPushButton {
+                background: #1e1e1e; color: #ffb300; border: 1px solid #ffb300;
+                border-radius: 3px; font-size: 9px; font-weight: bold; padding: 4px 6px;
+            }
+            QPushButton:hover { background: #332600; color: #ffd54f; }
+        """)
+        self.btn_new.clicked.connect(self.create_annotation_requested.emit)
+        row1.addWidget(self.btn_new)
+
+        self.btn_carry = QPushButton("➡️ Carry Forward")
+        self.btn_carry.setEnabled(False)
+        self.btn_carry.setStyleSheet("""
+            QPushButton {
+                background: #1e1e1e; color: #00e5ff; border: 1px solid #00e5ff;
+                border-radius: 3px; font-size: 9px; font-weight: bold; padding: 4px 6px;
+            }
+            QPushButton:hover:enabled { background: #003840; color: #00ffff; }
+            QPushButton:disabled { color: #555555; border-color: #333333; }
+        """)
+        self.btn_carry.clicked.connect(self._on_carry_clicked)
+        row1.addWidget(self.btn_carry)
+
+        layout.addLayout(row1)
+
+        # 5. Buttons Row 2: [ 👁 View Source ] [ 👁 View Target ] [ 🗑 Clear ]
+        row2 = QHBoxLayout()
+        row2.setSpacing(5)
+
+        self.btn_view_source = QPushButton("View Source")
+        self.btn_view_source.setEnabled(False)
+        self.btn_view_source.setStyleSheet("""
+            QPushButton {
+                background: #1e1e1e; color: #ffb300; border: 1px solid #333333;
+                border-radius: 3px; font-size: 9px; padding: 3px 5px;
+            }
+            QPushButton:hover:enabled { background: #2a2a2a; color: #ffffff; border-color: #ffb300; }
+            QPushButton:disabled { color: #555555; }
+        """)
+        self.btn_view_source.clicked.connect(self._on_view_source_clicked)
+        row2.addWidget(self.btn_view_source)
+
+        self.btn_view_target = QPushButton("View Target")
+        self.btn_view_target.setEnabled(False)
+        self.btn_view_target.setStyleSheet("""
+            QPushButton {
+                background: #1e1e1e; color: #b388ff; border: 1px solid #333333;
+                border-radius: 3px; font-size: 9px; padding: 3px 5px;
+            }
+            QPushButton:hover:enabled { background: #2a2a2a; color: #ffffff; border-color: #b388ff; }
+            QPushButton:disabled { color: #555555; }
+        """)
+        self.btn_view_target.clicked.connect(self._on_view_target_clicked)
+        row2.addWidget(self.btn_view_target)
+
+        self.btn_clear = QPushButton("Clear")
+        self.btn_clear.setEnabled(False)
+        self.btn_clear.setStyleSheet("""
+            QPushButton {
+                background: #1e1e1e; color: #888888; border: 1px solid #333333;
+                border-radius: 3px; font-size: 9px; padding: 3px 5px;
+            }
+            QPushButton:hover:enabled { background: #2a2a2a; color: #ffffff; }
+            QPushButton:disabled { color: #444444; }
+        """)
+        self.btn_clear.clicked.connect(self._on_clear_clicked)
+        row2.addWidget(self.btn_clear)
+
+        layout.addLayout(row2)
+
+        self._updating = False
+
+    def update_card(self, manager):
+        """Updates UI display and dropdown from AnnotationCarryForwardManager."""
+        self._updating = True
+        try:
+            self.combo_annotations.clear()
+            annots = list(manager._annotations.values()) if manager else []
+            if not annots:
+                self.combo_annotations.addItem("(No annotations)", userData=None)
+                self.clear_card()
+                return
+
+            for a in annots:
+                prefix = "[Carried] " if a.is_carried_forward() else ""
+                text = f"{prefix}{a.label} ({a.scan_id})"
+                self.combo_annotations.addItem(text, userData=a.id)
+
+            if manager.selected_annotation_id:
+                idx = self.combo_annotations.findData(manager.selected_annotation_id)
+                if idx >= 0:
+                    self.combo_annotations.setCurrentIndex(idx)
+
+            selected = manager.get_selected_annotation()
+            if selected:
+                self.lbl_annot.setText(f"Annotation: {selected.label}")
+                self.lbl_source.setText(f"Source Scan: {selected.scan_id}")
+                tgt_id = manager.target_scan_id or "None"
+                self.lbl_target.setText(f"Target Scan: {tgt_id}")
+                x, y, z = selected.physical_coordinates
+                self.lbl_location.setText(f"Location: ({x:.1f}, {y:.1f}, {z:.1f}) mm")
+
+                src_slice = manager.get_derived_slice(selected.scan_id, "axial")
+                tgt_slice = manager.get_derived_slice(manager.target_scan_id, "axial") if manager.target_scan_id else None
+                s_str = f"Source Slice: {src_slice}" if src_slice is not None else ""
+                t_str = f"Target Slice: {tgt_slice} (Derived)" if tgt_slice is not None else ""
+                self.lbl_slices.setText(f"{s_str} | {t_str}".strip(" |"))
+                self.lbl_slices.setVisible(bool(s_str or t_str))
+
+                can_cf, status = manager.can_carry_forward()
+                self.lbl_correspondence.setText(f"Status: {status}")
+                if status == "Approx. Correspondence":
+                    self.lbl_correspondence.setStyleSheet("color: #00e5ff; font-size: 9px; font-weight: bold;")
+                else:
+                    self.lbl_correspondence.setStyleSheet("color: #ff5252; font-size: 9px; font-weight: bold;")
+
+                self.btn_carry.setEnabled(can_cf)
+                self.btn_view_source.setEnabled(True)
+                self.btn_view_target.setEnabled(tgt_slice is not None)
+                self.btn_clear.setEnabled(True)
+            else:
+                self.clear_card()
+
+            self.lbl_status.setText(f"{len(annots)} annotations")
+        finally:
+            self._updating = False
+
+    def clear_card(self):
+        """Resets card to initial empty state: 'No annotation selected'."""
+        self._updating = True
+        try:
+            self.lbl_annot.setText("Annotation: None")
+            self.lbl_source.setText("No annotation selected")
+            self.lbl_target.setText("Target: N/A")
+            self.lbl_location.setText("Location: (0.0, 0.0, 0.0) mm")
+            self.lbl_slices.setText("")
+            self.lbl_slices.setVisible(False)
+            self.lbl_correspondence.setText("Status: Physical correspondence unavailable")
+            self.lbl_correspondence.setStyleSheet("color: #888888; font-size: 9px; font-weight: bold;")
+            self.btn_carry.setEnabled(False)
+            self.btn_view_source.setEnabled(False)
+            self.btn_view_target.setEnabled(False)
+            self.btn_clear.setEnabled(False)
+            self.lbl_status.setText("0 annotations")
+        finally:
+            self._updating = False
+
+    def _on_combo_changed(self, idx):
+        if self._updating:
+            return
+        annot_id = self.combo_annotations.currentData()
+        if annot_id:
+            self.select_annotation_requested.emit(str(annot_id))
+        else:
+            self.clear_selection_requested.emit()
+
+    def _on_carry_clicked(self):
+        annot_id = self.combo_annotations.currentData()
+        if annot_id:
+            self.carry_forward_requested.emit(str(annot_id))
+
+    def _on_view_source_clicked(self):
+        annot_id = self.combo_annotations.currentData()
+        if annot_id:
+            self.view_source_requested.emit(str(annot_id))
+
+    def _on_view_target_clicked(self):
+        annot_id = self.combo_annotations.currentData()
+        if annot_id:
+            self.view_target_requested.emit(str(annot_id))
+
+    def _on_clear_clicked(self):
+        annot_id = self.combo_annotations.currentData()
+        if annot_id:
+            self.delete_annotation_requested.emit(str(annot_id))
+        else:
+            self.clear_selection_requested.emit()
+
+
+class WhatChangedCard(QFrame):
+    """ICU Feature 5: WHAT CHANGED? card.
+
+    Provides objective visual difference review between Current and Previous scans.
+    Strictly factual; no diagnosis, no lesion detection, no progression/regression claims.
+    """
+    review_differences_requested = pyqtSignal()
+    show_current_requested = pyqtSignal()
+    show_previous_requested = pyqtSignal()
+    difference_threshold_changed = pyqtSignal(float)
+    clear_difference_requested = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFrameShape(QFrame.Shape.Box)
+        self.setStyleSheet("""
+            QFrame {
+                background: #161616;
+                border: 1px solid #242424;
+                border-radius: 4px;
+                padding: 6px 8px;
+            }
+            QFrame:hover {
+                border-color: #ff5722;
+            }
+        """)
+
+        self.current_scan_id: str = "None"
+        self.previous_scan_id: str = "None"
+        self.is_active: bool = False
+        self.difference_available: bool = False
+        self.threshold: float = 50.0
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(5)
+
+        # 1. Header with title and status
+        hdr_layout = QHBoxLayout()
+        hdr_layout.setSpacing(6)
+        self.lbl_title = QLabel("<b>What Changed?</b>")
+        self.lbl_title.setStyleSheet("color: #ff5722; font-size: 11px; font-weight: bold;")
+        hdr_layout.addWidget(self.lbl_title)
+        hdr_layout.addStretch(1)
+
+        self.lbl_header_status = QLabel("No difference review active")
+        self.lbl_header_status.setStyleSheet("color: #888888; font-size: 10px;")
+        hdr_layout.addWidget(self.lbl_header_status)
+        layout.addLayout(hdr_layout)
+
+        # 2. Readout Box
+        readout_box = QFrame()
+        readout_box.setStyleSheet("background: #111111; border: 1px solid #222222; border-radius: 3px; padding: 4px;")
+        readout_layout = QVBoxLayout(readout_box)
+        readout_layout.setContentsMargins(4, 4, 4, 4)
+        readout_layout.setSpacing(2)
+
+        self.lbl_current_scan = QLabel("Current: None")
+        self.lbl_current_scan.setStyleSheet("color: #ffffff; font-size: 9px; font-weight: 500;")
+        readout_layout.addWidget(self.lbl_current_scan)
+
+        self.lbl_previous_scan = QLabel("Previous: None")
+        self.lbl_previous_scan.setStyleSheet("color: #cccccc; font-size: 9px; font-weight: 500;")
+        readout_layout.addWidget(self.lbl_previous_scan)
+
+        self.lbl_status = QLabel("Status: No difference review active")
+        self.lbl_status.setStyleSheet("color: #888888; font-size: 9px;")
+        readout_layout.addWidget(self.lbl_status)
+
+        self.lbl_changed_voxels = QLabel("")
+        self.lbl_changed_voxels.setStyleSheet("color: #ff7043; font-size: 9px; font-weight: bold;")
+        self.lbl_changed_voxels.setVisible(False)
+        readout_layout.addWidget(self.lbl_changed_voxels)
+
+        layout.addWidget(readout_box)
+
+        # 3. Difference Threshold Slider
+        thresh_layout = QVBoxLayout()
+        thresh_layout.setSpacing(2)
+        thresh_hdr = QHBoxLayout()
+        self.lbl_thresh_title = QLabel("Difference Threshold:")
+        self.lbl_thresh_title.setStyleSheet("color: #aaaaaa; font-size: 9px; font-weight: 600;")
+        thresh_hdr.addWidget(self.lbl_thresh_title)
+        thresh_hdr.addStretch(1)
+
+        self.lbl_thresh_val = QLabel(f"{int(self.threshold)} HU")
+        self.lbl_thresh_val.setStyleSheet("color: #ff5722; font-size: 9px; font-weight: bold;")
+        thresh_hdr.addWidget(self.lbl_thresh_val)
+        thresh_layout.addLayout(thresh_hdr)
+
+        self.slider_threshold = QSlider(Qt.Orientation.Horizontal)
+        self.slider_threshold.setRange(10, 500)
+        self.slider_threshold.setValue(int(self.threshold))
+        self.slider_threshold.setStyleSheet("""
+            QSlider::groove:horizontal { height: 4px; background: #222; border-radius: 2px; }
+            QSlider::sub-page:horizontal { background: #d84315; border-radius: 2px; }
+            QSlider::handle:horizontal { background: #ff5722; border: 1px solid #bf360c; width: 12px; margin-top: -4px; margin-bottom: -4px; border-radius: 6px; }
+            QSlider::handle:horizontal:hover { background: #ff7043; }
+        """)
+        self.slider_threshold.valueChanged.connect(self._on_slider_changed)
+        thresh_layout.addWidget(self.slider_threshold)
+        layout.addLayout(thresh_layout)
+
+        # 4. Action Buttons
+        # Row 1: [ Review Differences ]
+        self.btn_review = QPushButton("Review Differences")
+        self.btn_review.setFixedHeight(24)
+        self.btn_review.setStyleSheet("""
+            QPushButton {
+                background: #bf360c; color: #ffffff; border: 1px solid #e64a19;
+                border-radius: 3px; font-size: 10px; font-weight: bold;
+            }
+            QPushButton:hover {
+                background: #d84315; border-color: #ff5722;
+            }
+            QPushButton:disabled {
+                background: #2a2a2a; color: #555555; border-color: #333333;
+            }
+        """)
+        self.btn_review.clicked.connect(self.review_differences_requested.emit)
+        layout.addWidget(self.btn_review)
+
+        # Row 2: [ Show Current ] [ Show Previous ] [ Clear ]
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(4)
+
+        self.btn_show_current = QPushButton("Show Current")
+        self.btn_show_current.setFixedHeight(22)
+        self.btn_show_current.setStyleSheet("""
+            QPushButton {
+                background: #242424; color: #ffffff; border: 1px solid #3a3a3a;
+                border-radius: 3px; font-size: 9px; font-weight: 600;
+            }
+            QPushButton:hover { background: #333333; border-color: #00e5ff; }
+        """)
+        self.btn_show_current.clicked.connect(self.show_current_requested.emit)
+        btn_row.addWidget(self.btn_show_current)
+
+        self.btn_show_previous = QPushButton("Show Previous")
+        self.btn_show_previous.setFixedHeight(22)
+        self.btn_show_previous.setStyleSheet("""
+            QPushButton {
+                background: #242424; color: #ffffff; border: 1px solid #3a3a3a;
+                border-radius: 3px; font-size: 9px; font-weight: 600;
+            }
+            QPushButton:hover { background: #333333; border-color: #00e5ff; }
+        """)
+        self.btn_show_previous.clicked.connect(self.show_previous_requested.emit)
+        btn_row.addWidget(self.btn_show_previous)
+
+        self.btn_clear = QPushButton("Clear")
+        self.btn_clear.setFixedHeight(22)
+        self.btn_clear.setStyleSheet("""
+            QPushButton {
+                background: #1c1c1c; color: #888888; border: 1px solid #333333;
+                border-radius: 3px; font-size: 9px; font-weight: 600;
+            }
+            QPushButton:hover { background: #282828; color: #ff5555; border-color: #ff5555; }
+        """)
+        self.btn_clear.clicked.connect(self.clear_difference_requested.emit)
+        btn_row.addWidget(self.btn_clear)
+
+        layout.addLayout(btn_row)
+
+    def _on_slider_changed(self, value: int):
+        self.threshold = float(value)
+        self.lbl_thresh_val.setText(f"{value} HU")
+        self.difference_threshold_changed.emit(self.threshold)
+
+    def set_scan_context(self, current_scan_id: str, previous_scan_id: str):
+        self.current_scan_id = str(current_scan_id or "None")
+        self.previous_scan_id = str(previous_scan_id or "None")
+        self.lbl_current_scan.setText(f"Current: {self.current_scan_id}")
+        self.lbl_previous_scan.setText(f"Previous: {self.previous_scan_id}")
+
+    def update_from_review(self, change_review):
+        """Updates UI state from a ChangeReview instance."""
+        if change_review is None:
+            self.reset_ui()
+            return
+
+        c_id = change_review.current_scan_id or "None"
+        p_id = change_review.previous_scan_id or "None"
+        self.set_scan_context(c_id, p_id)
+
+        self.threshold = change_review.threshold
+        self.slider_threshold.blockSignals(True)
+        self.slider_threshold.setValue(int(self.threshold))
+        self.slider_threshold.blockSignals(False)
+        self.lbl_thresh_val.setText(f"{int(self.threshold)} HU")
+
+        if change_review.enabled and change_review.difference_available:
+            self.lbl_header_status.setText("Difference map active")
+            self.lbl_header_status.setStyleSheet("color: #ff5722; font-size: 10px; font-weight: bold;")
+            self.lbl_status.setText("Status: Difference map available")
+            self.lbl_status.setStyleSheet("color: #7cfc00; font-size: 9px;")
+            count = change_review.get_changed_voxel_count()
+            self.lbl_changed_voxels.setText(f"Changed voxels: {count:,}  ·  Difference threshold: {int(self.threshold)} HU")
+            self.lbl_changed_voxels.setVisible(True)
+        elif not change_review.difference_available and change_review.status_message != "No difference review active":
+            self.lbl_header_status.setText("Unavailable")
+            self.lbl_header_status.setStyleSheet("color: #ffb300; font-size: 10px;")
+            self.lbl_status.setText(f"Status: {change_review.status_message}")
+            self.lbl_status.setStyleSheet("color: #ffb300; font-size: 9px;")
+            self.lbl_changed_voxels.setVisible(False)
+        else:
+            self.reset_ui()
+
+    def reset_ui(self):
+        self.lbl_header_status.setText("No difference review active")
+        self.lbl_header_status.setStyleSheet("color: #888888; font-size: 10px;")
+        self.lbl_status.setText("Status: No difference review active")
+        self.lbl_status.setStyleSheet("color: #888888; font-size: 9px;")
+        self.lbl_changed_voxels.setVisible(False)
+
+
+class DeviceMarkersCard(QFrame):
+    """ICU Feature 6: Device Markers card.
+
+    Allows a clinician to place, view, and manage visual markers for medical devices
+    visible on an imaging scan (e.g. Endotracheal Tube, Central Line, Feeding Tube,
+    Drain, Catheter, Other) so their locations can be quickly identified.
+
+    Zero clinical interpretation:
+    - Never claims correct/incorrect position, displacement, migration, or complication.
+    - Pure visual marker and navigation aid.
+    """
+    mark_device_requested = pyqtSignal(str, str)             # device_type, label
+    view_device_marker_requested = pyqtSignal(str)           # marker_id
+    delete_device_marker_requested = pyqtSignal(str)         # marker_id
+    clear_device_marker_selection_requested = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFrameShape(QFrame.Shape.StyledPanel)
+        self.setStyleSheet("""
+            QFrame {
+                background: #141414;
+                border: 1px solid #2a2a2a;
+                border-radius: 4px;
+            }
+        """)
+        self.markers: list = []
+        self.selected_marker_id: Optional[str] = None
+        self.current_scan_id: Optional[str] = None
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 6, 8, 6)
+        layout.setSpacing(4)
+
+        # 1. Header with title and status
+        hdr_layout = QHBoxLayout()
+        hdr_layout.setSpacing(6)
+        self.lbl_title = QLabel("<b>Device Markers</b>")
+        self.lbl_title.setStyleSheet("color: #00bfa5; font-size: 11px; font-weight: bold;")
+        hdr_layout.addWidget(self.lbl_title)
+        hdr_layout.addStretch(1)
+
+        self.lbl_header_status = QLabel("No device markers")
+        self.lbl_header_status.setStyleSheet("color: #888888; font-size: 10px;")
+        hdr_layout.addWidget(self.lbl_header_status)
+        layout.addLayout(hdr_layout)
+
+        # 2. Controls Box: Device Type & Label input
+        ctrl_box = QFrame()
+        ctrl_box.setStyleSheet("background: #111111; border: 1px solid #222222; border-radius: 3px; padding: 4px;")
+        ctrl_layout = QVBoxLayout(ctrl_box)
+        ctrl_layout.setContentsMargins(4, 4, 4, 4)
+        ctrl_layout.setSpacing(4)
+
+        # Device Type Row
+        type_row = QHBoxLayout()
+        lbl_type = QLabel("Device Type:")
+        lbl_type.setStyleSheet("color: #aaaaaa; font-size: 9px; font-weight: 600;")
+        type_row.addWidget(lbl_type)
+
+        self.combo_device_type = QComboBox()
+        self.combo_device_type.setFixedHeight(22)
+        from device_markers import CONTROLLED_DEVICE_TYPES
+        for dt in CONTROLLED_DEVICE_TYPES:
+            self.combo_device_type.addItem(dt)
+        self.combo_device_type.setStyleSheet("""
+            QComboBox {
+                background: #1c1c1c; color: #ffffff; border: 1px solid #333333;
+                border-radius: 3px; font-size: 9px; padding: 1px 4px;
+            }
+            QComboBox QAbstractItemView {
+                background: #1c1c1c; color: #ffffff; selection-background-color: #00bfa5;
+            }
+        """)
+        type_row.addWidget(self.combo_device_type, 1)
+        ctrl_layout.addLayout(type_row)
+
+        # Label Row
+        lbl_row = QHBoxLayout()
+        lbl_txt = QLabel("Label:")
+        lbl_txt.setStyleSheet("color: #aaaaaa; font-size: 9px; font-weight: 600;")
+        lbl_row.addWidget(lbl_txt)
+
+        self.txt_label = QLineEdit()
+        self.txt_label.setFixedHeight(22)
+        self.txt_label.setPlaceholderText("Optional label (e.g. #1, Right)")
+        self.txt_label.setStyleSheet("""
+            QLineEdit {
+                background: #1c1c1c; color: #ffffff; border: 1px solid #333333;
+                border-radius: 3px; font-size: 9px; padding: 1px 4px;
+            }
+            QLineEdit:focus { border-color: #00bfa5; }
+        """)
+        lbl_row.addWidget(self.txt_label, 1)
+        ctrl_layout.addLayout(lbl_row)
+
+        # Mark Device Button
+        self.btn_mark = QPushButton("Mark Device")
+        self.btn_mark.setFixedHeight(24)
+        self.btn_mark.setStyleSheet("""
+            QPushButton {
+                background: #004d40; color: #ffffff; border: 1px solid #00bfa5;
+                border-radius: 3px; font-size: 10px; font-weight: bold;
+            }
+            QPushButton:hover {
+                background: #00695c; border-color: #1de9b6;
+            }
+            QPushButton:disabled {
+                background: #2a2a2a; color: #555555; border-color: #333333;
+            }
+        """)
+        self.btn_mark.clicked.connect(self._on_mark_clicked)
+        ctrl_layout.addWidget(self.btn_mark)
+
+        layout.addWidget(ctrl_box)
+
+        # 3. Markers List
+        self.list_markers = QListWidget()
+        self.list_markers.setFixedHeight(80)
+        self.list_markers.setStyleSheet("""
+            QListWidget {
+                background: #0d0d0d; border: 1px solid #222222; border-radius: 3px;
+                color: #dddddd; font-size: 9px;
+            }
+            QListWidget::item { padding: 3px 4px; border-bottom: 1px solid #1a1a1a; }
+            QListWidget::item:selected { background: #004d40; color: #ffffff; }
+            QListWidget::item:hover { background: #161616; }
+        """)
+        self.list_markers.itemSelectionChanged.connect(self._on_selection_changed)
+        layout.addWidget(self.list_markers)
+
+        # 4. Action Buttons: [ View Selected ] [ Clear Selection ] [ Delete Marker ]
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(4)
+
+        self.btn_view_selected = QPushButton("View Selected")
+        self.btn_view_selected.setFixedHeight(22)
+        self.btn_view_selected.setEnabled(False)
+        self.btn_view_selected.setStyleSheet("""
+            QPushButton {
+                background: #242424; color: #ffffff; border: 1px solid #3a3a3a;
+                border-radius: 3px; font-size: 9px; font-weight: 600;
+            }
+            QPushButton:hover { background: #333333; border-color: #00bfa5; }
+            QPushButton:disabled { background: #1c1c1c; color: #555555; border-color: #2a2a2a; }
+        """)
+        self.btn_view_selected.clicked.connect(self._on_view_selected)
+        btn_row.addWidget(self.btn_view_selected)
+
+        self.btn_clear_selection = QPushButton("Clear Selection")
+        self.btn_clear_selection.setFixedHeight(22)
+        self.btn_clear_selection.setEnabled(False)
+        self.btn_clear_selection.setStyleSheet("""
+            QPushButton {
+                background: #1c1c1c; color: #888888; border: 1px solid #333333;
+                border-radius: 3px; font-size: 9px; font-weight: 600;
+            }
+            QPushButton:hover { background: #282828; color: #ffffff; }
+            QPushButton:disabled { background: #1c1c1c; color: #444444; border-color: #222222; }
+        """)
+        self.btn_clear_selection.clicked.connect(self._on_clear_selection)
+        btn_row.addWidget(self.btn_clear_selection)
+
+        self.btn_delete = QPushButton("Delete Marker")
+        self.btn_delete.setFixedHeight(22)
+        self.btn_delete.setEnabled(False)
+        self.btn_delete.setStyleSheet("""
+            QPushButton {
+                background: #1c1c1c; color: #ff5252; border: 1px solid #333333;
+                border-radius: 3px; font-size: 9px; font-weight: 600;
+            }
+            QPushButton:hover { background: #2a1414; border-color: #ff5252; }
+            QPushButton:disabled { background: #1c1c1c; color: #553333; border-color: #222222; }
+        """)
+        self.btn_delete.clicked.connect(self._on_delete_clicked)
+        btn_row.addWidget(self.btn_delete)
+
+        layout.addLayout(btn_row)
+
+    def _on_mark_clicked(self):
+        dtype = self.combo_device_type.currentText()
+        lbl = self.txt_label.text().strip()
+        if not lbl and dtype != "Other":
+            lbl = dtype
+        elif not lbl and dtype == "Other":
+            lbl = "Other Device"
+        self.mark_device_requested.emit(dtype, lbl)
+
+    def _on_selection_changed(self):
+        items = self.list_markers.selectedItems()
+        if not items:
+            self.selected_marker_id = None
+            self.btn_view_selected.setEnabled(False)
+            self.btn_clear_selection.setEnabled(False)
+            self.btn_delete.setEnabled(False)
+            return
+
+        item = items[0]
+        self.selected_marker_id = item.data(Qt.ItemDataRole.UserRole)
+        self.btn_view_selected.setEnabled(bool(self.selected_marker_id))
+        self.btn_clear_selection.setEnabled(bool(self.selected_marker_id))
+        self.btn_delete.setEnabled(bool(self.selected_marker_id))
+
+    def _on_view_selected(self):
+        if self.selected_marker_id:
+            self.view_device_marker_requested.emit(self.selected_marker_id)
+
+    def _on_clear_selection(self):
+        self.list_markers.clearSelection()
+        self.selected_marker_id = None
+        self.btn_view_selected.setEnabled(False)
+        self.btn_clear_selection.setEnabled(False)
+        self.btn_delete.setEnabled(False)
+        self.clear_device_marker_selection_requested.emit()
+
+    def _on_delete_clicked(self):
+        if self.selected_marker_id:
+            self.delete_device_marker_requested.emit(self.selected_marker_id)
+
+    def update_markers(self, markers: list, selected_id: Optional[str] = None):
+        """Updates the list of device markers from DeviceMarker domain models or dicts."""
+        self.markers = list(markers) if markers else []
+        self.list_markers.blockSignals(True)
+        self.list_markers.clear()
+
+        selected_item = None
+        for m in self.markers:
+            if hasattr(m, "id"):
+                mid = m.id
+                dtype = m.device_type
+                lbl = m.label
+                sid = m.scan_id
+                x, y, z = m.physical_coordinates
+            else:
+                mid = m.get("id", "")
+                dtype = m.get("device_type", "Other")
+                lbl = m.get("label", "Device")
+                sid = m.get("scan_id", "")
+                x = float(m.get("physical_x_mm", 0.0))
+                y = float(m.get("physical_y_mm", 0.0))
+                z = float(m.get("physical_z_mm", 0.0))
+
+            text = f"• {dtype}: {lbl}\n  Scan: {sid} | Loc: ({x:.1f}, {y:.1f}, {z:.1f}) mm"
+            item = QListWidgetItem(text)
+            item.setData(Qt.ItemDataRole.UserRole, mid)
+            self.list_markers.addItem(item)
+            if selected_id and mid == selected_id:
+                selected_item = item
+
+        self.list_markers.blockSignals(False)
+
+        count = len(self.markers)
+        if count == 0:
+            self.lbl_header_status.setText("No device markers")
+        else:
+            self.lbl_header_status.setText(f"{count} device{'s' if count != 1 else ''} marked")
+
+        if selected_item:
+            self.list_markers.setCurrentItem(selected_item)
+            self.selected_marker_id = selected_id
+            self.btn_view_selected.setEnabled(True)
+            self.btn_clear_selection.setEnabled(True)
+            self.btn_delete.setEnabled(True)
+        else:
+            self.selected_marker_id = None
+            self.btn_view_selected.setEnabled(False)
+            self.btn_clear_selection.setEnabled(False)
+            self.btn_delete.setEnabled(False)
+
+    def update_card(self, manager):
+        """Helper to update card from a DeviceMarkerManager instance."""
+        if manager is None:
+            self.reset_ui()
+            return
+        markers = manager.get_markers_for_active_scan()
+        self.update_markers(markers, manager.selected_marker_id)
+
+    def reset_ui(self):
+        self.markers = []
+        self.selected_marker_id = None
+        self.list_markers.clear()
+        self.lbl_header_status.setText("No device markers")
+        self.txt_label.clear()
+        self.btn_view_selected.setEnabled(False)
+        self.btn_clear_selection.setEnabled(False)
+        self.btn_delete.setEnabled(False)
+
+
+class QuickHandoffCard(QFrame):
+    """ICU Feature 7: Quick Handoff card.
+
+    Provides a compact, deterministic review context tool that helps one clinician rapidly
+    communicate the current imaging-review workspace context to another clinician.
+
+    Zero clinical interpretation:
+    - Never generates diagnosis, recommendations, treatment instructions, or claims of improvement/deterioration.
+    - Purely summarizes existing application state.
+    """
+    generate_handoff_requested = pyqtSignal()
+    copy_handoff_requested = pyqtSignal()
+    view_handoff_requested = pyqtSignal()
+    clear_handoff_requested = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFrameShape(QFrame.Shape.StyledPanel)
+        self.setStyleSheet("""
+            QFrame {
+                background: #141414;
+                border: 1px solid #2a2a2a;
+                border-radius: 4px;
+            }
+        """)
+        self.handoff_snapshot = None
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 6, 8, 6)
+        layout.setSpacing(4)
+
+        # 1. Header with title and status
+        hdr_layout = QHBoxLayout()
+        hdr_layout.setSpacing(6)
+        self.lbl_title = QLabel("<b>Quick Handoff</b>")
+        self.lbl_title.setStyleSheet("color: #00e5ff; font-size: 11px; font-weight: bold;")
+        hdr_layout.addWidget(self.lbl_title)
+        hdr_layout.addStretch(1)
+
+        self.lbl_header_status = QLabel("No handoff generated")
+        self.lbl_header_status.setStyleSheet("color: #888888; font-size: 10px;")
+        hdr_layout.addWidget(self.lbl_header_status)
+        layout.addLayout(hdr_layout)
+
+        # 2. Preview Box (Compact review context)
+        self.preview_box = QFrame()
+        self.preview_box.setStyleSheet("background: #111111; border: 1px solid #222222; border-radius: 3px; padding: 4px;")
+        p_layout = QVBoxLayout(self.preview_box)
+        p_layout.setContentsMargins(4, 4, 4, 4)
+        p_layout.setSpacing(2)
+
+        self.lbl_patient = QLabel("Patient: None")
+        self.lbl_patient.setStyleSheet("color: #cccccc; font-size: 9px;")
+        p_layout.addWidget(self.lbl_patient)
+
+        self.lbl_scans = QLabel("Current: None | Previous: None")
+        self.lbl_scans.setStyleSheet("color: #aaaaaa; font-size: 9px;")
+        p_layout.addWidget(self.lbl_scans)
+
+        self.lbl_context_hdr = QLabel("<b>Review Context:</b>")
+        self.lbl_context_hdr.setStyleSheet("color: #00e5ff; font-size: 9px; margin-top: 2px;")
+        p_layout.addWidget(self.lbl_context_hdr)
+
+        self.lbl_diff_review = QLabel("• Difference Review: Inactive")
+        self.lbl_diff_review.setStyleSheet("color: #888888; font-size: 9px;")
+        p_layout.addWidget(self.lbl_diff_review)
+
+        self.lbl_same_loc = QLabel("• Same Location: None")
+        self.lbl_same_loc.setStyleSheet("color: #888888; font-size: 9px;")
+        p_layout.addWidget(self.lbl_same_loc)
+
+        self.lbl_meas = QLabel("• Tracked Measurements: None recorded")
+        self.lbl_meas.setStyleSheet("color: #888888; font-size: 9px;")
+        p_layout.addWidget(self.lbl_meas)
+
+        self.lbl_annots = QLabel("• Annotations: None recorded")
+        self.lbl_annots.setStyleSheet("color: #888888; font-size: 9px;")
+        p_layout.addWidget(self.lbl_annots)
+
+        self.lbl_devices = QLabel("• Device Markers: None recorded")
+        self.lbl_devices.setStyleSheet("color: #888888; font-size: 9px;")
+        p_layout.addWidget(self.lbl_devices)
+
+        layout.addWidget(self.preview_box)
+
+        # 3. Action Buttons: [ Generate Handoff ] [ Copy Summary ] [ View Summary ] [ Clear ]
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(4)
+
+        self.btn_generate = QPushButton("Generate Handoff")
+        self.btn_generate.setFixedHeight(22)
+        self.btn_generate.setStyleSheet("""
+            QPushButton {
+                background: #002e3b; color: #00e5ff; border: 1px solid #00e5ff;
+                border-radius: 3px; font-size: 9px; font-weight: 600;
+            }
+            QPushButton:hover { background: #004d61; }
+        """)
+        self.btn_generate.clicked.connect(self.generate_handoff_requested.emit)
+        btn_row.addWidget(self.btn_generate)
+
+        self.btn_copy = QPushButton("Copy Summary")
+        self.btn_copy.setFixedHeight(22)
+        self.btn_copy.setEnabled(False)
+        self.btn_copy.setStyleSheet("""
+            QPushButton {
+                background: #1c1c1c; color: #ffffff; border: 1px solid #333333;
+                border-radius: 3px; font-size: 9px; font-weight: 600;
+            }
+            QPushButton:hover { background: #282828; }
+            QPushButton:disabled { background: #141414; color: #444444; border-color: #222222; }
+        """)
+        self.btn_copy.clicked.connect(self.copy_handoff_requested.emit)
+        btn_row.addWidget(self.btn_copy)
+
+        self.btn_view = QPushButton("View Summary")
+        self.btn_view.setFixedHeight(22)
+        self.btn_view.setEnabled(False)
+        self.btn_view.setStyleSheet("""
+            QPushButton {
+                background: #1c1c1c; color: #ffffff; border: 1px solid #333333;
+                border-radius: 3px; font-size: 9px; font-weight: 600;
+            }
+            QPushButton:hover { background: #282828; }
+            QPushButton:disabled { background: #141414; color: #444444; border-color: #222222; }
+        """)
+        self.btn_view.clicked.connect(self.view_handoff_requested.emit)
+        btn_row.addWidget(self.btn_view)
+
+        self.btn_clear = QPushButton("Clear")
+        self.btn_clear.setFixedHeight(22)
+        self.btn_clear.setEnabled(False)
+        self.btn_clear.setStyleSheet("""
+            QPushButton {
+                background: #1c1c1c; color: #888888; border: 1px solid #333333;
+                border-radius: 3px; font-size: 9px; font-weight: 600;
+            }
+            QPushButton:hover { background: #282828; color: #ffffff; }
+            QPushButton:disabled { background: #141414; color: #444444; border-color: #222222; }
+        """)
+        self.btn_clear.clicked.connect(self.clear_handoff_requested.emit)
+        btn_row.addWidget(self.btn_clear)
+
+        layout.addLayout(btn_row)
+
+    def update_card(self, handoff):
+        self.handoff_snapshot = handoff
+        if handoff is None:
+            self.reset_ui()
+            return
+
+        if handoff.is_stale:
+            self.lbl_header_status.setText("Handoff snapshot is stale")
+            self.lbl_header_status.setStyleSheet("color: #ff9800; font-size: 10px; font-weight: 600;")
+        else:
+            self.lbl_header_status.setText("Snapshot active")
+            self.lbl_header_status.setStyleSheet("color: #7cfc00; font-size: 10px; font-weight: 600;")
+
+        self.lbl_patient.setText(f"Patient: {handoff.patient_display_name or 'Not available'} ({handoff.patient_mrn or '—'})")
+        prev_str = handoff.previous_scan_id or "None available"
+        self.lbl_scans.setText(f"Current: {handoff.current_scan_id or 'Not available'} | Previous: {prev_str}")
+
+        # Difference review
+        diff = handoff.difference_review_summary
+        if diff.get("active", False):
+            self.lbl_diff_review.setText(f"• Difference Review: Active ({diff.get('changed_voxels', 0):,} voxels, {diff.get('threshold_hu', 50):.0f} HU)")
+        elif diff.get("available", False):
+            self.lbl_diff_review.setText("• Difference Review: Inactive")
+        else:
+            self.lbl_diff_review.setText(f"• Difference Review: {diff.get('status', 'Difference map unavailable')}")
+
+        # Same location
+        sl = handoff.same_location_summary
+        if sl.get("is_valid", False):
+            coords = sl.get("coordinates")
+            c_str = f"({coords[0]:.1f}, {coords[1]:.1f}, {coords[2]:.1f}) mm" if coords else "Selected"
+            self.lbl_same_loc.setText(f"• Same Location: {c_str} ({sl.get('status', 'Approx. Correspondence')})")
+        else:
+            self.lbl_same_loc.setText(f"• Same Location: None selected")
+
+        # Measurements
+        m_items = handoff.measurement_summary.get("items", [])
+        self.lbl_meas.setText(f"• Tracked Measurements: {len(m_items)} recorded" if m_items else "• Tracked Measurements: None recorded")
+
+        # Annotations
+        a_items = handoff.annotation_summary.get("items", [])
+        self.lbl_annots.setText(f"• Annotations: {len(a_items)} recorded" if a_items else "• Annotations: None recorded")
+
+        # Devices
+        d_items = handoff.device_marker_summary.get("items", [])
+        self.lbl_devices.setText(f"• Device Markers: {len(d_items)} user-placed" if d_items else "• Device Markers: None recorded")
+
+        self.btn_copy.setEnabled(True)
+        self.btn_view.setEnabled(True)
+        self.btn_clear.setEnabled(True)
+
+    def mark_stale(self):
+        if self.handoff_snapshot:
+            self.handoff_snapshot.is_stale = True
+            self.lbl_header_status.setText("Handoff snapshot is stale")
+            self.lbl_header_status.setStyleSheet("color: #ff9800; font-size: 10px; font-weight: 600;")
+
+    def reset_ui(self):
+        self.handoff_snapshot = None
+        self.lbl_header_status.setText("No handoff generated")
+        self.lbl_header_status.setStyleSheet("color: #888888; font-size: 10px;")
+        self.lbl_patient.setText("Patient: None")
+        self.lbl_scans.setText("Current: None | Previous: None")
+        self.lbl_diff_review.setText("• Difference Review: Inactive")
+        self.lbl_same_loc.setText("• Same Location: None")
+        self.lbl_meas.setText("• Tracked Measurements: None recorded")
+        self.lbl_annots.setText("• Annotations: None recorded")
+        self.lbl_devices.setText("• Device Markers: None recorded")
+        self.btn_copy.setEnabled(False)
+        self.btn_view.setEnabled(False)
+        self.btn_clear.setEnabled(False)
+
+
+class QuickHandoffDialog(QDialog):
+    """Modal dialog displaying the full Quick Handoff summary text."""
+
+    def __init__(self, summary_text: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Quick Handoff — Workspace Summary")
+        self.resize(560, 480)
+        self.setStyleSheet("background: #141414; color: #ffffff;")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+
+        self.text_edit = QTextEdit()
+        self.text_edit.setReadOnly(True)
+        self.text_edit.setPlainText(summary_text)
+        self.text_edit.setStyleSheet("""
+            QTextEdit {
+                background: #0d0d0d;
+                color: #e0e0e0;
+                font-family: monospace;
+                font-size: 10px;
+                border: 1px solid #2a2a2a;
+                border-radius: 4px;
+                padding: 6px;
+            }
+        """)
+        layout.addWidget(self.text_edit)
+
+        btn_box = QHBoxLayout()
+        btn_box.addStretch(1)
+
+        self.btn_copy = QPushButton("Copy to Clipboard")
+        self.btn_copy.setStyleSheet("""
+            QPushButton {
+                background: #002e3b; color: #00e5ff; border: 1px solid #00e5ff;
+                border-radius: 3px; padding: 4px 12px; font-size: 11px; font-weight: 600;
+            }
+            QPushButton:hover { background: #004d61; }
+        """)
+        self.btn_copy.clicked.connect(self._copy_to_clipboard)
+        btn_box.addWidget(self.btn_copy)
+
+        self.btn_close = QPushButton("Close")
+        self.btn_close.setStyleSheet("""
+            QPushButton {
+                background: #1c1c1c; color: #888888; border: 1px solid #333333;
+                border-radius: 3px; padding: 4px 12px; font-size: 11px;
+            }
+            QPushButton:hover { background: #282828; color: #ffffff; }
+        """)
+        self.btn_close.clicked.connect(self.accept)
+        btn_box.addWidget(self.btn_close)
+
+        layout.addLayout(btn_box)
+
+    def _copy_to_clipboard(self):
+        from PyQt6.QtWidgets import QApplication
+        cb = QApplication.clipboard()
+        if cb:
+            cb.setText(self.text_edit.toPlainText())
+
+
+
 class BeforeAfterCard(QFrame):
+
 
     """OR Feature 8: BEFORE vs AFTER comparison card.
 
@@ -2654,6 +3726,34 @@ class OrIcuMode(QWidget):
     icu_delete_tracked_measurement_requested = pyqtSignal(str)
     icu_measurement_selection_changed = pyqtSignal(str, str)
 
+    # ICU Feature 4: Annotation Carry-forward signals
+    icu_create_annotation_requested = pyqtSignal()
+    icu_select_annotation_requested = pyqtSignal(str)
+    icu_carry_forward_requested = pyqtSignal(str)
+    icu_view_annotation_source_requested = pyqtSignal(str)
+    icu_view_annotation_target_requested = pyqtSignal(str)
+    icu_delete_annotation_requested = pyqtSignal(str)
+    icu_clear_annotation_selection_requested = pyqtSignal()
+
+    # ICU Feature 5: What Changed? signals
+    icu_review_differences_requested = pyqtSignal()
+    icu_show_current_requested = pyqtSignal()
+    icu_show_previous_requested = pyqtSignal()
+    icu_difference_threshold_changed = pyqtSignal(float)
+    icu_clear_difference_requested = pyqtSignal()
+
+    # ICU Feature 6: Device Markers signals
+    icu_mark_device_requested = pyqtSignal(str, str)
+    icu_view_device_marker_requested = pyqtSignal(str)
+    icu_delete_device_marker_requested = pyqtSignal(str)
+    icu_clear_device_marker_selection_requested = pyqtSignal()
+
+    # ICU Feature 7: Quick Handoff signals
+    icu_generate_handoff_requested = pyqtSignal()
+    icu_copy_handoff_requested = pyqtSignal()
+    icu_view_handoff_requested = pyqtSignal()
+    icu_clear_handoff_requested = pyqtSignal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.current_patient: dict = {}
@@ -2665,6 +3765,9 @@ class OrIcuMode(QWidget):
         self.current_previous_card = None
         self.same_location_card = None
         self.measurement_tracking_card = None
+        self.annotation_carry_forward_card = None
+        self.what_changed_card = None
+        self.device_markers_card = None
         self.structures_to_avoid_card = None
         self.surgical_corridor_card = None
         self.virtual_instrument_card = None
@@ -2730,6 +3833,9 @@ class OrIcuMode(QWidget):
         if hasattr(self, "quick_views_card") and self.quick_views_card:
             self.quick_views_card.set_active_preset(None)
             self.quick_views_card.update_availability(self.surgical_plan)
+
+        if hasattr(self, "quick_handoff_card") and self.quick_handoff_card:
+            self.quick_handoff_card.reset_ui()
 
         self._update_session_ui()
         self.state_stack.setCurrentIndex(1)
@@ -3260,15 +4366,81 @@ class OrIcuMode(QWidget):
             )
             self.workflow_items_layout.addWidget(self.measurement_tracking_card)
 
-            # Remaining 4 ICU workflow placeholders (Features 4-7)
-            icu_items = [
-                ("Annotation Carry-forward", "No previous annotations"),
-                ("What Changed?", "Objective study differences"),
-                ("Device Markers", "0 devices marked"),
-                ("Quick Handoff", "Ready to generate case report"),
-            ]
-            for title, subtitle in icu_items:
-                self._add_workflow_action_card(title, subtitle, accent_color="#00e5ff")
+            # 4. Dedicated ICU Feature 4: Annotation Carry-forward Card
+            self.annotation_carry_forward_card = AnnotationCarryForwardCard()
+            self.annotation_carry_forward_card.create_annotation_requested.connect(
+                self.icu_create_annotation_requested.emit
+            )
+            self.annotation_carry_forward_card.select_annotation_requested.connect(
+                self.icu_select_annotation_requested.emit
+            )
+            self.annotation_carry_forward_card.carry_forward_requested.connect(
+                self.icu_carry_forward_requested.emit
+            )
+            self.annotation_carry_forward_card.view_source_requested.connect(
+                self.icu_view_annotation_source_requested.emit
+            )
+            self.annotation_carry_forward_card.view_target_requested.connect(
+                self.icu_view_annotation_target_requested.emit
+            )
+            self.annotation_carry_forward_card.delete_annotation_requested.connect(
+                self.icu_delete_annotation_requested.emit
+            )
+            self.annotation_carry_forward_card.clear_selection_requested.connect(
+                self.icu_clear_annotation_selection_requested.emit
+            )
+            self.workflow_items_layout.addWidget(self.annotation_carry_forward_card)
+
+            # 5. Dedicated ICU Feature 5: What Changed? Card
+            self.what_changed_card = WhatChangedCard()
+            self.what_changed_card.review_differences_requested.connect(
+                self.icu_review_differences_requested.emit
+            )
+            self.what_changed_card.show_current_requested.connect(
+                self.icu_show_current_requested.emit
+            )
+            self.what_changed_card.show_previous_requested.connect(
+                self.icu_show_previous_requested.emit
+            )
+            self.what_changed_card.difference_threshold_changed.connect(
+                self.icu_difference_threshold_changed.emit
+            )
+            self.what_changed_card.clear_difference_requested.connect(
+                self.icu_clear_difference_requested.emit
+            )
+            self.workflow_items_layout.addWidget(self.what_changed_card)
+
+            # 6. Dedicated ICU Feature 6: Device Markers Card
+            self.device_markers_card = DeviceMarkersCard()
+            self.device_markers_card.mark_device_requested.connect(
+                self.icu_mark_device_requested.emit
+            )
+            self.device_markers_card.view_device_marker_requested.connect(
+                self.icu_view_device_marker_requested.emit
+            )
+            self.device_markers_card.delete_device_marker_requested.connect(
+                self.icu_delete_device_marker_requested.emit
+            )
+            self.device_markers_card.clear_device_marker_selection_requested.connect(
+                self.icu_clear_device_marker_selection_requested.emit
+            )
+            self.workflow_items_layout.addWidget(self.device_markers_card)
+
+            # 7. Dedicated ICU Feature 7: Quick Handoff Card
+            self.quick_handoff_card = QuickHandoffCard()
+            self.quick_handoff_card.generate_handoff_requested.connect(
+                self.icu_generate_handoff_requested.emit
+            )
+            self.quick_handoff_card.copy_handoff_requested.connect(
+                self.icu_copy_handoff_requested.emit
+            )
+            self.quick_handoff_card.view_handoff_requested.connect(
+                self.icu_view_handoff_requested.emit
+            )
+            self.quick_handoff_card.clear_handoff_requested.connect(
+                self.icu_clear_handoff_requested.emit
+            )
+            self.workflow_items_layout.addWidget(self.quick_handoff_card)
         else:
             # 1. Dedicated Interactive Entry + Target Card
             self.entry_target_card = EntryTargetCard()

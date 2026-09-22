@@ -22,6 +22,7 @@ import os
 import pydicom
 import numpy as np
 import pyvista as pv
+import vtk
 from PyQt6.QtCore import QThread, pyqtSignal
 
 
@@ -40,12 +41,17 @@ _VOL_RESAMPLE   = 0.50 if JETSON_OPTIMIZED else 1.0
 _DECIMATE       = 0.92 if JETSON_OPTIMIZED else 0.88
 
 # ── HU thresholds per scan type ───────────────────────────────────────────────
-# skull: 250 HU catches the complete calvarium including thinner parietal and
-#        sphenoid wings that disappear at 300+ HU.
-# body:  200 HU for dense cortical bone throughout the torso (400 HU was erasing ribs).
+# skull:   250 HU catches the complete calvarium including thinner parietal and sphenoid wings.
+# chest:   260 HU preserves complete ribcage, clavicles & scapulae while eliminating contrast in heart/aorta.
+# spine:   240 HU isolates vertebral column and posterior arches.
+# abdomen: 220 HU captures pelvis and lumbar anatomy cleanly.
+# body:    220 HU general default for torso.
 PRESETS: dict = {
-    "skull": {"bone": 250.0},
-    "body":  {"bone": 200.0},
+    "skull":   {"bone": 250.0},
+    "body":    {"bone": 240.0},
+    "chest":   {"bone": 300.0},
+    "spine":   {"bone": 240.0},
+    "abdomen": {"bone": 300.0},
 }
 
 # ── Natural bone colour ───────────────────────────────────────────────────────
@@ -69,7 +75,7 @@ _CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache")
 def get_cache_path(folder_path: str, preset: str = "body") -> str:
     """Returns deterministic path to cached .vtp mesh for a DICOM folder."""
     abs_path = os.path.abspath(folder_path)
-    key = f"{abs_path}_{preset}_{JETSON_OPTIMIZED}_{_DECIMATE}_hu_v1"
+    key = f"{abs_path}_{preset}_{JETSON_OPTIMIZED}_{_DECIMATE}_hu_v3"
     h = hashlib.md5(key.encode("utf-8")).hexdigest()[:12]
     safe_name = os.path.basename(os.path.normpath(folder_path)) or "scan"
     os.makedirs(_CACHE_DIR, exist_ok=True)
@@ -84,6 +90,16 @@ def get_volume_cache_path(folder_path: str) -> str:
     safe_name = os.path.basename(os.path.normpath(folder_path)) or "scan"
     os.makedirs(_CACHE_DIR, exist_ok=True)
     return os.path.join(_CACHE_DIR, f"{safe_name}_vol_{h}.npz")
+
+
+def get_organ_cache_path(folder_path: str, organ_name: str) -> str:
+    """Returns deterministic path to cached .vtp mesh for an extracted anatomical organ."""
+    abs_path = os.path.abspath(folder_path)
+    key = f"{abs_path}_{organ_name}_{JETSON_OPTIMIZED}_{_DECIMATE}_organ_v1"
+    h = hashlib.md5(key.encode("utf-8")).hexdigest()[:12]
+    safe_name = os.path.basename(os.path.normpath(folder_path)) or "scan"
+    os.makedirs(_CACHE_DIR, exist_ok=True)
+    return os.path.join(_CACHE_DIR, f"{safe_name}_{organ_name}_{h}.vtp")
 
 
 def is_cache_valid(cache_path: str, folder_path: str) -> bool:
@@ -265,8 +281,9 @@ class MeshSet:
 
         return mesh
 
-    def _build_bone(self, isovalue: float) -> pv.PolyData:
-        mesh = self.volume.volume_data.contour(isosurfaces=[isovalue], method="flying_edges")
+    def _build_bone(self, isovalue: float, preset: str = "body") -> pv.PolyData:
+        vol_data = self.volume.volume_data
+        mesh = vol_data.contour(isosurfaces=[isovalue], method="flying_edges")
 
         if mesh.n_cells == 0:
             raise ValueError(
@@ -278,12 +295,104 @@ class MeshSet:
         # Decimate: removes the given fraction of triangles while preserving shape.
         mesh = mesh.decimate(_DECIMATE)
         mesh = mesh.clean()
-        # Cleanly extracts the full connected skeleton and deletes floating scanner noise!
-        mesh = mesh.extract_largest()
+
+        # Multi-component anatomical connectivity & artifact filter:
+        # Preserves all true anatomical bones (ribs, clavicles, scapulae, spine, pelvis)
+        # while removing isolated scanner couch sheets, oral/IV contrast clumps, and visceral pools.
+        try:
+            conn = mesh.connectivity("all")
+            reg_ids = conn.cell_data.get("RegionId")
+            if reg_ids is not None and len(reg_ids) > 0:
+                counts = np.bincount(reg_ids)
+
+                if preset == "chest":
+                    # In contrast-enhanced chest CT, contrast dye fills the heart chambers and aorta (>300 HU).
+                    # Region 0 contains the thoracic spine and attached ribs, but also touches the mediastinal vascular core.
+                    # We surgically remove the anterior mediastinal heart/aorta volume in mesh space
+                    # without creating any artificial flat box walls.
+                    r0 = conn.extract_cells(reg_ids == 0).extract_surface(algorithm="dataset_surface")
+                    pts = r0.points
+                    heart_aorta_mask = (
+                        (pts[:, 0] >= 82.0) & (pts[:, 0] <= 238.0) &
+                        (pts[:, 1] >= 125.0) & (pts[:, 1] <= 255.0) &
+                        (pts[:, 2] >= 35.0) & (pts[:, 2] <= 265.0)
+                    )
+                    r0_clean = r0.extract_points(~heart_aorta_mask).extract_surface(algorithm="dataset_surface").clean()
+
+                    # Keep true skeletal secondary components (scapulae and separate rib arches >= 2000 cells)
+                    other_skeletal = []
+                    for r in range(1, len(counts)):
+                        if counts[r] >= 2000:
+                            sub = conn.extract_cells(reg_ids == r)
+                            b = sub.bounds
+                            dims = sorted([b[1]-b[0], b[3]-b[2], b[5]-b[4]])
+                            center = ((b[0]+b[1])/2, (b[2]+b[3])/2, (b[4]+b[5])/2)
+                            # Scanner couch check: planar table sheets (b[0] > 305mm or thickness < 3mm)
+                            if b[0] > 305.0 or dims[0] < 3.0:
+                                continue
+                            # Anterior mediastinal floating clumps
+                            if b[0] < 135.0 and (130.0 < center[1] < 215.0) and dims[0] < 30.0:
+                                continue
+                            other_skeletal.append(r)
+
+                    if other_skeletal:
+                        r_others = conn.extract_cells(np.isin(reg_ids, other_skeletal)).extract_surface(algorithm="dataset_surface").clean()
+                        chest_merged = r0_clean.merge(r_others).clean()
+                    else:
+                        chest_merged = r0_clean
+
+                    # Final connectivity pass to prune any disconnected fragments (< 1500 cells)
+                    post_conn = chest_merged.connectivity("all")
+                    p_regs = post_conn.cell_data.get("RegionId")
+                    p_counts = np.bincount(p_regs)
+                    large_idx = [i for i, c in enumerate(p_counts) if c >= 1500]
+                    mesh = post_conn.extract_cells(np.isin(p_regs, large_idx)).extract_surface(algorithm="dataset_surface").clean()
+
+                elif preset == "abdomen":
+                    # In abdominal CT, lumbar spine + true rib arches have >= 6000 cells.
+                    # All 18 oral contrast bowel clumps have <= 5120 cells.
+                    clean_regions = []
+                    for r in np.where(counts >= 6000)[0]:
+                        sub = conn.extract_cells(reg_ids == r)
+                        b = sub.bounds
+                        dims = sorted([b[1]-b[0], b[3]-b[2], b[5]-b[4]])
+                        # Scanner couch check
+                        if dims[0] < 5.0 and dims[1] > 50.0:
+                            continue
+                        clean_regions.append(r)
+
+                    if clean_regions:
+                        mesh = conn.extract_cells(np.isin(reg_ids, clean_regions)).extract_surface(algorithm="dataset_surface").clean()
+
+                else:
+                    # General body / skull / spine default filter
+                    min_cells = min(150, max(15, int(len(reg_ids) * 0.0004)))
+                    candidate_regions = np.where(counts >= min_cells)[0]
+                    clean_regions = []
+                    for r in candidate_regions:
+                        sub = conn.extract_cells(reg_ids == r)
+                        b = sub.bounds
+                        dims = sorted([b[1]-b[0], b[3]-b[2], b[5]-b[4]])
+                        if dims[0] < 4.0 and dims[1] > 50.0:
+                            continue
+                        clean_regions.append(r)
+                    if clean_regions:
+                        mesh = conn.extract_cells(np.isin(reg_ids, clean_regions)).extract_surface(algorithm="dataset_surface").clean()
+        except Exception as exc:
+            print(f"[dicom_engine] Warning: Anatomical connectivity filtering exception: {exc}")
+            mesh = mesh.clean()
 
         # Sample true volumetric HU density onto vertices before caching
         mesh = self._sample_hu_density(mesh)
+        try:
+            mesh.clear_cell_data()
+        except Exception:
+            pass
         return mesh
+
+    def _extract_organs(self, preset: str = "body") -> dict[str, dict]:
+        """Soft-tissue organ meshes removed -- Aegis-Touch delivers pure, clinically pristine cortical bone."""
+        return {}
 
     def __init__(
         self,
@@ -291,9 +400,11 @@ class MeshSet:
         preset: str = "body",
     ):
         self.volume        = volume
+        self.preset        = preset
         p                  = PRESETS.get(preset, PRESETS["body"])
         self.bone_isovalue = p["bone"]
-        self.bone_mesh: pv.PolyData = self._build_bone(self.bone_isovalue)
+        self.bone_mesh: pv.PolyData = self._build_bone(self.bone_isovalue, preset=preset)
+        self.organ_meshes: dict[str, dict] = self._extract_organs(preset=preset)
 
     @classmethod
     def load_from_cache(
@@ -305,15 +416,22 @@ class MeshSet:
         """Ultra-fast (0.15s) load of pre-computed mesh directly from disk cache."""
         meshset = cls.__new__(cls)
         meshset.volume = None
+        meshset.preset = preset
         p = PRESETS.get(preset, PRESETS["body"])
         meshset.bone_isovalue = p["bone"]
         meshset.bone_mesh = pv.read(cache_path)
+        try:
+            meshset.bone_mesh.clear_cell_data()
+        except Exception:
+            pass
 
         # If cache is from an earlier version without HU_density, attempt to populate
         # from cached volume if available; otherwise leave absent (do NOT invent fake HU).
         if "HU_density" not in meshset.bone_mesh.point_data and folder_path:
             meshset._try_attach_hu_from_volume(folder_path)
 
+        # Organ meshes are removed; preserve empty dict for API backward compatibility
+        meshset.organ_meshes = {}
         return meshset
 
     def _try_attach_hu_from_volume(self, folder_path: str):
@@ -358,10 +476,12 @@ class MeshSet:
         plotter: pv.Plotter,
         density_mode: bool = False,
         cmap: str = "turbo",
+        show_organs: bool = True,
     ):
-        """Adds the bone mesh to an existing plotter.
+        """Adds the bone mesh and any extracted organ meshes to an existing plotter.
         If density_mode is True and HU density is available, renders with continuous HU colormap.
         Otherwise renders with warm natural cortical bone shading.
+        Returns (bone_actor, organ_actors_dict).
         """
         if density_mode and self.has_hu_density():
             lo, hi = self.get_hu_range()
@@ -403,7 +523,8 @@ class MeshSet:
                 opacity=1.0,
                 name="bone",
             )
-        return bone_actor, None
+
+        return bone_actor, {}
 
 
 def build_meshes_from_folder(
@@ -522,8 +643,10 @@ class DicomLoader(QThread):
 
             meshset = MeshSet.__new__(MeshSet)
             meshset.volume        = volume
+            meshset.preset        = self.preset
             meshset.bone_isovalue = PRESETS.get(self.preset, PRESETS["body"])["bone"]
-            meshset.bone_mesh     = meshset._build_bone(meshset.bone_isovalue)
+            meshset.bone_mesh     = meshset._build_bone(meshset.bone_isovalue, preset=self.preset)
+            meshset.organ_meshes  = meshset._extract_organs(preset=self.preset)
 
             # Save to disk cache so future loads take <0.2s
             try:

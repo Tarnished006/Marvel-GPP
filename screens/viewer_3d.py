@@ -33,7 +33,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QAction
 from signal_bus import signal_bus
-from dicom_engine import DicomLoader, MeshSet
+from dicom_engine import DicomLoader, MeshSet, load_volume_for_mpr
 from screens.mpr_view import MPRView
 from screens.slice_2d_viewer import Slice2DViewerWidget
 from screens.study_info_panel import StudyInfoDialog, StudyInfoPanel, extract_safe_metadata
@@ -50,6 +50,20 @@ except Exception:
 # ── Locate project-root DICOM folders ────────────────────────────────────────
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+from dicom_engine import detect_scan_anatomy
+
+def _preset_from_path(path: str) -> str:
+    anatomy = detect_scan_anatomy(path)
+    if anatomy in ("head", "skull"):
+        return "skull"
+    elif anatomy == "chest":
+        return "chest"
+    elif anatomy == "spine":
+        return "spine"
+    elif anatomy == "abdomen":
+        return "abdomen"
+    return "body"
+
 def _discover_local_datasets():
     candidates = []
     for entry in os.listdir(_ROOT):
@@ -57,7 +71,7 @@ def _discover_local_datasets():
         if os.path.isdir(path) and entry not in (".git", ".venv", ".cache", "__pycache__"):
             dcm_count = sum(1 for f in os.listdir(path) if f.lower().endswith((".dcm", ".ima")))
             if dcm_count > 1:
-                preset = "skull" if "skull" in entry.lower() else "body"
+                preset = _preset_from_path(path)
                 display = entry.replace("_", " ").capitalize()
                 label  = f"{display}  ({dcm_count} slices)"
                 candidates.append((label, path, preset))
@@ -113,6 +127,18 @@ class Viewer3D(QWidget):
         self._initial_load_done = False   # lazy-load guard
         self._ghost_active      = False
         self.mesh_bounds        = None
+
+        # Multi-organ & Anatomical Layers state
+        self.organ_actors: dict[str, pv.Actor] = {}
+        self.organ_meshes: dict[str, dict] = {}
+        self.organ_visible: dict[str, bool] = {}
+        self.skeleton_mode: str = "solid"  # "solid" (1.0), "ghost" (0.28), "hidden" (0.0)
+
+        # Direct Volume Rendering (DVR) state
+        self._dvr_active: bool = False
+        self._dvr_preset: str = "soft_tissue"
+        self._dvr_actor = None
+        self._volume_grid: pv.ImageData | None = None
 
         # Voice/feature state
         self._voice_zoom_level = 1.0      # bookkeeping for "zoom to X percent"
@@ -493,6 +519,22 @@ class Viewer3D(QWidget):
         self.menu_views.addAction(self.act_ghost)
         self.btn_reset_view.setMenu(self.menu_views)
         row_top.addWidget(self.btn_reset_view)
+
+        row_top.addWidget(_make_vsep())
+
+        # Skeleton Mode (Retained reference for backwards compatibility)
+        self.btn_skeleton_mode = None
+
+        # Retained organ/DVR references for backwards compatibility
+        self.btn_organ_heart = None
+        self.btn_organ_lungs = None
+        self.btn_organ_brain = None
+        self.btn_organ_kidneys = None
+        self.btn_organ_rkidney = None
+        self.btn_organ_lkidney = None
+        self.btn_organ_liver = None
+        self.btn_layers_reset = None
+        self.btn_dvr_mode = None
 
         # Retained spin/ghost buttons for backwards compatibility
         self.btn_start_spin = QPushButton("▶ Start Spin")
@@ -3117,10 +3159,15 @@ class Viewer3D(QWidget):
             light_type="scene light",
         ))
 
-        self.bone_actor, _skin = meshset.add_to_plotter(
+        self.bone_actor, _ = meshset.add_to_plotter(
             self.plotter,
             density_mode=self._density_active,
         )
+        self.organ_actors = {}
+        self.organ_meshes = {}
+        self.organ_visible = {}
+        self.skeleton_mode = "solid"
+
         self.mesh_bounds = meshset.bone_mesh.bounds
         # Kept so cross-section clipping and the density colormap can re-add the
         # mesh without re-running the whole DICOM -> mesh pipeline.
@@ -3408,7 +3455,7 @@ class Viewer3D(QWidget):
             f"{scan.get('type', 'CT')} ({scan.get('slice_count', 1)} slices)"
         )
         folder = scan.get("file_path", "")
-        preset = "skull" if "skull" in folder.lower() else "body"
+        preset = _preset_from_path(folder)
 
         if folder and os.path.isdir(folder) and scan.get("slice_count", 1) > 1:
             self._start_load(folder, preset=preset, label=label)
@@ -3770,9 +3817,31 @@ class Viewer3D(QWidget):
             "toggle before after": "toggle before after",
             "exit comparison": "exit comparison",
             "stop comparison": "exit comparison",
+            
+            # Skeleton transparency aliases
+            "ghost skeleton": "ghost skeleton",
+            "ghost bone": "ghost skeleton",
+            "translucent skeleton": "ghost skeleton",
+            "solid skeleton": "solid skeleton",
+            "solid bone": "solid skeleton",
+            "hide skeleton": "hide skeleton",
+            "hide bone": "hide skeleton",
+            "show skeleton": "solid skeleton",
+            "show bone": "solid skeleton",
         }
 
         command = aliases.get(command, command)
+
+        # Skeleton transparency voice actions
+        if command == "ghost skeleton":
+            self.set_skeleton_mode("ghost")
+            return
+        if command == "solid skeleton":
+            self.set_skeleton_mode("solid")
+            return
+        if command == "hide skeleton":
+            self.set_skeleton_mode("hidden")
+            return
 
         # Density heatmap commands
         if command in ("show density", "density"):
@@ -4545,11 +4614,19 @@ class Viewer3D(QWidget):
             origin = (cx, cy, pos)
 
         try:
+            try:
+                mesh.clear_cell_data()
+            except Exception:
+                pass
             clipped = mesh.clip(
                 normal=axis,
                 origin=origin,
                 invert=getattr(self, "_clip_inverted", False),
             )
+            try:
+                clipped.clear_cell_data()
+            except Exception:
+                pass
             if clipped.n_points == 0 or clipped.n_cells == 0:
                 print(f"[Viewer3D] Warning: Clipping plane at {axis}={pos:.1f} produced an empty mesh.")
                 p = self.window()
@@ -4585,74 +4662,84 @@ class Viewer3D(QWidget):
         try:
             if self.bone_actor is not None:
                 self.plotter.remove_actor(self.bone_actor, render=False)
+                self.bone_actor = None
 
-            if getattr(self, "_density_active", False):
-                # Heatmap mode: verify presence of HU_density scalars
-                has_hu = "HU_density" in mesh.point_data
-                if not has_hu:
-                    orig = getattr(self, "_bone_mesh", None)
-                    if orig is not None and "HU_density" in orig.point_data:
-                        self._update_clipped_mesh()
-                        mesh = self._get_current_display_mesh()
-                        has_hu = mesh is not None and "HU_density" in mesh.point_data
+            if getattr(self, "skeleton_mode", "solid") != "hidden":
+                if getattr(self, "_density_active", False):
+                    # Heatmap mode: verify presence of HU_density scalars
+                    has_hu = "HU_density" in mesh.point_data
+                    if not has_hu:
+                        orig = getattr(self, "_bone_mesh", None)
+                        if orig is not None and "HU_density" in orig.point_data:
+                            self._update_clipped_mesh()
+                            mesh = self._get_current_display_mesh()
+                            has_hu = mesh is not None and "HU_density" in mesh.point_data
 
-                if has_hu:
-                    meshset = getattr(self, "_meshset", None)
-                    if meshset is not None and hasattr(meshset, "get_hu_range"):
-                        lo, hi = meshset.get_hu_range()
+                    if has_hu:
+                        meshset = getattr(self, "_meshset", None)
+                        if meshset is not None and hasattr(meshset, "get_hu_range"):
+                            lo, hi = meshset.get_hu_range()
+                        else:
+                            arr = np.asarray(mesh.point_data["HU_density"])
+                            lo = float(max(150.0, np.percentile(arr, 5)))
+                            hi = float(max(lo + 300.0, min(2200.0, np.percentile(arr, 98))))
+
+                        self.bone_actor = self.plotter.add_mesh(
+                            mesh,
+                            scalars="HU_density",
+                            cmap="turbo",
+                            clim=(lo, hi),
+                            smooth_shading=True,
+                            ambient=0.35,
+                            diffuse=0.75,
+                            specular=0.15,
+                            specular_power=10,
+                            opacity=getattr(self, "_bone_opacity", 1.0),
+                            name="bone",
+                            scalar_bar_args={
+                                "title": "Density (HU)",
+                                "color": "#e0e0e0",
+                                "title_font_size": 11,
+                                "label_font_size": 9,
+                                "shadow": False,
+                                "n_labels": 5,
+                                "fmt": "%.0f",
+                                "position_x": 0.84,
+                                "position_y": 0.05,
+                                "width": 0.12,
+                                "height": 0.38,
+                            },
+                        )
+                        if hasattr(self, "legend_card"):
+                            self.legend_card.setVisible(True)
+                            self._reposition_legend()
                     else:
-                        arr = np.asarray(mesh.point_data["HU_density"])
-                        lo = float(max(150.0, np.percentile(arr, 5)))
-                        hi = float(max(lo + 300.0, min(2200.0, np.percentile(arr, 98))))
-
-                    self.bone_actor = self.plotter.add_mesh(
-                        mesh,
-                        scalars="HU_density",
-                        cmap="turbo",
-                        clim=(lo, hi),
-                        smooth_shading=True,
-                        ambient=0.35,
-                        diffuse=0.75,
-                        specular=0.15,
-                        specular_power=10,
-                        opacity=getattr(self, "_bone_opacity", 1.0),
-                        name="bone",
-                        scalar_bar_args={
-                            "title": "Density (HU)",
-                            "color": "#e0e0e0",
-                            "title_font_size": 11,
-                            "label_font_size": 9,
-                            "shadow": False,
-                            "n_labels": 5,
-                            "fmt": "%.0f",
-                            "position_x": 0.84,
-                            "position_y": 0.05,
-                            "width": 0.12,
-                            "height": 0.38,
-                        },
-                    )
-                    if hasattr(self, "legend_card"):
-                        self.legend_card.setVisible(True)
-                        self._reposition_legend()
+                        self._density_active = False
+                        if hasattr(self, "combo_bone_mode"):
+                            self.combo_bone_mode.blockSignals(True)
+                            self.combo_bone_mode.setCurrentIndex(0)
+                            self.combo_bone_mode.blockSignals(False)
+                        self._sync_bone_mode_buttons(False)
+                        if hasattr(self, "legend_card"):
+                            self.legend_card.setVisible(False)
+                        self._render_normal_bone(mesh)
                 else:
-                    self._density_active = False
-                    if hasattr(self, "combo_bone_mode"):
-                        self.combo_bone_mode.blockSignals(True)
-                        self.combo_bone_mode.setCurrentIndex(0)
-                        self.combo_bone_mode.blockSignals(False)
-                    self._sync_bone_mode_buttons(False)
+                    # Normal bone view: warm natural cortical bone shading
+                    try:
+                        self.plotter.remove_scalar_bar("Density (HU)")
+                    except Exception:
+                        pass
                     if hasattr(self, "legend_card"):
                         self.legend_card.setVisible(False)
                     self._render_normal_bone(mesh)
             else:
-                # Normal bone view: warm natural cortical bone shading
+                # Skeleton hidden: hide scalar bar if active
                 try:
                     self.plotter.remove_scalar_bar("Density (HU)")
                 except Exception:
                     pass
                 if hasattr(self, "legend_card"):
                     self.legend_card.setVisible(False)
-                self._render_normal_bone(mesh)
 
             self.plotter.render()
         except Exception as exc:
@@ -4783,6 +4870,70 @@ class Viewer3D(QWidget):
             if hasattr(self, "plotter"):
                 self.plotter.render()
         self._notify_metadata_changed()
+
+    # ── Anatomical Layers & Multi-Organ Management ────────────────────────────
+
+    def set_skeleton_mode(self, mode: str):
+        """Sets skeleton rendering mode: 'solid', 'ghost', or 'hidden'."""
+        mode = str(mode).lower().strip()
+        if mode not in ("solid", "ghost", "hidden"):
+            mode = "solid"
+        self.skeleton_mode = mode
+
+        if mode == "hidden":
+            self._bone_opacity = 0.0
+            if getattr(self, "bone_actor", None) is not None:
+                try:
+                    self.bone_actor.prop.opacity = 0.0
+                except Exception:
+                    try:
+                        self.bone_actor.GetProperty().SetOpacity(0.0)
+                    except Exception:
+                        pass
+            if hasattr(self, "lbl_opacity"):
+                self.lbl_opacity.setText("0%")
+            if hasattr(self, "slider_opacity"):
+                self.slider_opacity.blockSignals(True)
+                self.slider_opacity.setValue(0)
+                self.slider_opacity.blockSignals(False)
+            if hasattr(self, "plotter"):
+                self.plotter.render()
+        elif mode == "ghost":
+            self.set_bone_opacity(0.28)
+        else:
+            self.set_bone_opacity(1.0)
+
+    def set_organ_visible(self, organ_name: str, visible: bool):
+        """Compatibility stub."""
+        pass
+
+    def toggle_organ(self, organ_name: str):
+        """Compatibility stub."""
+        pass
+
+    def isolate_organ(self, organ_name: str):
+        """Compatibility stub."""
+        pass
+
+    def reset_anatomical_layers(self):
+        """Compatibility stub."""
+        self.set_skeleton_mode("solid")
+
+    def toggle_dvr_mode(self, enabled: bool | None = None, preset: str | None = None):
+        """Compatibility stub."""
+        pass
+
+    def set_dvr_preset(self, preset_name: str):
+        """Compatibility stub."""
+        pass
+
+    def _apply_dvr_rendering(self):
+        """Compatibility stub."""
+        pass
+
+    def _update_organ_actors(self):
+        """Compatibility stub."""
+        pass
 
     def set_density_colormap(self, active: bool):
         """Toggle density-based heatmap coloring using genuine CT Hounsfield Units (HU).

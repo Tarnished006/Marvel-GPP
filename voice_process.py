@@ -36,6 +36,27 @@ COMMAND_PHRASES = [
     "zoom out",
     "turn left",
     "turn right",
+    # Density heatmap
+    "density",
+    "show density",
+    "hide density",
+    "normal view",
+    # Interactive clipping
+    "enable clipping",
+    "disable clipping",
+    "reverse clipping",
+    "clip along x",
+    "clip along y",
+    "clip along z",
+    # Transparency
+    "full opacity",
+    "half opacity",
+    "high transparency",
+    # Skeleton transparency
+    "ghost skeleton",
+    "solid skeleton",
+    "hide skeleton",
+    "show skeleton",
 ]
 
 audio_q = queue.Queue()

@@ -100,9 +100,8 @@ APP = None
 def get_app():
     global APP
     if APP is None:
-        os.environ["QT_PLUGIN_PATH"] = "/opt/anaconda3/lib/python3.13/site-packages/PyQt6/Qt6/plugins"
         from PyQt6.QtWidgets import QApplication
-        APP = QApplication.instance() or QApplication(["-platform", "offscreen"])
+        APP = QApplication.instance() or QApplication(sys.argv)
     return APP
 
 

@@ -2350,8 +2350,14 @@ class MainWindow(QMainWindow):
         event.accept()
 
 if __name__ == "__main__":
-    from database import init_db
+    from database import init_db, get_all_patients
     init_db()
+    if not get_all_patients():
+        try:
+            from ingest import seed_demo_database
+            seed_demo_database()
+        except Exception as e:
+            print(f"[main] Auto-seeding database failed: {e}")
     app = QApplication(sys.argv)
     app.setStyleSheet(DARK_STYLESHEET)
 

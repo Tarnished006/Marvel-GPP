@@ -143,10 +143,16 @@ class GestureWorker(QThread):
         self._last_mouse_palm_pos = None
         self._last_mouse_time     = 0.0
 
-        # Precomputed gamma lookup table for dark background / low-light contrast boost (gamma=0.70)
-        # Lifts dark shadows between fingers so MediaPipe clearly distinguishes finger edges against black backdrops
-        gamma = 0.70
-        self._dark_bg_lut = np.array([np.clip(((i / 255.0) ** gamma) * 255.0, 0, 255) for i in range(256)], dtype=np.uint8)
+        # Contrast-Limited Adaptive Histogram Equalization (CLAHE) for robust edge detection
+        # against dark backgrounds, dark clothing, and exhibition lighting without skin blowout:
+        self.clahe = cv2.createCLAHE(clipLimit=1.8, tileGridSize=(8, 8))
+
+        # Exhibition multi-person presenter tracking & trajectory hysteresis state:
+        self._presenter_palm_pos = None      # (x, y) normalized coordinates of locked operator
+        self._presenter_label = None         # "Right" or "Left"
+        self._presenter_last_seen = 0.0      # monotonic timestamp
+        self._presenter_lock_radius = 0.22   # normalized radius for movement continuity
+        self._presenter_lock_timeout = 0.50  # seconds before lock expires when hand leaves
 
         # ── Directional thumb gestures → Air Mouse ON / OFF ───────────────────
         # 👍 Thumbs-up  (held 0.65s) → turn Air Mouse ON
@@ -186,12 +192,14 @@ class GestureWorker(QThread):
 
         # Use synchronous VIDEO mode: ensures each frame is processed immediately
         # with zero queue backlog, zero callback delay, and zero stale-frame freezes.
+        # num_hands=4 enables detecting multiple hands simultaneously so bystanders
+        # in the audience never steal the single detection slot from the presenter.
         base_opts = python.BaseOptions(model_asset_path="hand_landmarker.task")
         opts = vision.HandLandmarkerOptions(
             base_options=base_opts,
-            num_hands=2,
-            min_hand_detection_confidence=0.45,
-            min_tracking_confidence=0.45,
+            num_hands=4,
+            min_hand_detection_confidence=0.40,
+            min_tracking_confidence=0.40,
             running_mode=vision.RunningMode.VIDEO,
         )
         self.detector = vision.HandLandmarker.create_from_options(opts)
@@ -306,6 +314,93 @@ class GestureWorker(QThread):
 
         return True
 
+    def _rank_candidates(self, candidates: list, cur_time: float) -> list:
+        """
+        Ranks detected hands to select the primary foreground presenter.
+        Rejects distant background bystanders and peripheral audience members.
+        Enforces sticky temporal locking so spectators waving in the background
+        cannot hijack the cursor or trigger false clicks.
+        """
+        if not candidates:
+            # Check if presenter lock should expire
+            if (cur_time - self._presenter_last_seen) > self._presenter_lock_timeout:
+                self._presenter_palm_pos = None
+                self._presenter_label = None
+            return []
+
+        lock_active = (
+            self._presenter_palm_pos is not None and
+            (cur_time - self._presenter_last_seen) < self._presenter_lock_timeout
+        )
+
+        scored = []
+        for cand in candidates:
+            hand_lms, raw, label, score = cand
+            # 1. Palm size (depth/proximity metric)
+            # Foreground operator has large hand scale; distant spectator has tiny hand.
+            palm_len = float(np.linalg.norm(raw[9, :2] - raw[0, :2]))
+            palm_width = float(np.linalg.norm(raw[5, :2] - raw[17, :2]))
+            hand_area = palm_len * palm_width
+
+            # Reject tiny hands in the background (< 0.055 normalized palm length)
+            if palm_len < 0.055:
+                continue
+
+            # Scale proximity score (saturates smoothly for close hands)
+            size_score = min(hand_area / 0.022, 3.5)
+
+            # 2. Central interaction zone weight
+            # Presenter stands directly in front; bystanders stand at left/right margins.
+            palm_x, palm_y = float(raw[9, 0]), float(raw[9, 1])
+            dist_center_x = abs(palm_x - 0.50)
+            center_weight = max(0.20, 1.0 - 1.4 * dist_center_x)
+
+            # 3. Upward arm orientation bonus
+            # Presenter raises hand from bottom of frame (wrist_y > knuckle_y).
+            is_upward = (raw[0, 1] - raw[9, 1]) > -0.02
+            orientation_weight = 1.2 if is_upward else 0.75
+
+            # 4. Handedness priority (if Air Mouse is on, Right hand preferred)
+            hand_pref = 1.35 if (self.air_mouse_enabled and label == self.AIR_MOUSE_HAND) else 1.0
+
+            cand_score = score * size_score * center_weight * orientation_weight * hand_pref
+
+            # 5. Temporal Continuity Bonus (Hysteresis / Sticky Tracking)
+            continuity_bonus = 0.0
+            dist_to_lock = 999.0
+            if lock_active:
+                lx, ly = self._presenter_palm_pos
+                dist_to_lock = float(np.hypot(palm_x - lx, palm_y - ly))
+                if dist_to_lock < self._presenter_lock_radius:
+                    # Candidate is continuing the locked presenter's trajectory
+                    continuity_bonus += 5.0 * (1.0 - dist_to_lock / self._presenter_lock_radius)
+                    if label == self._presenter_label:
+                        continuity_bonus += 2.0
+
+            total_score = cand_score + continuity_bonus
+            scored.append((total_score, cand))
+
+        if not scored:
+            if (cur_time - self._presenter_last_seen) > self._presenter_lock_timeout:
+                self._presenter_palm_pos = None
+                self._presenter_label = None
+            return []
+
+        # Sort descending by total score
+        scored.sort(key=lambda s: s[0], reverse=True)
+
+        # Primary candidate is the highest scorer
+        best_cand = scored[0][1]
+
+        # Update or establish presenter lock
+        raw_best = best_cand[1]
+        self._presenter_palm_pos = (float(raw_best[9, 0]), float(raw_best[9, 1]))
+        self._presenter_label = best_cand[2]
+        self._presenter_last_seen = cur_time
+
+        # Return all valid scored candidates (primary presenter first, followed by others)
+        return [s[1] for s in scored]
+
     # ─────────────────────────── Main loop ────────────────────────────────────
     def run(self):
         # High-speed threaded camera capture: completely eliminates DirectShow queue lag
@@ -328,13 +423,12 @@ class GestureWorker(QThread):
             rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
             # Adaptive low-light / dark-background contrast enhancement:
-            # If the background is dark (mean frame brightness < 135), apply a precomputed
-            # gamma-boost LUT (0.08 ms) to reveal skin silhouettes and eliminate finger-shadow blending.
-            mean_lum = float(np.mean(rgb_frame))
-            if mean_lum < 135.0:
-                mp_rgb = cv2.LUT(rgb_frame, self._dark_bg_lut)
-            else:
-                mp_rgb = rgb_frame
+            # Uses YUV CLAHE (Contrast Limited Adaptive Histogram Equalization) on the luminance (Y) channel.
+            # Sharpens skin contours against dark clothing and varying exhibition lighting
+            # without blowing out skin tones or creating digital glare.
+            yuv = cv2.cvtColor(rgb_frame, cv2.COLOR_RGB2YUV)
+            yuv[:, :, 0] = self.clahe.apply(yuv[:, :, 0])
+            mp_rgb = cv2.cvtColor(yuv, cv2.COLOR_YUV2RGB)
 
             mp_img = mp.Image(
                 image_format=mp.ImageFormat.SRGB,
@@ -362,16 +456,11 @@ class GestureWorker(QThread):
                     label = "Left" if raw_label == "Right" else "Right"
                     valid_candidates.append((hand_lms, raw, label, score))
 
-            # If multiple candidates detected, filter out shoulder/collar false-positive near the top
-            if len(valid_candidates) > 1:
-                active_zone_candidates = [
-                    c for c in valid_candidates
-                    if not (c[1][0, 1] < 0.22 and c[1][9, 1] < 0.22)
-                ]
-                if active_zone_candidates:
-                    valid_candidates = active_zone_candidates
+            # Exhibition multi-person filter: rank candidates to lock onto primary foreground presenter
+            cur_sec = time.time()
+            ranked_candidates = self._rank_candidates(valid_candidates, cur_sec)
 
-            num_detected = len(valid_candidates)
+            num_detected = len(ranked_candidates)
             signal_bus.tracking_confidence.emit(
                 1.0 if num_detected > 0 else 0.0
             )
@@ -381,274 +470,249 @@ class GestureWorker(QThread):
             thumbs_up_px = None
             thumbs_down_px = None
 
-            # Determine which candidate drives the air mouse (with temporal continuity)
-            mouse_candidate_idx = None
-            if self.air_mouse_enabled and valid_candidates:
-                now_t = time.time()
-                if len(valid_candidates) == 1:
-                    mouse_candidate_idx = 0
-                else:
-                    if self._last_mouse_palm_pos is not None and (now_t - self._last_mouse_time < 0.8):
-                        best_dist = float('inf')
-                        best_i = 0
-                        lx, ly = self._last_mouse_palm_pos
-                        for i, c in enumerate(valid_candidates):
-                            cx, cy = float(c[1][9, 0]), float(c[1][9, 1])
-                            d = (cx - lx)**2 + (cy - ly)**2
-                            if d < best_dist:
-                                best_dist = d
-                                best_i = i
-                        mouse_candidate_idx = best_i
-                    else:
-                        right_indices = [i for i, c in enumerate(valid_candidates) if c[2] == self.AIR_MOUSE_HAND]
-                        if right_indices:
-                            mouse_candidate_idx = right_indices[0]
-                        else:
-                            mouse_candidate_idx = max(range(len(valid_candidates)), key=lambda i: valid_candidates[i][1][9, 0])
+            # Primary presenter hand is ranked_candidates[0]
+            mouse_candidate_idx = 0 if (self.air_mouse_enabled and ranked_candidates) else None
 
             if num_detected > 0:
-                for cand_idx, (hand_lms, raw, label, score) in enumerate(valid_candidates):
-                    active_labels.add(label)
-
-                    # ── Landmark smoothing ──────────────────────────────────
-                    # Use sticky single_hand_filter when only 1 hand is visible to prevent
-                    # filter resets if MediaPipe's handedness label flickers on screen edges.
-                    if num_detected == 1:
-                        filt = self.single_hand_filter
-                    else:
-                        if label not in self.hand_filters:
-                            self.hand_filters[label] = EMAFilter(alpha=0.75)
-                        filt = self.hand_filters[label]
-
-                    sm = filt.filter(raw)  # shape (21,3), normalized 0-1
-
-                    # ── Draw skeleton ───────────────────────────────────────
-                    px = [(int(sm[i,0]*w), int(sm[i,1]*h)) for i in range(21)]
-                    for pt in px:
-                        cv2.circle(frame, pt, 4, (0,220,0), -1)
+                # Render secondary/bystander hands in faint gray so spectators and judges can see the system
+                # actively tracking and safely ignoring them
+                for b_idx in range(1, len(ranked_candidates)):
+                    b_raw = ranked_candidates[b_idx][1]
+                    b_px = [(int(b_raw[i, 0] * w), int(b_raw[i, 1] * h)) for i in range(21)]
+                    for pt in b_px:
+                        cv2.circle(frame, pt, 2, (100, 100, 100), -1)
                     for a, b in self.connections:
-                        cv2.line(frame, px[a], px[b], (255,255,255), 1)
+                        cv2.line(frame, b_px[a], b_px[b], (65, 65, 65), 1)
 
-                    # Determine air mouse hand: if enabled, matching candidate drives mouse
-                    if self.air_mouse_enabled:
-                        is_mouse_hand = (cand_idx == mouse_candidate_idx)
+                # Process primary presenter hand (ranked candidate 0)
+                hand_lms, raw, label, score = ranked_candidates[0]
+                active_labels.add(label)
+
+                # ── Landmark smoothing ──────────────────────────────────
+                # Dedicated single-hand filter ensures smooth tracking with zero filter-switching jitters
+                filt = self.single_hand_filter
+                sm = filt.filter(raw)  # shape (21,3), normalized 0-1
+
+                # ── Draw skeleton ───────────────────────────────────────
+                px = [(int(sm[i,0]*w), int(sm[i,1]*h)) for i in range(21)]
+                for pt in px:
+                    cv2.circle(frame, pt, 4, (0,220,0), -1)
+                for a, b in self.connections:
+                    cv2.line(frame, px[a], px[b], (255,255,255), 1)
+
+                # Determine air mouse hand: primary presenter drives mouse
+                is_mouse_hand = bool(self.air_mouse_enabled and mouse_candidate_idx is not None)
+
+                # ── Pure Index & Thumb Fingertip Pinch Measurement ────────
+                # Measures strictly between Thumb (tip 4 & distal pad) and Index (tip 8 & distal pad [8, 7]).
+                # Strictly excludes intermediate segment [7, 6] and PIP knuckle to prevent false clicks when fingers relax or curl.
+                wrist_px = np.array(px[0],  dtype=float)
+                palm_px  = np.array(px[9],  dtype=float)
+                thumb_px = np.array(px[4],  dtype=float)
+                thumb_ip = np.array(px[3],  dtype=float)
+                thumb_pad = 0.70 * thumb_px + 0.30 * thumb_ip
+
+                index_px = np.array(px[8],  dtype=float)
+                index_pad = 0.75 * index_px + 0.25 * np.array(px[7], dtype=float)
+                index_distal = 0.50 * index_px + 0.50 * np.array(px[7], dtype=float)
+                mid_px   = np.array(px[12], dtype=float)
+                ring_px  = np.array(px[16], dtype=float)
+                pinky_px = np.array(px[20], dtype=float)
+
+                # Pure physical fingertip contact distance:
+                # Measures true flesh-to-flesh contact between thumb pad and index pad.
+                # Robust against dark backgrounds where shadow boundaries can slightly retract the tip landmark.
+                d_2d = min(
+                    float(np.linalg.norm(thumb_px - index_px)),
+                    float(np.linalg.norm(thumb_pad - index_px)),
+                    float(np.linalg.norm(thumb_px - index_pad)),
+                    float(np.linalg.norm(thumb_pad - index_pad)),
+                    float(np.linalg.norm(thumb_pad - index_distal)),
+                )
+
+                # Rigid skeletal palm scale (invariant to finger curling or reach)
+                palm_w = float(np.linalg.norm(np.array(px[5], dtype=float) - np.array(px[17], dtype=float)))
+                palm_h = float(np.linalg.norm(wrist_px - palm_px))
+                ref_2d = max(palm_w * 1.25, palm_h * 1.1, 35.0)
+                idx_ratio = d_2d / ref_2d
+
+                # Distances from thumb to other fingertips (2D pixels):
+                d_mid_2d   = min(float(np.linalg.norm(thumb_px - mid_px)), float(np.linalg.norm(thumb_pad - mid_px)))
+                d_ring_2d  = min(float(np.linalg.norm(thumb_px - ring_px)), float(np.linalg.norm(thumb_pad - ring_px)))
+                d_pinky_2d = min(float(np.linalg.norm(thumb_px - pinky_px)), float(np.linalg.norm(thumb_pad - pinky_px)))
+                mid_ratio  = d_mid_2d / ref_2d
+
+                # 3D normalized distances for camera perspective invariance:
+                d_3d       = float(np.linalg.norm(sm[4] - sm[8]))
+                d_mid_3d   = float(np.linalg.norm(sm[4] - sm[12]))
+                d_ring_3d  = float(np.linalg.norm(sm[4] - sm[16]))
+                d_pinky_3d = float(np.linalg.norm(sm[4] - sm[20]))
+
+                # ── Multi-Finger Exclusivity with Natural Pinch Physics ──
+                # Strictly ensure ONLY index and thumb are tracked; reject middle/ring/pinky pinches.
+                # Allows a calibrated tolerance margin (+ ref_2d * 0.06) for dark clothing / shadows where
+                # contrast boundaries can slightly shift index fingertip landmark or cause middle knuckle to drift.
+                is_index_closest = (
+                    (d_2d <= d_mid_2d + ref_2d * 0.06 or d_3d <= d_mid_3d + 0.04) and
+                    (d_2d <= d_ring_2d + ref_2d * 0.07) and
+                    (d_2d <= d_pinky_2d + ref_2d * 0.07)
+                )
+                # Reject fist / bunched hand (where middle/ring/pinky are all bunched touching thumb)
+                is_not_fist = (d_pinky_2d > ref_2d * 0.09 or d_ring_2d > ref_2d * 0.09)
+
+                is_clean_index_pinch = is_index_closest and is_not_fist
+
+                if is_mouse_hand and self.air_mouse_enabled:
+                    cur_t = time.time()
+                    self._last_mouse_palm_pos = (float(sm[9, 0]), float(sm[9, 1]))
+                    self._last_mouse_time = cur_t
+
+                    # ── Rest-to-Sleep Zone ────────────────────────────────
+                    # Only trigger if the entire hand has dropped to the absolute bottom margin of the frame
+                    # (wrist > 0.94 AND palm > 0.88), indicating forearm resting flat on desk.
+                    if sm[0, 1] > 0.94 and sm[9, 1] > 0.88:
+                        if self.is_pinching:
+                            self.is_pinching = False
+                            signal_bus.pinch_ended.emit()
+                        self._pinch_lock_pos = None
+                        cv2.putText(
+                            frame, "SLEEP (REST ZONE)",
+                            (px[0][0] - 65, px[0][1] - 12),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (120, 120, 120), 1,
+                        )
                     else:
-                        is_mouse_hand = False
+                        # Projected index MCP tracking anchor:
+                        # sm[5] (index MCP knuckle) does NOT curl when making a pinch, eliminating
+                        # the 322-pixel deflection caused by fingertip tracking.
+                        # Projecting 15% along metacarpal axis provides natural, intuitive cursor reach.
+                        hand_dir = sm[5] - sm[0]
+                        track_pt = sm[5] + 0.15 * hand_dir
 
-                    # ── Pure Index & Thumb Fingertip Pinch Measurement ────────
-                    # Measures strictly between Thumb (tip 4 & distal pad) and Index (tip 8 & distal pad [8, 7]).
-                    # Strictly excludes intermediate segment [7, 6] and PIP knuckle to prevent false clicks when fingers relax or curl.
-                    wrist_px = np.array(px[0],  dtype=float)
-                    palm_px  = np.array(px[9],  dtype=float)
-                    thumb_px = np.array(px[4],  dtype=float)
-                    thumb_ip = np.array(px[3],  dtype=float)
-                    thumb_pad = 0.70 * thumb_px + 0.30 * thumb_ip
+                        # Ergonomic interaction box tailored for effortless reach across all panels:
+                        x_min, x_max = 0.18, 0.78
+                        y_min, y_max = 0.16, 0.72
 
-                    index_px = np.array(px[8],  dtype=float)
-                    index_pad = 0.75 * index_px + 0.25 * np.array(px[7], dtype=float)
-                    index_distal = 0.50 * index_px + 0.50 * np.array(px[7], dtype=float)
-                    mid_px   = np.array(px[12], dtype=float)
-                    ring_px  = np.array(px[16], dtype=float)
-                    pinky_px = np.array(px[20], dtype=float)
+                        raw_x = float(np.clip((track_pt[0] - x_min) / (x_max - x_min), 0.0, 1.0))
+                        raw_y = float(np.clip((track_pt[1] - y_min) / (y_max - y_min), 0.0, 1.0))
 
-                    # Pure physical fingertip contact distance:
-                    # Measures true flesh-to-flesh contact between thumb pad and index pad.
-                    # Robust against dark backgrounds where shadow boundaries can slightly retract the tip landmark.
-                    d_2d = min(
-                        float(np.linalg.norm(thumb_px - index_px)),
-                        float(np.linalg.norm(thumb_pad - index_px)),
-                        float(np.linalg.norm(thumb_px - index_pad)),
-                        float(np.linalg.norm(thumb_pad - index_pad)),
-                        float(np.linalg.norm(thumb_pad - index_distal)),
-                    )
+                        # Pinch Lock Damping:
+                        # Suppresses micro-tremor when clicking stationary buttons or calipers,
+                        # but enables completely fluid dragging once deliberate motion occurs.
+                        if self.is_pinching:
+                            if self._pinch_lock_pos is None:
+                                self._pinch_lock_pos = (raw_x, raw_y)
+                                self._pinch_locked = True
+                            if self._pinch_locked:
+                                ddx = raw_x - self._pinch_lock_pos[0]
+                                ddy = raw_y - self._pinch_lock_pos[1]
+                                if (ddx * ddx + ddy * ddy) > (0.018 * 0.018):
+                                    # Deliberate drag motion: unlock permanently for this pinch
+                                    self._pinch_locked = False
+                                else:
+                                    # Stationary click: damp micro-tremor
+                                    raw_x = self._pinch_lock_pos[0]
+                                    raw_y = self._pinch_lock_pos[1]
+                        else:
+                            self._pinch_lock_pos = None
+                            self._pinch_locked = False
 
-                    # Rigid skeletal palm scale (invariant to finger curling or reach)
-                    palm_w = float(np.linalg.norm(np.array(px[5], dtype=float) - np.array(px[17], dtype=float)))
-                    palm_h = float(np.linalg.norm(wrist_px - palm_px))
-                    ref_2d = max(palm_w * 1.25, palm_h * 1.1, 35.0)
-                    idx_ratio = d_2d / ref_2d
+                        # 1€ Filter: zero lag, fluid tracking with high-precision monotonic clock
+                        cur_t = time.perf_counter()
+                        smoothed = self.mouse_filter.filter(
+                            np.array([raw_x, raw_y]), timestamp=cur_t
+                        )
+                        cx, cy = float(smoothed[0]), float(smoothed[1])
 
-                    # Distances from thumb to other fingertips (2D pixels):
-                    d_mid_2d   = min(float(np.linalg.norm(thumb_px - mid_px)), float(np.linalg.norm(thumb_pad - mid_px)))
-                    d_ring_2d  = min(float(np.linalg.norm(thumb_px - ring_px)), float(np.linalg.norm(thumb_pad - ring_px)))
-                    d_pinky_2d = min(float(np.linalg.norm(thumb_px - pinky_px)), float(np.linalg.norm(thumb_pad - pinky_px)))
-                    mid_ratio  = d_mid_2d / ref_2d
+                        # Emit cursor movement FIRST so UI thread updates coordinates before pinch event
+                        self._last_cursor = (cx, cy)
+                        signal_bus.cursor_moved.emit(cx, cy)
 
-                    # 3D normalized distances for camera perspective invariance:
-                    d_3d       = float(np.linalg.norm(sm[4] - sm[8]))
-                    d_mid_3d   = float(np.linalg.norm(sm[4] - sm[12]))
-                    d_ring_3d  = float(np.linalg.norm(sm[4] - sm[16]))
-                    d_pinky_3d = float(np.linalg.norm(sm[4] - sm[20]))
-
-                    # ── Multi-Finger Exclusivity with Natural Pinch Physics ──
-                    # Strictly ensure ONLY index and thumb are tracked; reject middle/ring/pinky pinches.
-                    # Allows a small tolerance margin (+ ref_2d * 0.04) for dark backgrounds where shadow
-                    # gradients can slightly shift index fingertip landmark or cause middle knuckle to drift.
-                    is_index_closest = (
-                        (d_2d <= d_mid_2d + ref_2d * 0.04 or d_3d <= d_mid_3d + 0.03) and
-                        (d_2d <= d_ring_2d + ref_2d * 0.05) and
-                        (d_2d <= d_pinky_2d + ref_2d * 0.05)
-                    )
-                    # Reject fist / bunched hand (where middle/ring/pinky are all bunched touching thumb)
-                    is_not_fist = (d_pinky_2d > ref_2d * 0.10 or d_ring_2d > ref_2d * 0.10)
-
-                    is_clean_index_pinch = is_index_closest and is_not_fist
-
-                    if is_mouse_hand and self.air_mouse_enabled:
-                        cur_t = time.time()
-                        self._last_mouse_palm_pos = (float(sm[9, 0]), float(sm[9, 1]))
-                        self._last_mouse_time = cur_t
-
-                        # ── Rest-to-Sleep Zone ────────────────────────────────
-                        # Only trigger if the entire hand has dropped to the absolute bottom margin of the frame
-                        # (wrist > 0.94 AND palm > 0.88), indicating forearm resting flat on desk.
-                        if sm[0, 1] > 0.94 and sm[9, 1] > 0.88:
+                        # ── Pinch-to-click / drag state machine ──────────────────
+                        now = cur_t
+                        if is_clean_index_pinch and (idx_ratio < self.PINCH_TRIGGER):
+                            if not self.is_pinching and (now - self.last_click_ts >= self.CLICK_COOLDOWN):
+                                self.is_pinching = True
+                                self.last_click_ts = now
+                                signal_bus.pinch_started.emit()
+                        elif (idx_ratio > self.PINCH_RELEASE) or (not is_clean_index_pinch and idx_ratio > self.PINCH_TRIGGER):
                             if self.is_pinching:
                                 self.is_pinching = False
                                 signal_bus.pinch_ended.emit()
-                            self._pinch_lock_pos = None
-                            cv2.putText(
-                                frame, "SLEEP (REST ZONE)",
-                                (px[0][0] - 65, px[0][1] - 12),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (120, 120, 120), 1,
-                            )
-                        else:
-                            # Projected index MCP tracking anchor:
-                            # sm[5] (index MCP knuckle) does NOT curl when making a pinch, eliminating
-                            # the 322-pixel deflection caused by fingertip tracking.
-                            # Projecting 15% along metacarpal axis provides natural, intuitive cursor reach.
-                            hand_dir = sm[5] - sm[0]
-                            track_pt = sm[5] + 0.15 * hand_dir
 
-                            # Ergonomic interaction box tailored for effortless reach across all panels:
-                            x_min, x_max = 0.18, 0.78
-                            y_min, y_max = 0.16, 0.72
+                        # ── Visual HUD Ring / Pinch Depth Gauge ───────────
+                        # Centered at midpoint between thumb tip & index tip for visual accuracy
+                        hud_px = (int(0.5 * px[4][0] + 0.5 * px[8][0]), int(0.5 * px[4][1] + 0.5 * px[8][1]))
+                        if self.is_pinching:
+                            cv2.circle(frame, hud_px, 14, (0, 255, 0), 3)
+                            cv2.putText(frame, "CLICK / DRAG",
+                                        (hud_px[0] + 18, hud_px[1] - 8),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.60,
+                                        (0, 255, 0), 2)
+                        elif is_clean_index_pinch and idx_ratio < self.PINCH_RELEASE:
+                            # Dynamic indicator: ring shrinks smoothly ONLY as index+thumb pinch closes
+                            progress = float(np.clip(
+                                (self.PINCH_RELEASE - idx_ratio) / (self.PINCH_RELEASE - self.PINCH_TRIGGER + 1e-5),
+                                0.0, 1.0
+                            ))
+                            ring_r = int(12 - progress * 5)
+                            g_val = int(150 + progress * 105)
+                            b_val = int(255 - progress * 155)
+                            cv2.circle(frame, hud_px, max(6, ring_r), (b_val, g_val, 0), 2)
 
-                            raw_x = float(np.clip((track_pt[0] - x_min) / (x_max - x_min), 0.0, 1.0))
-                            raw_y = float(np.clip((track_pt[1] - y_min) / (y_max - y_min), 0.0, 1.0))
+                # Accumulate Thumbs UP / DOWN gestures across all visible hands
+                if self._is_thumbs_up(sm):
+                    any_thumbs_up = True
+                    thumbs_up_px = px[4]
+                if self._is_thumbs_down(sm):
+                    any_thumbs_down = True
+                    thumbs_down_px = px[4]
 
-                            # Pinch Lock Damping:
-                            # Suppresses micro-tremor when clicking stationary buttons or calipers,
-                            # but enables completely fluid dragging once deliberate motion occurs.
-                            if self.is_pinching:
-                                if self._pinch_lock_pos is None:
-                                    self._pinch_lock_pos = (raw_x, raw_y)
-                                    self._pinch_locked = True
-                                if self._pinch_locked:
-                                    ddx = raw_x - self._pinch_lock_pos[0]
-                                    ddy = raw_y - self._pinch_lock_pos[1]
-                                    if (ddx * ddx + ddy * ddy) > (0.018 * 0.018):
-                                        # Deliberate drag motion: unlock permanently for this pinch
-                                        self._pinch_locked = False
-                                    else:
-                                        # Stationary click: damp micro-tremor
-                                        raw_x = self._pinch_lock_pos[0]
-                                        raw_y = self._pinch_lock_pos[1]
-                            else:
-                                self._pinch_lock_pos = None
-                                self._pinch_locked = False
+                # ══════════════════════════════════════════════════════════
+                # 3-D VIEWER CONTROL — rotation, zoom, tissue melt
+                # Single-Hand Routing logic:
+                #   Air mouse ON  → Single hand controls OS cursor & pinch-to-click
+                #   Air mouse OFF → Single hand directly controls 3-D viewer (rotation/zoom/melt)
+                # ══════════════════════════════════════════════════════════
+                drives_3d = not self.air_mouse_enabled
 
-                            # 1€ Filter: zero lag, fluid tracking with high-precision monotonic clock
-                            cur_t = time.perf_counter()
-                            smoothed = self.mouse_filter.filter(
-                                np.array([raw_x, raw_y]), timestamp=cur_t
-                            )
-                            cx, cy = float(smoothed[0]), float(smoothed[1])
+                if drives_3d:
+                    palm_x = float(sm[9,0])
+                    palm_y = float(sm[9,1])
+                    palm_px_pos = px[9]
 
-                            # Emit cursor movement FIRST so UI thread updates coordinates before pinch event
-                            self._last_cursor = (cx, cy)
-                            signal_bus.cursor_moved.emit(cx, cy)
+                    if is_clean_index_pinch and (idx_ratio < 0.18):        # thumb+index pinch → zoom in
+                        signal_bus.zoom_command.emit(1)
+                        self.prev_palm.pop(label, None)
+                        cv2.putText(frame, "ZOOM IN (+)",
+                                    (palm_px_pos[0]-40, palm_px_pos[1]-20),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.55,
+                                    (0,255,255), 2)
 
-                            # ── Pinch-to-click / drag state machine ──────────────────
-                            now = cur_t
-                            if is_clean_index_pinch and (idx_ratio < self.PINCH_TRIGGER):
-                                if not self.is_pinching and (now - self.last_click_ts >= self.CLICK_COOLDOWN):
-                                    self.is_pinching = True
-                                    self.last_click_ts = now
-                                    signal_bus.pinch_started.emit()
-                            elif (idx_ratio > self.PINCH_RELEASE) or (not is_clean_index_pinch and idx_ratio > self.PINCH_TRIGGER):
-                                if self.is_pinching:
-                                    self.is_pinching = False
-                                    signal_bus.pinch_ended.emit()
+                    elif (d_mid_2d < d_2d) and (mid_ratio < 0.18):      # thumb+middle pinch → zoom out
+                        signal_bus.zoom_command.emit(-1)
+                        self.prev_palm.pop(label, None)
+                        cv2.putText(frame, "ZOOM OUT (-)",
+                                    (palm_px_pos[0]-40, palm_px_pos[1]-20),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.55,
+                                    (0,255,255), 2)
 
-                            # ── Visual HUD Ring / Pinch Depth Gauge ───────────
-                            # Centered at midpoint between thumb tip & index tip for visual accuracy
-                            hud_px = (int(0.5 * px[4][0] + 0.5 * px[8][0]), int(0.5 * px[4][1] + 0.5 * px[8][1]))
-                            if self.is_pinching:
-                                cv2.circle(frame, hud_px, 14, (0, 255, 0), 3)
-                                cv2.putText(frame, "CLICK / DRAG",
-                                            (hud_px[0] + 18, hud_px[1] - 8),
-                                            cv2.FONT_HERSHEY_SIMPLEX, 0.60,
-                                            (0, 255, 0), 2)
-                            elif is_clean_index_pinch and idx_ratio < self.PINCH_RELEASE:
-                                # Dynamic indicator: ring shrinks smoothly ONLY as index+thumb pinch closes
-                                progress = float(np.clip(
-                                    (self.PINCH_RELEASE - idx_ratio) / (self.PINCH_RELEASE - self.PINCH_TRIGGER + 1e-5),
-                                    0.0, 1.0
-                                ))
-                                ring_r = int(12 - progress * 5)
-                                g_val = int(150 + progress * 105)
-                                b_val = int(255 - progress * 155)
-                                cv2.circle(frame, hud_px, max(6, ring_r), (b_val, g_val, 0), 2)
+                    else:                       # open palm → 3D camera rotation
+                        if label in self.prev_palm:
+                            px0, py0 = self.prev_palm[label]
+                            dx = float(np.clip(palm_x - px0, -0.06, 0.06))
+                            dy = float(np.clip(palm_y - py0, -0.06, 0.06))
+                            
+                            # Deadzone = 0.003 (filters micro-tremor)
+                            if abs(dx) > 0.003 or abs(dy) > 0.003:
+                                signal_bus.hand_rotation.emit(dx, dy, 0.0)
+                                cv2.putText(frame, "3D ROTATE",
+                                            (palm_px_pos[0]-35, palm_px_pos[1]-20),
+                                            cv2.FONT_HERSHEY_SIMPLEX, 0.50,
+                                            (0,230,255), 2)
+                        self.prev_palm[label] = (palm_x, palm_y)
 
-                    # Accumulate Thumbs UP / DOWN gestures across all visible hands
-                    if self._is_thumbs_up(sm):
-                        any_thumbs_up = True
-                        thumbs_up_px = px[4]
-                    if self._is_thumbs_down(sm):
-                        any_thumbs_down = True
-                        thumbs_down_px = px[4]
-
-                    # ══════════════════════════════════════════════════════════
-                    # 3-D VIEWER CONTROL — rotation, zoom, tissue melt
-                    # Routing logic:
-                    #   Air mouse ON  → Mouse hand controls cursor ONLY
-                    #                   (secondary hand controls 3D if 2 hands present)
-                    #   Air mouse OFF → Both hands control 3-D viewer
-                    # ══════════════════════════════════════════════════════════
-                    if self.air_mouse_enabled:
-                        drives_3d = (num_detected > 1 and not is_mouse_hand)
-                    else:
-                        drives_3d = True
-
-                    if drives_3d:
-                        palm_x = float(sm[9,0])
-                        palm_y = float(sm[9,1])
-                        palm_px_pos = px[9]
-
-                        if is_clean_index_pinch and (idx_ratio < 0.18):        # thumb+index pinch → zoom in
-                            signal_bus.zoom_command.emit(1)
-                            self.prev_palm.pop(label, None)
-                            cv2.putText(frame, "ZOOM IN (+)",
-                                        (palm_px_pos[0]-40, palm_px_pos[1]-20),
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.55,
-                                        (0,255,255), 2)
-
-                        elif (d_mid_2d < d_2d) and (mid_ratio < 0.18):      # thumb+middle pinch → zoom out
-                            signal_bus.zoom_command.emit(-1)
-                            self.prev_palm.pop(label, None)
-                            cv2.putText(frame, "ZOOM OUT (-)",
-                                        (palm_px_pos[0]-40, palm_px_pos[1]-20),
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.55,
-                                        (0,255,255), 2)
-
-                        else:                       # open palm → 3D camera rotation
-                            if label in self.prev_palm:
-                                px0, py0 = self.prev_palm[label]
-                                dx = float(np.clip(palm_x - px0, -0.06, 0.06))
-                                dy = float(np.clip(palm_y - py0, -0.06, 0.06))
-                                
-                                # Deadzone = 0.003 (filters micro-tremor)
-                                if abs(dx) > 0.003 or abs(dy) > 0.003:
-                                    signal_bus.hand_rotation.emit(dx, dy, 0.0)
-                                    cv2.putText(frame, "3D ROTATE",
-                                                (palm_px_pos[0]-35, palm_px_pos[1]-20),
-                                                cv2.FONT_HERSHEY_SIMPLEX, 0.50,
-                                                (0,230,255), 2)
-                            self.prev_palm[label] = (palm_x, palm_y)
-
-                        # Tissue melt driven by palm height
-                        signal_bus.tissue_melt.emit(float(np.clip(1.0 - palm_y, 0.0, 1.0)))
+                    # Tissue melt driven by palm height
+                    signal_bus.tissue_melt.emit(float(np.clip(1.0 - palm_y, 0.0, 1.0)))
 
             # ── 👍 Thumbs-UP  → Air Mouse ON  ──────────────────────
             # ── 👎 Thumbs-DOWN → Air Mouse OFF ──────────────────────

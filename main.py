@@ -32,8 +32,17 @@ from signal_bus import signal_bus
 
 from gesture import GestureWorker  # Background AI & Air Mouse Engine
 from voice_commands import VoiceCommandWorker  # Offline Voice Recognition Engine
-from database import touch_patient, log_action, get_patient, get_notes_for_patient
+from database import (
+    touch_patient, log_action, get_patient, get_notes_for_patient,
+    save_surgical_plan_version, get_surgical_plan_versions, get_surgical_plan_version,
+    delete_surgical_plan_version, rename_surgical_plan_version,
+    save_tracked_measurement, get_tracked_measurements_for_scan,
+    get_tracked_measurements_for_patient, delete_tracked_measurement,
+    get_previous_scan_for_patient
+)
 from report_export import build_case_report
+from same_location import SameLocationReview
+from measurement_tracker import MeasurementTracker, TrackedMeasurement
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -260,9 +269,80 @@ class MainWindow(QMainWindow):
 
         self.clinical_btn.clicked.connect(lambda: self._go_root(self.dashboard))
         self.viewer_btn.clicked.connect(lambda: self._go_root(self.viewer_3d))
-        self.or_icu_btn.clicked.connect(lambda: self._go_root(self.or_icu_mode))
+        self.or_icu_btn.clicked.connect(self._open_or_icu)
+        self.or_icu_mode.open_in_viewer_requested.connect(self._on_icu_or_open_in_viewer)
+        self.or_icu_mode.set_surgical_plan(self.viewer_3d.surgical_plan)
+        self.or_icu_mode.set_entry_requested.connect(self._on_icu_or_set_entry)
+        self.or_icu_mode.set_target_requested.connect(self._on_icu_or_set_target)
+        self.or_icu_mode.view_entry_requested.connect(self._on_icu_or_view_entry)
+        self.or_icu_mode.view_target_requested.connect(self._on_icu_or_view_target)
+        self.or_icu_mode.clear_entry_requested.connect(self._on_icu_or_clear_entry)
+        self.or_icu_mode.clear_target_requested.connect(self._on_icu_or_clear_target)
+        self.or_icu_mode.clear_both_requested.connect(self._on_icu_or_clear_both)
+        self.or_icu_mode.view_route_requested.connect(self._on_icu_or_view_route)
+        self.or_icu_mode.clear_route_requested.connect(self._on_icu_or_clear_route)
+        self.or_icu_mode.add_structure_requested.connect(self._on_icu_or_add_structure)
+        self.or_icu_mode.view_structure_requested.connect(self._on_icu_or_view_structure)
+        self.or_icu_mode.remove_structure_requested.connect(self._on_icu_or_remove_structure)
+        self.or_icu_mode.clear_structures_requested.connect(self._on_icu_or_clear_structures)
+        self.or_icu_mode.corridor_visibility_changed.connect(self._on_icu_or_corridor_visibility_changed)
+        self.or_icu_mode.corridor_radius_changed.connect(self._on_icu_or_corridor_radius_changed)
+        self.or_icu_mode.instrument_visibility_changed.connect(self._on_icu_or_instrument_visibility_changed)
+        self.or_icu_mode.instrument_depth_changed.connect(self._on_icu_or_instrument_depth_changed)
+        self.or_icu_mode.instrument_diameter_changed.connect(self._on_icu_or_instrument_diameter_changed)
+        self.or_icu_mode.view_instrument_requested.connect(self._on_icu_or_view_instrument)
+        self.or_icu_mode.deviation_visibility_changed.connect(self._on_icu_or_deviation_visibility_changed)
+        self.or_icu_mode.deviation_offsets_changed.connect(self._on_icu_or_deviation_offsets_changed)
+        self.or_icu_mode.deviation_angles_changed.connect(self._on_icu_or_deviation_angles_changed)
+        self.or_icu_mode.reset_deviation_requested.connect(self._on_icu_or_reset_deviation)
+        self.or_icu_mode.save_plan_requested.connect(self._on_icu_or_save_plan)
+        self.or_icu_mode.save_as_new_requested.connect(self._on_icu_or_save_as_new_plan)
+        self.or_icu_mode.restore_plan_requested.connect(self._on_icu_or_restore_plan)
+        self.or_icu_mode.delete_plan_requested.connect(self._on_icu_or_delete_plan)
+        self.or_icu_mode.rename_plan_requested.connect(self._on_icu_or_rename_plan)
+        self.viewer_3d.plan_save_requested.connect(self._on_icu_or_save_plan)
+        self.viewer_3d.plan_versions_requested.connect(self._on_icu_or_show_plan_versions)
+        self.or_icu_mode.quick_view_requested.connect(self._on_icu_or_quick_view)
+        self.viewer_3d.quick_view_applied.connect(self._on_viewer_quick_view_applied)
+
+        # Before vs After Comparison Signal Connections
+        self.or_icu_mode.start_comparison_requested.connect(self._on_icu_or_start_comparison)
+        self.or_icu_mode.exit_comparison_requested.connect(self._on_icu_or_exit_comparison)
+        self.or_icu_mode.toggle_comparison_view_requested.connect(self._on_icu_or_toggle_comparison_view)
+        self.or_icu_mode.comparison_mode_changed.connect(self._on_icu_or_comparison_mode_changed)
+        self.or_icu_mode.overlay_opacity_changed.connect(self._on_icu_or_overlay_opacity_changed)
+
+        # ICU Feature 1: Current vs Previous Scan Connections
+        self.or_icu_mode.icu_view_previous_requested.connect(self._on_icu_view_previous)
+        self.or_icu_mode.icu_view_current_requested.connect(self._on_icu_view_current)
+        self.or_icu_mode.icu_toggle_requested.connect(self._on_icu_toggle)
+        self.or_icu_mode.icu_exit_comparison_requested.connect(self._on_icu_exit_comparison)
+
+        # ICU Feature 2: Same-Location Review State & Connections
+        self.icu_same_location = SameLocationReview()
+        self.or_icu_mode.icu_mark_same_location_requested.connect(self._on_icu_mark_same_location)
+        self.or_icu_mode.icu_view_same_location_current_requested.connect(self._on_icu_view_same_location_current)
+        self.or_icu_mode.icu_view_same_location_previous_requested.connect(self._on_icu_view_same_location_previous)
+        self.or_icu_mode.icu_clear_same_location_requested.connect(self._on_icu_clear_same_location)
+
+        self.viewer_3d.icu_mark_same_location_requested.connect(self._on_icu_mark_same_location)
+        self.viewer_3d.icu_view_same_location_requested.connect(self._on_icu_view_same_location_current)
+        self.viewer_3d.icu_view_previous_location_requested.connect(self._on_icu_view_same_location_previous)
+        self.viewer_3d.icu_view_current_location_requested.connect(self._on_icu_view_same_location_current)
+        self.viewer_3d.icu_clear_same_location_requested.connect(self._on_icu_clear_same_location)
+
+        if hasattr(self.viewer_3d, "slice_viewer") and self.viewer_3d.slice_viewer:
+            self.viewer_3d.slice_viewer.same_location_selected.connect(self._on_same_location_selected)
+
+        # ICU Feature 3: Measurement Tracking State & Connections
+        self.measurement_tracker = MeasurementTracker()
+        self.or_icu_mode.icu_track_measurement_requested.connect(self._on_icu_track_measurement)
+        self.or_icu_mode.icu_delete_tracked_measurement_requested.connect(self._on_icu_delete_tracked_measurement)
+        self.or_icu_mode.icu_measurement_selection_changed.connect(self._on_icu_measurement_selection_changed)
+
 
         # --- Air Mouse Signal Connections ---
+
         signal_bus.cursor_moved.connect(self.move_os_cursor)
         signal_bus.pinch_started.connect(self.trigger_mouse_down)
         signal_bus.pinch_ended.connect(self.trigger_mouse_up)
@@ -759,6 +839,710 @@ class MainWindow(QMainWindow):
         self.viewer_3d.btn_mpr_mode.setChecked(False)
         self.viewer_3d._switch_view_mode(0)
         self._go_root(self.viewer_3d)
+
+    def _open_or_icu(self):
+        """Navigate to OR/ICU Mode, passing the active patient and scan."""
+        patient = getattr(self.viewer_3d, "current_patient", None) or getattr(self, "_last_patient", None)
+        scan = getattr(self.viewer_3d, "current_scan", None)
+        self.or_icu_mode.set_surgical_plan(self.viewer_3d.surgical_plan)
+        if patient:
+            self._last_patient = patient
+            self._audit_view(patient, "view_or_icu")
+            self.or_icu_mode.set_patient_and_scan(patient, scan)
+            self._sync_icu_measurement_tracker(patient, scan)
+        self._go_root(self.or_icu_mode)
+
+    def _on_icu_or_open_in_viewer(self, patient: dict, scan: dict):
+        """Return from ICU/OR to the 3D Viewer with the active patient and scan."""
+        if patient and scan:
+            self.show_3d_direct(patient, scan)
+        elif patient:
+            self.show_scans(patient)
+        else:
+            self._go_root(self.viewer_3d)
+
+    def _on_icu_or_set_entry(self):
+        """Switches to Viewer3D in SET_ENTRY picking mode."""
+        self._go_root(self.viewer_3d)
+        self.viewer_3d.set_planning_picking_mode("SET_ENTRY")
+        self.flash_status("Click 3D surface or 2D slice to set ENTRY")
+
+    def _on_icu_or_set_target(self):
+        """Switches to Viewer3D in SET_TARGET picking mode."""
+        self._go_root(self.viewer_3d)
+        self.viewer_3d.set_planning_picking_mode("SET_TARGET")
+        self.flash_status("Click 3D surface or 2D slice to set TARGET")
+
+    def _on_icu_or_view_entry(self):
+        """Switches to Viewer3D and navigates to ENTRY."""
+        self._go_root(self.viewer_3d)
+        self.viewer_3d.view_entry_point()
+
+    def _on_icu_or_view_target(self):
+        """Switches to Viewer3D and navigates to TARGET."""
+        self._go_root(self.viewer_3d)
+        self.viewer_3d.view_target_point()
+
+    def _on_icu_or_clear_entry(self):
+        """Clears ENTRY landmark and updates UI cards."""
+        self.viewer_3d.clear_entry_point()
+        if hasattr(self.or_icu_mode, "entry_target_card") and self.or_icu_mode.entry_target_card:
+            self.or_icu_mode.entry_target_card.update_landmarks(
+                self.viewer_3d.surgical_plan.entry_point,
+                self.viewer_3d.surgical_plan.target_point
+            )
+        if hasattr(self.or_icu_mode, "planned_route_card") and self.or_icu_mode.planned_route_card:
+            self.or_icu_mode.planned_route_card.update_route(self.viewer_3d.surgical_plan)
+        if hasattr(self.or_icu_mode, "structures_to_avoid_card") and self.or_icu_mode.structures_to_avoid_card:
+            self.or_icu_mode.structures_to_avoid_card.update_structures(self.viewer_3d.surgical_plan)
+        if hasattr(self.or_icu_mode, "surgical_corridor_card") and self.or_icu_mode.surgical_corridor_card:
+            self.or_icu_mode.surgical_corridor_card.update_corridor(self.viewer_3d.surgical_plan)
+        if hasattr(self.or_icu_mode, "virtual_instrument_card") and self.or_icu_mode.virtual_instrument_card:
+            self.or_icu_mode.virtual_instrument_card.update_instrument(self.viewer_3d.surgical_plan)
+        if hasattr(self.or_icu_mode, "live_deviation_card") and self.or_icu_mode.live_deviation_card:
+            self.or_icu_mode.live_deviation_card.update_deviation(self.viewer_3d.surgical_plan)
+        if hasattr(self.or_icu_mode, "quick_views_card") and self.or_icu_mode.quick_views_card:
+            self.or_icu_mode.quick_views_card.update_availability(self.viewer_3d.surgical_plan)
+
+    def _on_icu_or_clear_target(self):
+        """Clears TARGET landmark and updates UI cards."""
+        self.viewer_3d.clear_target_point()
+        if hasattr(self.or_icu_mode, "entry_target_card") and self.or_icu_mode.entry_target_card:
+            self.or_icu_mode.entry_target_card.update_landmarks(
+                self.viewer_3d.surgical_plan.entry_point,
+                self.viewer_3d.surgical_plan.target_point
+            )
+        if hasattr(self.or_icu_mode, "planned_route_card") and self.or_icu_mode.planned_route_card:
+            self.or_icu_mode.planned_route_card.update_route(self.viewer_3d.surgical_plan)
+        if hasattr(self.or_icu_mode, "structures_to_avoid_card") and self.or_icu_mode.structures_to_avoid_card:
+            self.or_icu_mode.structures_to_avoid_card.update_structures(self.viewer_3d.surgical_plan)
+        if hasattr(self.or_icu_mode, "surgical_corridor_card") and self.or_icu_mode.surgical_corridor_card:
+            self.or_icu_mode.surgical_corridor_card.update_corridor(self.viewer_3d.surgical_plan)
+        if hasattr(self.or_icu_mode, "virtual_instrument_card") and self.or_icu_mode.virtual_instrument_card:
+            self.or_icu_mode.virtual_instrument_card.update_instrument(self.viewer_3d.surgical_plan)
+        if hasattr(self.or_icu_mode, "live_deviation_card") and self.or_icu_mode.live_deviation_card:
+            self.or_icu_mode.live_deviation_card.update_deviation(self.viewer_3d.surgical_plan)
+        if hasattr(self.or_icu_mode, "quick_views_card") and self.or_icu_mode.quick_views_card:
+            self.or_icu_mode.quick_views_card.update_availability(self.viewer_3d.surgical_plan)
+
+    def _on_icu_or_clear_both(self):
+        """Clears both ENTRY and TARGET landmarks and planned route."""
+        self.viewer_3d.clear_both_planning_points()
+        if hasattr(self.or_icu_mode, "entry_target_card") and self.or_icu_mode.entry_target_card:
+            self.or_icu_mode.entry_target_card.update_landmarks(None, None)
+        if hasattr(self.or_icu_mode, "planned_route_card") and self.or_icu_mode.planned_route_card:
+            self.or_icu_mode.planned_route_card.update_route(self.viewer_3d.surgical_plan)
+        if hasattr(self.or_icu_mode, "structures_to_avoid_card") and self.or_icu_mode.structures_to_avoid_card:
+            self.or_icu_mode.structures_to_avoid_card.update_structures(self.viewer_3d.surgical_plan)
+        if hasattr(self.or_icu_mode, "surgical_corridor_card") and self.or_icu_mode.surgical_corridor_card:
+            self.or_icu_mode.surgical_corridor_card.update_corridor(self.viewer_3d.surgical_plan)
+        if hasattr(self.or_icu_mode, "virtual_instrument_card") and self.or_icu_mode.virtual_instrument_card:
+            self.or_icu_mode.virtual_instrument_card.update_instrument(self.viewer_3d.surgical_plan)
+        if hasattr(self.or_icu_mode, "live_deviation_card") and self.or_icu_mode.live_deviation_card:
+            self.or_icu_mode.live_deviation_card.update_deviation(self.viewer_3d.surgical_plan)
+        if hasattr(self.or_icu_mode, "quick_views_card") and self.or_icu_mode.quick_views_card:
+            self.or_icu_mode.quick_views_card.update_availability(self.viewer_3d.surgical_plan)
+
+    def _on_icu_or_view_route(self):
+        """Switches to Viewer3D and navigates to Planned Route midpoint."""
+        self._go_root(self.viewer_3d)
+        self.viewer_3d.view_planned_route()
+
+    def _on_icu_or_clear_route(self):
+        """Clears planned route (and landmarks)."""
+        self.viewer_3d.clear_planned_route()
+        if hasattr(self.or_icu_mode, "entry_target_card") and self.or_icu_mode.entry_target_card:
+            self.or_icu_mode.entry_target_card.update_landmarks(None, None)
+        if hasattr(self.or_icu_mode, "planned_route_card") and self.or_icu_mode.planned_route_card:
+            self.or_icu_mode.planned_route_card.update_route(self.viewer_3d.surgical_plan)
+        if hasattr(self.or_icu_mode, "structures_to_avoid_card") and self.or_icu_mode.structures_to_avoid_card:
+            self.or_icu_mode.structures_to_avoid_card.update_structures(self.viewer_3d.surgical_plan)
+        if hasattr(self.or_icu_mode, "surgical_corridor_card") and self.or_icu_mode.surgical_corridor_card:
+            self.or_icu_mode.surgical_corridor_card.update_corridor(self.viewer_3d.surgical_plan)
+        if hasattr(self.or_icu_mode, "virtual_instrument_card") and self.or_icu_mode.virtual_instrument_card:
+            self.or_icu_mode.virtual_instrument_card.update_instrument(self.viewer_3d.surgical_plan)
+        if hasattr(self.or_icu_mode, "live_deviation_card") and self.or_icu_mode.live_deviation_card:
+            self.or_icu_mode.live_deviation_card.update_deviation(self.viewer_3d.surgical_plan)
+        if hasattr(self.or_icu_mode, "quick_views_card") and self.or_icu_mode.quick_views_card:
+            self.or_icu_mode.quick_views_card.update_availability(self.viewer_3d.surgical_plan)
+
+    def _on_icu_or_add_structure(self):
+        """Switches to Viewer3D and enters ADD_STRUCTURE picking mode."""
+        self._go_root(self.viewer_3d)
+        self.viewer_3d.set_planning_picking_mode("ADD_STRUCTURE")
+        self.flash_status("Click 3D surface or 2D slice to mark structure to avoid")
+
+    def _on_icu_or_view_structure(self, structure_id: str):
+        """Switches to Viewer3D and navigates to structure physical position."""
+        self._go_root(self.viewer_3d)
+        self.viewer_3d.view_avoid_structure(structure_id)
+
+    def _on_icu_or_remove_structure(self, structure_id: str):
+        """Removes an individual structure to avoid and updates UI cards."""
+        self.viewer_3d.remove_avoid_structure(structure_id)
+        if hasattr(self.or_icu_mode, "structures_to_avoid_card") and self.or_icu_mode.structures_to_avoid_card:
+            self.or_icu_mode.structures_to_avoid_card.update_structures(self.viewer_3d.surgical_plan)
+        if hasattr(self.or_icu_mode, "surgical_corridor_card") and self.or_icu_mode.surgical_corridor_card:
+            self.or_icu_mode.surgical_corridor_card.update_corridor(self.viewer_3d.surgical_plan)
+        if hasattr(self.or_icu_mode, "virtual_instrument_card") and self.or_icu_mode.virtual_instrument_card:
+            self.or_icu_mode.virtual_instrument_card.update_instrument(self.viewer_3d.surgical_plan)
+        if hasattr(self.or_icu_mode, "live_deviation_card") and self.or_icu_mode.live_deviation_card:
+            self.or_icu_mode.live_deviation_card.update_deviation(self.viewer_3d.surgical_plan)
+        if hasattr(self.or_icu_mode, "quick_views_card") and self.or_icu_mode.quick_views_card:
+            self.or_icu_mode.quick_views_card.update_availability(self.viewer_3d.surgical_plan)
+
+    def _on_icu_or_clear_structures(self):
+        """Removes all structures to avoid and updates UI cards."""
+        self.viewer_3d.clear_avoid_structures()
+        if hasattr(self.or_icu_mode, "structures_to_avoid_card") and self.or_icu_mode.structures_to_avoid_card:
+            self.or_icu_mode.structures_to_avoid_card.update_structures(self.viewer_3d.surgical_plan)
+        if hasattr(self.or_icu_mode, "surgical_corridor_card") and self.or_icu_mode.surgical_corridor_card:
+            self.or_icu_mode.surgical_corridor_card.update_corridor(self.viewer_3d.surgical_plan)
+        if hasattr(self.or_icu_mode, "virtual_instrument_card") and self.or_icu_mode.virtual_instrument_card:
+            self.or_icu_mode.virtual_instrument_card.update_instrument(self.viewer_3d.surgical_plan)
+        if hasattr(self.or_icu_mode, "live_deviation_card") and self.or_icu_mode.live_deviation_card:
+            self.or_icu_mode.live_deviation_card.update_deviation(self.viewer_3d.surgical_plan)
+        if hasattr(self.or_icu_mode, "quick_views_card") and self.or_icu_mode.quick_views_card:
+            self.or_icu_mode.quick_views_card.update_availability(self.viewer_3d.surgical_plan)
+
+    def _on_icu_or_corridor_visibility_changed(self, visible: bool):
+        """Updates 3D and 2D surgical corridor visibility."""
+        self.viewer_3d.set_surgical_corridor_enabled(visible)
+
+    def _on_icu_or_corridor_radius_changed(self, radius_mm: float):
+        """Updates 3D and 2D surgical corridor radius."""
+        self.viewer_3d.set_surgical_corridor_radius(radius_mm)
+
+    def _on_icu_or_instrument_visibility_changed(self, visible: bool):
+        """Updates 3D and 2D virtual instrument visibility."""
+        self.viewer_3d.set_virtual_instrument_visible(visible)
+        if hasattr(self.or_icu_mode, "quick_views_card") and self.or_icu_mode.quick_views_card:
+            self.or_icu_mode.quick_views_card.update_availability(self.viewer_3d.surgical_plan)
+
+    def _on_icu_or_instrument_depth_changed(self, depth_mm: float):
+        """Updates 3D and 2D virtual instrument insertion depth."""
+        self.viewer_3d.set_virtual_instrument_depth(depth_mm)
+
+    def _on_icu_or_instrument_diameter_changed(self, diameter_mm: float):
+        """Updates 3D and 2D virtual instrument diameter."""
+        self.viewer_3d.set_virtual_instrument_diameter(diameter_mm)
+
+    def _on_icu_or_view_instrument(self):
+        """Switches to Viewer3D and centers camera/slices on virtual instrument tip."""
+        self._go_root(self.viewer_3d)
+        self.viewer_3d.view_virtual_instrument()
+
+    def _on_icu_or_deviation_visibility_changed(self, visible: bool):
+        """Updates 3D and 2D live deviation visibility."""
+        self.viewer_3d.set_live_deviation_visible(visible)
+        if hasattr(self.or_icu_mode, "quick_views_card") and self.or_icu_mode.quick_views_card:
+            self.or_icu_mode.quick_views_card.update_availability(self.viewer_3d.surgical_plan)
+
+    def _on_icu_or_deviation_offsets_changed(self, dx: float, dy: float, dz: float):
+        """Updates 3D and 2D live deviation offsets in mm."""
+        self.viewer_3d.set_live_deviation_offsets(dx, dy, dz)
+        if hasattr(self.or_icu_mode, "live_deviation_card") and self.or_icu_mode.live_deviation_card:
+            self.or_icu_mode.live_deviation_card.update_deviation(self.viewer_3d.surgical_plan)
+
+    def _on_icu_or_deviation_angles_changed(self, yaw_deg: float, pitch_deg: float):
+        """Updates 3D and 2D live deviation angles in degrees."""
+        self.viewer_3d.set_live_deviation_angles(yaw_deg, pitch_deg)
+        if hasattr(self.or_icu_mode, "live_deviation_card") and self.or_icu_mode.live_deviation_card:
+            self.or_icu_mode.live_deviation_card.update_deviation(self.viewer_3d.surgical_plan)
+
+    def _on_icu_or_reset_deviation(self):
+        """Resets simulated current instrument deviation to the planned trajectory."""
+        self.viewer_3d.reset_live_deviation_to_planned()
+        if hasattr(self.or_icu_mode, "live_deviation_card") and self.or_icu_mode.live_deviation_card:
+            self.or_icu_mode.live_deviation_card.update_deviation(self.viewer_3d.surgical_plan)
+
+    def _on_icu_or_save_plan(self):
+        """Saves current surgical plan to active version or creates a new version."""
+        scan = self.or_icu_mode.current_scan or getattr(self.viewer_3d, "current_scan", {})
+        scan_id = (scan.get("file_path") if scan else "") or str(scan.get("id", "") if scan else "")
+        if not scan_id and hasattr(self.viewer_3d, "surgical_plan") and self.viewer_3d.surgical_plan.scan_id:
+            scan_id = self.viewer_3d.surgical_plan.scan_id
+        if not scan_id:
+            self.flash_status("No active scan selected")
+            return
+
+        session = self.viewer_3d.surgical_plan
+        patient = self.or_icu_mode.current_patient or getattr(self.viewer_3d, "current_patient", {})
+        mrn = patient.get("mrn")
+
+        # If there is already an active saved version, update it
+        if session.active_version_id:
+            existing_v = get_surgical_plan_version(session.active_version_id)
+            name = existing_v["name"] if existing_v else "Plan 1"
+            snapshot = session.create_snapshot()
+            v = save_surgical_plan_version(scan_id, name, snapshot, version_id=session.active_version_id, patient_mrn=mrn)
+            session.mark_saved(v["id"])
+            if hasattr(self.or_icu_mode, "plan_versions_card") and self.or_icu_mode.plan_versions_card:
+                self.or_icu_mode.plan_versions_card.update_versions(session, scan_id)
+            self.flash_status(f"Updated {name}")
+        else:
+            self._on_icu_or_save_as_new_plan()
+
+    def _on_icu_or_save_as_new_plan(self):
+        """Saves current surgical plan as a new named version."""
+        scan = self.or_icu_mode.current_scan or getattr(self.viewer_3d, "current_scan", {})
+        scan_id = (scan.get("file_path") if scan else "") or str(scan.get("id", "") if scan else "")
+        if not scan_id and hasattr(self.viewer_3d, "surgical_plan") and self.viewer_3d.surgical_plan.scan_id:
+            scan_id = self.viewer_3d.surgical_plan.scan_id
+        if not scan_id:
+            self.flash_status("No active scan selected")
+            return
+
+        session = self.viewer_3d.surgical_plan
+        patient = self.or_icu_mode.current_patient or getattr(self.viewer_3d, "current_patient", {})
+        mrn = patient.get("mrn")
+
+        existing_versions = get_surgical_plan_versions(scan_id)
+        default_name = f"Plan {len(existing_versions) + 1}"
+
+        name = default_name
+        try:
+            from PyQt6.QtWidgets import QInputDialog
+            text, ok = QInputDialog.getText(self, "Save Plan As New Version", "Plan name:", text=default_name)
+            if ok and text.strip():
+                name = text.strip()
+            elif not ok:
+                return  # Cancelled by user
+        except Exception:
+            name = default_name
+
+        snapshot = session.create_snapshot()
+        v = save_surgical_plan_version(scan_id, name, snapshot, patient_mrn=mrn)
+        session.mark_saved(v["id"])
+        if hasattr(self.or_icu_mode, "plan_versions_card") and self.or_icu_mode.plan_versions_card:
+            self.or_icu_mode.plan_versions_card.update_versions(session, scan_id)
+        self.flash_status(f"Saved {name}")
+
+    def _on_icu_or_restore_plan(self, version_id: str):
+        """Restores a saved plan version after verifying scan safety."""
+        v = get_surgical_plan_version(version_id)
+        if not v:
+            self.flash_status("Plan version not found")
+            return
+
+        # Scan safety verification
+        scan = self.or_icu_mode.current_scan or getattr(self.viewer_3d, "current_scan", {})
+        current_scan_id = (scan.get("file_path") if scan else "") or str(scan.get("id", "") if scan else "")
+        if not current_scan_id and hasattr(self.viewer_3d, "surgical_plan") and self.viewer_3d.surgical_plan.scan_id:
+            current_scan_id = self.viewer_3d.surgical_plan.scan_id
+
+        if str(v.get("scan_id", "")) != str(current_scan_id):
+            self.flash_status("Plan belongs to a different scan")
+            return
+
+        # Deterministic restoration via viewer_3d
+        success = self.viewer_3d.restore_surgical_plan_snapshot(v["snapshot"])
+        if success:
+            self.viewer_3d.surgical_plan.mark_saved(version_id)
+            # Refresh all OR cards
+            if hasattr(self.or_icu_mode, "entry_target_card") and self.or_icu_mode.entry_target_card:
+                self.or_icu_mode.entry_target_card.update_landmarks(
+                    self.viewer_3d.surgical_plan.entry_point,
+                    self.viewer_3d.surgical_plan.target_point
+                )
+            if hasattr(self.or_icu_mode, "planned_route_card") and self.or_icu_mode.planned_route_card:
+                self.or_icu_mode.planned_route_card.update_route(self.viewer_3d.surgical_plan)
+            if hasattr(self.or_icu_mode, "structures_to_avoid_card") and self.or_icu_mode.structures_to_avoid_card:
+                self.or_icu_mode.structures_to_avoid_card.update_structures(self.viewer_3d.surgical_plan)
+            if hasattr(self.or_icu_mode, "surgical_corridor_card") and self.or_icu_mode.surgical_corridor_card:
+                self.or_icu_mode.surgical_corridor_card.update_corridor(self.viewer_3d.surgical_plan)
+            if hasattr(self.or_icu_mode, "virtual_instrument_card") and self.or_icu_mode.virtual_instrument_card:
+                self.or_icu_mode.virtual_instrument_card.update_instrument(self.viewer_3d.surgical_plan)
+            if hasattr(self.or_icu_mode, "live_deviation_card") and self.or_icu_mode.live_deviation_card:
+                self.or_icu_mode.live_deviation_card.update_deviation(self.viewer_3d.surgical_plan)
+            if hasattr(self.or_icu_mode, "plan_versions_card") and self.or_icu_mode.plan_versions_card:
+                self.or_icu_mode.plan_versions_card.update_versions(self.viewer_3d.surgical_plan, current_scan_id)
+            if hasattr(self.or_icu_mode, "quick_views_card") and self.or_icu_mode.quick_views_card:
+                self.or_icu_mode.quick_views_card.update_availability(self.viewer_3d.surgical_plan)
+            self.flash_status(f"Restored {v.get('name', 'plan')}")
+        else:
+            self.flash_status("Failed to restore plan")
+
+    def _on_icu_or_delete_plan(self, version_id: str):
+        """Deletes a saved plan version from database."""
+        deleted = delete_surgical_plan_version(version_id)
+        if deleted:
+            if self.viewer_3d.surgical_plan.active_version_id == version_id:
+                self.viewer_3d.surgical_plan.active_version_id = None
+            scan = self.or_icu_mode.current_scan or getattr(self.viewer_3d, "current_scan", {})
+            scan_id = (scan.get("file_path") if scan else "") or str(scan.get("id", "") if scan else "")
+            if hasattr(self.or_icu_mode, "plan_versions_card") and self.or_icu_mode.plan_versions_card:
+                self.or_icu_mode.plan_versions_card.update_versions(self.viewer_3d.surgical_plan, scan_id)
+            self.flash_status("Deleted plan version")
+
+    def _on_icu_or_rename_plan(self, version_id: str, new_name: str):
+        """Renames a saved plan version in database."""
+        renamed = rename_surgical_plan_version(version_id, new_name)
+        if renamed:
+            scan = self.or_icu_mode.current_scan or getattr(self.viewer_3d, "current_scan", {})
+            scan_id = (scan.get("file_path") if scan else "") or str(scan.get("id", "") if scan else "")
+            if hasattr(self.or_icu_mode, "plan_versions_card") and self.or_icu_mode.plan_versions_card:
+                self.or_icu_mode.plan_versions_card.update_versions(self.viewer_3d.surgical_plan, scan_id)
+            self.flash_status(f"Renamed to {new_name}")
+
+    def _on_icu_or_show_plan_versions(self):
+        """Navigates to OR mode and focuses plan versions."""
+        self._open_or_icu()
+        if hasattr(self.or_icu_mode, "set_mode"):
+            self.or_icu_mode.set_mode("OR")
+
+    def _on_icu_or_start_comparison(self, mode: str):
+        """Initiates Before vs After comparison on Viewer3D."""
+        if hasattr(self.or_icu_mode, "before_after_card") and self.or_icu_mode.before_after_card:
+            card = self.or_icu_mode.before_after_card
+            if card.before_scan and card.after_scan:
+                success = self.viewer_3d.start_before_after_comparison(card.before_scan, card.after_scan, mode)
+                if not success and card.lbl_error.text():
+                    self.flash_status(card.lbl_error.text())
+                else:
+                    self.flash_status(f"Before vs After comparison active [{mode}]")
+
+    def _on_icu_or_exit_comparison(self):
+        """Exits Before vs After comparison on Viewer3D."""
+        self.viewer_3d.exit_before_after_comparison()
+        self.flash_status("Comparison exited")
+
+    def _on_icu_or_toggle_comparison_view(self, view: str):
+        """Toggles between Before and After in comparison mode."""
+        self.viewer_3d.toggle_before_after_view(view)
+        self.flash_status(f"Comparison view: {view}")
+
+    def _on_icu_or_comparison_mode_changed(self, mode: str):
+        """Updates comparison display mode on Viewer3D."""
+        self.viewer_3d.set_comparison_mode(mode)
+        self.flash_status(f"Comparison mode: {mode}")
+
+    def _on_icu_or_overlay_opacity_changed(self, opacity: float):
+        """Updates comparison overlay opacity on Viewer3D."""
+        self.viewer_3d.set_comparison_overlay_opacity(opacity)
+
+    def _on_icu_or_quick_view(self, preset: str):
+        """Switches to Viewer3D and applies the quick surgical view preset."""
+        self._go_root(self.viewer_3d)
+        res = self.viewer_3d.apply_quick_surgical_view(preset)
+        if res and hasattr(self.or_icu_mode, "quick_views_card") and self.or_icu_mode.quick_views_card:
+            self.or_icu_mode.quick_views_card.set_active_preset(preset)
+
+    def _on_viewer_quick_view_applied(self, preset: str):
+        """Synchronizes the active preset indicator on the Quick Surgical Views card."""
+        if hasattr(self.or_icu_mode, "quick_views_card") and self.or_icu_mode.quick_views_card:
+            self.or_icu_mode.quick_views_card.set_active_preset(preset)
+
+    def _on_icu_view_previous(self, prev_scan: dict, curr_scan: dict):
+        """Switches to Viewer3D and displays the immediately previous scan for this patient."""
+        self._go_root(self.viewer_3d)
+        if prev_scan and curr_scan:
+            if not self.viewer_3d.comparison.is_active:
+                self.viewer_3d.start_before_after_comparison(prev_scan, curr_scan, "TOGGLE")
+            self.viewer_3d.toggle_before_after_view("BEFORE")
+            if hasattr(self.or_icu_mode, "current_previous_card") and self.or_icu_mode.current_previous_card:
+                self.or_icu_mode.current_previous_card.set_active_view("PREVIOUS")
+            self.flash_status("Viewing Previous Scan")
+
+    def _on_icu_view_current(self):
+        """Switches to Viewer3D and displays the current active scan."""
+        self._go_root(self.viewer_3d)
+        if self.viewer_3d.comparison.is_active:
+            self.viewer_3d.toggle_before_after_view("AFTER")
+        if hasattr(self.or_icu_mode, "current_previous_card") and self.or_icu_mode.current_previous_card:
+            self.or_icu_mode.current_previous_card.set_active_view("CURRENT")
+        self.flash_status("Viewing Current Scan")
+
+    def _on_icu_toggle(self, prev_scan: dict, curr_scan: dict):
+        """Toggles between Current and Previous scan on Viewer3D."""
+        self._go_root(self.viewer_3d)
+        if prev_scan and curr_scan:
+            if not self.viewer_3d.comparison.is_active:
+                self.viewer_3d.start_before_after_comparison(prev_scan, curr_scan, "TOGGLE")
+                self.viewer_3d.toggle_before_after_view("BEFORE")
+                new_view = "PREVIOUS"
+            else:
+                self.viewer_3d.toggle_before_after_view()
+                new_view = "PREVIOUS" if self.viewer_3d.comparison.current_view == "BEFORE" else "CURRENT"
+            if hasattr(self.or_icu_mode, "current_previous_card") and self.or_icu_mode.current_previous_card:
+                self.or_icu_mode.current_previous_card.set_active_view(new_view)
+            self.flash_status(f"Toggled to {new_view} Scan")
+
+    def _on_icu_exit_comparison(self):
+        """Exits comparison mode and restores normal single-scan display."""
+        self.viewer_3d.exit_before_after_comparison()
+        if hasattr(self.or_icu_mode, "current_previous_card") and self.or_icu_mode.current_previous_card:
+            self.or_icu_mode.current_previous_card.set_active_view("CURRENT")
+        self.flash_status("Comparison exited")
+
+    # ── ICU Feature 2: Same-Location Review Handlers ─────────────────────────
+    def _on_icu_mark_same_location(self):
+        """Activates 2D slice picking for same-location review and ensures 2D viewer is visible."""
+        self._go_root(self.viewer_3d)
+        if hasattr(self.viewer_3d, "set_2d_panel_visible"):
+            self.viewer_3d.set_2d_panel_visible(True)
+        if hasattr(self.viewer_3d, "slice_viewer") and self.viewer_3d.slice_viewer:
+            self.viewer_3d.slice_viewer.set_same_location_picking_mode(True)
+            self.flash_status("Click on 2D slice to mark same location")
+
+    def _on_same_location_selected(self, x_mm: float, y_mm: float, z_mm: float):
+        """Processes 2D slice click: stores canonical physical location and updates all viewers."""
+        current_geom = None
+        previous_geom = None
+
+        if hasattr(self.viewer_3d, "slice_viewer") and self.viewer_3d.slice_viewer and self.viewer_3d.slice_viewer.vol_data is not None:
+            sv = self.viewer_3d.slice_viewer
+            current_geom = {
+                "dims": sv.vol_data.shape,
+                "spacing": sv.pixel_spacing,
+                "thickness": sv.slice_thickness,
+                "origin": (0.0, 0.0, 0.0)
+            }
+
+        comp = getattr(self.viewer_3d, "comparison", None)
+        if comp and comp.before_volume is not None:
+            previous_geom = {
+                "dims": comp.before_volume.shape,
+                "spacing": comp.before_pixel_spacing or (1.0, 1.0),
+                "thickness": comp.before_slice_thickness or 1.0,
+                "origin": (0.0, 0.0, 0.0)
+            }
+
+        curr_scan = getattr(self.or_icu_mode, "current_scan", None) or getattr(self.viewer_3d, "current_scan", {}) or {}
+        curr_patient = getattr(self.or_icu_mode, "current_patient", None) or getattr(self.viewer_3d, "current_patient", {}) or {}
+        curr_id = str(curr_scan.get("id", "") or curr_scan.get("file_path", ""))
+        prev_id = str(comp.before_scan.get("id", "") or comp.before_scan.get("file_path", "")) if comp and comp.before_scan else ""
+        mrn = str(curr_patient.get("mrn", ""))
+
+        self.icu_same_location.set_location(
+            x_mm, y_mm, z_mm,
+            current_geom=current_geom,
+            previous_geom=previous_geom,
+            current_scan_id=curr_id,
+            previous_scan_id=prev_id,
+            patient_mrn=mrn
+        )
+
+        # Update card
+        if hasattr(self.or_icu_mode, "same_location_card") and self.or_icu_mode.same_location_card:
+            self.or_icu_mode.same_location_card.update_location(self.icu_same_location)
+
+        # Update 2D viewer
+        if hasattr(self.viewer_3d, "slice_viewer") and self.viewer_3d.slice_viewer:
+            loc_data = {
+                "is_active": True,
+                "x": x_mm, "y": y_mm, "z": z_mm,
+                "current_geom": current_geom,
+                "before_geom": previous_geom
+            }
+            self.viewer_3d.slice_viewer.set_same_location(loc_data)
+
+        # Update MPR
+        if hasattr(self.viewer_3d, "mpr_view") and self.viewer_3d.mpr_view:
+            self.viewer_3d.mpr_view.set_same_location(x_mm, y_mm, z_mm)
+
+        # Update 3D
+        self.viewer_3d.set_same_location_marker(x_mm, y_mm, z_mm)
+
+        self.flash_status(f"Marked Location ({x_mm:.1f}, {y_mm:.1f}, {z_mm:.1f}) mm")
+
+    def _on_icu_view_same_location_current(self):
+        """Switches to Current scan and centers 2D and MPR on the same location."""
+        self._on_icu_view_current()
+        coords = self.icu_same_location.get_physical_coordinates()
+        if coords:
+            x, y, z = coords
+            if hasattr(self.viewer_3d, "slice_viewer") and self.viewer_3d.slice_viewer:
+                self.viewer_3d.slice_viewer.navigate_to_physical_point(x, y, z)
+            if hasattr(self.viewer_3d, "mpr_view") and self.viewer_3d.mpr_view:
+                self.viewer_3d.mpr_view.snap_to_volume_point(x, y, z)
+
+    def _on_icu_view_same_location_previous(self):
+        """Switches to Previous scan and centers 2D and MPR on the corresponding location."""
+        if hasattr(self.or_icu_mode, "current_previous_card") and self.or_icu_mode.current_previous_card:
+            prev_scan = self.or_icu_mode.current_previous_card.previous_scan
+            curr_scan = getattr(self.or_icu_mode, "current_scan", None) or getattr(self.viewer_3d, "current_scan", {}) or {}
+            if prev_scan:
+                self._on_icu_view_previous(prev_scan, curr_scan)
+        coords = self.icu_same_location.get_physical_coordinates()
+        if coords:
+            x, y, z = coords
+            if hasattr(self.viewer_3d, "slice_viewer") and self.viewer_3d.slice_viewer:
+                self.viewer_3d.slice_viewer.navigate_to_physical_point(x, y, z)
+            if hasattr(self.viewer_3d, "mpr_view") and self.viewer_3d.mpr_view:
+                self.viewer_3d.mpr_view.snap_to_volume_point(x, y, z)
+
+    def _on_icu_clear_same_location(self):
+        """Clears same-location state from model, card, and viewers."""
+        self.icu_same_location.clear()
+        if hasattr(self.or_icu_mode, "same_location_card") and self.or_icu_mode.same_location_card:
+            self.or_icu_mode.same_location_card.clear_location()
+        if hasattr(self.viewer_3d, "slice_viewer") and self.viewer_3d.slice_viewer:
+            self.viewer_3d.slice_viewer.clear_same_location()
+        if hasattr(self.viewer_3d, "mpr_view") and self.viewer_3d.mpr_view:
+            self.viewer_3d.mpr_view.clear_same_location()
+        self.viewer_3d.clear_same_location_marker()
+        self.flash_status("Same Location cleared")
+
+    # ── ICU Feature 3: Measurement Tracking Handlers ─────────────────────────
+
+    def _sync_icu_measurement_tracker(self, patient: dict, scan: dict):
+        """Loads and synchronizes tracked measurements for the active patient and scans."""
+        mrn = str(patient.get("mrn", "")) if patient else ""
+        if not mrn:
+            self.measurement_tracker.clear()
+            self._update_icu_measurement_tracking_ui()
+            return
+
+        self.measurement_tracker.set_patient(mrn)
+
+        curr_id = str(scan.get("id", "") or scan.get("file_path", "")) if scan else ""
+
+        prev_scan = None
+        if hasattr(self.or_icu_mode, "current_previous_card") and self.or_icu_mode.current_previous_card:
+            prev_scan = self.or_icu_mode.current_previous_card.previous_scan
+        if not prev_scan and mrn:
+            prev_scan = get_previous_scan_for_patient(mrn, scan)
+        prev_id = str(prev_scan.get("id", "") or prev_scan.get("file_path", "")) if prev_scan else ""
+
+        self.measurement_tracker.set_scans(curr_id, prev_id)
+
+        if curr_id:
+            curr_db_list = get_tracked_measurements_for_scan(curr_id, mrn)
+            for d in curr_db_list:
+                m = TrackedMeasurement.from_dict(d)
+                self.measurement_tracker.add_measurement(m)
+
+        if prev_id:
+            prev_db_list = get_tracked_measurements_for_scan(prev_id, mrn)
+            for d in prev_db_list:
+                m = TrackedMeasurement.from_dict(d)
+                self.measurement_tracker.add_measurement(m)
+
+        self._update_icu_measurement_tracking_ui()
+
+    def _on_icu_track_measurement(self):
+        """Extracts the active/latest caliper measurement from 3D or 2D and tracks it."""
+        curr_patient = getattr(self.or_icu_mode, "current_patient", None) or getattr(self.viewer_3d, "current_patient", {}) or {}
+        mrn = str(curr_patient.get("mrn", ""))
+        if not mrn:
+            self.flash_status("No active patient to track measurement")
+            return
+
+        # Determine target scan based on comparison state
+        comp = getattr(self.viewer_3d, "comparison", None)
+        if comp and comp.is_active and comp.current_view == "BEFORE" and comp.before_scan:
+            target_scan = comp.before_scan
+            source_tag = "Previous"
+        else:
+            target_scan = getattr(self.or_icu_mode, "current_scan", None) or getattr(self.viewer_3d, "current_scan", {}) or {}
+            source_tag = "Current"
+
+        scan_id = str(target_scan.get("id", "") or target_scan.get("file_path", ""))
+        if not scan_id:
+            self.flash_status("No active scan to track measurement")
+            return
+
+        # Find latest measurement from 3D, 2D, or MPR
+        meas_data = None
+        # 1. Check 3D measurements
+        m3d = self.viewer_3d.get_measurements_3d()
+        if m3d:
+            latest_3d = m3d[-1]
+            dist = float(latest_3d.get("distance_mm", 0.0))
+            meas_data = {
+                "source": "3D",
+                "value_mm": dist,
+                "metadata": {"source": "3D", "pt1": latest_3d.get("pt1"), "pt2": latest_3d.get("pt2")}
+            }
+        # 2. Check 2D measurements if no 3D
+        if not meas_data and hasattr(self.viewer_3d, "panel_2d") and self.viewer_3d.panel_2d:
+            m2d = self.viewer_3d.panel_2d.get_measurements()
+            if m2d:
+                latest_2d = m2d[-1]
+                dist = float(latest_2d.distance_mm)
+                orient = getattr(latest_2d, "orientation", "2D").capitalize()
+                meas_data = {
+                    "source": f"2D {orient}",
+                    "value_mm": dist,
+                    "metadata": {
+                        "source": f"2D {orient}",
+                        "slice_idx": getattr(latest_2d, "slice_idx", 0),
+                        "physical_start": getattr(latest_2d, "physical_start", (0, 0, 0)),
+                        "physical_end": getattr(latest_2d, "physical_end", (0, 0, 0)),
+                    }
+                }
+        # 3. Check MPR if no 3D or 2D
+        if not meas_data and hasattr(self.viewer_3d, "mpr_view") and self.viewer_3d.mpr_view:
+            for plane_name, widget in [("Axial", getattr(self.viewer_3d.mpr_view, "w_axial", None)),
+                                       ("Coronal", getattr(self.viewer_3d.mpr_view, "w_coronal", None)),
+                                       ("Sagittal", getattr(self.viewer_3d.mpr_view, "w_sagittal", None))]:
+                if widget and hasattr(widget, "get_measurements"):
+                    m_list = widget.get_measurements()
+                    if m_list:
+                        latest_mpr = m_list[-1]
+                        dist = float(latest_mpr.distance_mm)
+                        meas_data = {
+                            "source": f"MPR {plane_name}",
+                            "value_mm": dist,
+                            "metadata": {"source": f"MPR {plane_name}"}
+                        }
+                        break
+
+        if not meas_data:
+            self.flash_status("No active caliper measurement to track")
+            return
+
+        import uuid
+        meas_id = f"meas_{uuid.uuid4().hex[:8]}"
+        value_mm = round(meas_data["value_mm"], 2)
+        label = f"[{meas_data['source']}]"
+
+        tracked = TrackedMeasurement(
+            id=meas_id,
+            scan_id=scan_id,
+            patient_mrn=mrn,
+            label=label,
+            value_mm=value_mm,
+            unit="mm",
+            metadata=meas_data.get("metadata", {})
+        )
+
+        save_tracked_measurement(
+            measurement_id=meas_id,
+            scan_id=scan_id,
+            patient_mrn=mrn,
+            label=label,
+            value_mm=value_mm,
+            unit="mm",
+            metadata=meas_data.get("metadata", {})
+        )
+
+        self.measurement_tracker.add_measurement(tracked)
+        self._update_icu_measurement_tracking_ui()
+        self.flash_status(f"Tracked measurement: {value_mm:.1f} mm ({source_tag})")
+
+    def _on_icu_delete_tracked_measurement(self, measurement_id: str):
+        """Deletes a tracked measurement from database and tracker."""
+        curr_patient = getattr(self.or_icu_mode, "current_patient", None) or getattr(self.viewer_3d, "current_patient", {}) or {}
+        mrn = str(curr_patient.get("mrn", ""))
+        delete_tracked_measurement(measurement_id, mrn if mrn else None)
+        self.measurement_tracker.remove_measurement(measurement_id)
+        self._update_icu_measurement_tracking_ui()
+        self.flash_status("Tracked measurement removed")
+
+    def _on_icu_measurement_selection_changed(self, current_id: str, prev_id: str):
+        """Updates selection in MeasurementTracker and updates side-by-side comparison readout."""
+        self.measurement_tracker.select_current(current_id if current_id else None)
+        self.measurement_tracker.select_previous(prev_id if prev_id else None)
+        self._update_icu_measurement_tracking_ui()
+
+    def _update_icu_measurement_tracking_ui(self):
+        """Refreshes the measurement tracking card in ICU mode."""
+        if hasattr(self.or_icu_mode, "measurement_tracking_card") and self.or_icu_mode.measurement_tracking_card:
+            self.or_icu_mode.measurement_tracking_card.update_tracking(self.measurement_tracker)
+
+
 
     # \u2500\u2500 Privacy auto-lock \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
     # A workstation left open in an OR/ICU is exposed PHI. After

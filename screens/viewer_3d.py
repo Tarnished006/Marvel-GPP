@@ -30,13 +30,16 @@ from PyQt6.QtWidgets import (
     QPushButton, QStackedWidget, QSizePolicy, QScrollArea,
     QComboBox, QFrame, QSlider, QSplitter, QMenu,
 )
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QAction
 from signal_bus import signal_bus
 from dicom_engine import DicomLoader, MeshSet
 from screens.mpr_view import MPRView
 from screens.slice_2d_viewer import Slice2DViewerWidget
 from screens.study_info_panel import StudyInfoDialog, StudyInfoPanel, extract_safe_metadata
+from surgical_plan import PlanningPoint, SurgicalPlanSession, AvoidStructure, SurgicalCorridor
+from before_after import BeforeAfterComparison
+
 
 try:
     from database import get_scans_for_ui
@@ -64,6 +67,15 @@ LOCAL_DATASETS = _discover_local_datasets()
 
 
 class Viewer3D(QWidget):
+    plan_save_requested = pyqtSignal()
+    plan_versions_requested = pyqtSignal()
+    quick_view_applied = pyqtSignal(str)
+    icu_mark_same_location_requested = pyqtSignal()
+    icu_view_same_location_requested = pyqtSignal()
+    icu_view_previous_location_requested = pyqtSignal()
+    icu_view_current_location_requested = pyqtSignal()
+    icu_clear_same_location_requested = pyqtSignal()
+
     # Very slow, smooth automatic rotation
     VOICE_SPIN_STEP_DEG = 0.35
     VOICE_SPIN_INTERVAL_MS = 40
@@ -112,6 +124,7 @@ class Viewer3D(QWidget):
         self._original_mesh    = None     # reference to unmodified complete bone mesh
         self._density_active   = False    # HU density colormap
         self._bone_opacity     = 1.0      # bone mesh opacity (0.1 to 1.0)
+        self._bone_mesh        = None
         self._spin_timer       = QTimer(self)
         self._spin_timer.timeout.connect(self._spin_tick)
 
@@ -129,6 +142,14 @@ class Viewer3D(QWidget):
         self._pending_3d_point        = None
         self._measurements_3d         = []
         self._measurement_actor_names = []
+
+        # ── Surgical Planning Landmark State (OR Mode: ENTRY + TARGET) ───────
+        self.surgical_plan = SurgicalPlanSession()
+        self._planning_picking_mode = "IDLE"  # "IDLE", "SET_ENTRY", "SET_TARGET"
+
+        # ── Before vs After Comparison State (OR Mode: Feature 8) ─────────────
+        self.comparison = BeforeAfterComparison()
+        self._comparison_actor_names = []
 
         # ── Study Information & Scan Metadata Panel ───────────────────────────
         self._safe_dicom_headers = None
@@ -621,7 +642,7 @@ class Viewer3D(QWidget):
         # ── Group 4: SYNCHRONIZATION (Row 2) ──────────────────────────────────
         row_bottom.addWidget(_make_group_lbl("SYNC:"))
 
-        self.btn_sync_toggle = QPushButton("🔗 Sync 2D ↔ 3D")
+        self.btn_sync_toggle = QPushButton("🔗 Sync: OFF")
         self.btn_sync_toggle.setCheckable(True)
         self.btn_sync_toggle.setChecked(False)
         self.btn_sync_toggle.setFixedHeight(24)
@@ -719,6 +740,7 @@ class Viewer3D(QWidget):
         self.view_split.setStyleSheet("QSplitter::handle { background: #1a1a1a; width: 4px; }")
         self.view_split.addWidget(self.plotter.interactor)
         self.panel_2d = Slice2DViewerWidget(parent=self)
+        self.slice_viewer = self.panel_2d
         self.panel_2d.setVisible(False)
         self.panel_2d.closed.connect(lambda: self.set_2d_panel_visible(False))
         self.panel_2d.slice_changed.connect(self._on_2d_slice_changed)
@@ -726,6 +748,7 @@ class Viewer3D(QWidget):
         self.panel_2d.measurement_added.connect(self._on_2d_measurement_added)
         self.panel_2d.measurement_cleared.connect(self._on_2d_measurement_cleared)
         self.panel_2d.physical_point_selected.connect(self._on_2d_physical_point_selected)
+        self.panel_2d.planning_point_selected.connect(self._on_2d_planning_point_selected)
         self.panel_2d.window_level_changed.connect(lambda w, l: self._notify_metadata_changed())
         self.panel_2d.orientation_changed.connect(lambda o: self._notify_metadata_changed())
         if hasattr(self.panel_2d, "btn_crosshair_toggle"):
@@ -1393,6 +1416,1365 @@ class Viewer3D(QWidget):
             self.plotter.render()
         self._notify_metadata_changed()
 
+    # ── Surgical Planning Landmark Methods (OR Mode: ENTRY + TARGET) ─────────
+
+    def set_planning_picking_mode(self, mode: str):
+        """Sets active landmark/structure picking mode (IDLE, SET_ENTRY, SET_TARGET, ADD_STRUCTURE)."""
+        valid_mode = mode if mode in ("SET_ENTRY", "SET_TARGET", "ADD_STRUCTURE") else "IDLE"
+        self._planning_picking_mode = valid_mode
+
+        if valid_mode == "SET_ENTRY":
+            if getattr(self, "_measuring_3d", False):
+                self.set_measuring_3d(False)
+            if hasattr(self, "info_bar") and self.info_bar:
+                self.info_bar.setText("  🎯 Select ENTRY landmark: click on 3D surface or 2D slice")
+        elif valid_mode == "SET_TARGET":
+            if getattr(self, "_measuring_3d", False):
+                self.set_measuring_3d(False)
+            if hasattr(self, "info_bar") and self.info_bar:
+                self.info_bar.setText("  🎯 Select TARGET landmark: click on 3D surface or 2D slice")
+        elif valid_mode == "ADD_STRUCTURE":
+            if getattr(self, "_measuring_3d", False):
+                self.set_measuring_3d(False)
+            if hasattr(self, "info_bar") and self.info_bar:
+                self.info_bar.setText("  ⚠️ Select structure location: click on 3D surface or 2D slice")
+        else:
+            if hasattr(self, "info_bar") and self.info_bar:
+                self.info_bar.setText("  🎯 Landmark picking: IDLE")
+
+        if hasattr(self, "panel_2d") and self.panel_2d is not None:
+            self.panel_2d.set_planning_picking_mode(valid_mode)
+
+    def is_planning_picking(self) -> bool:
+        return getattr(self, "_planning_picking_mode", "IDLE") != "IDLE"
+
+    def set_entry_point(self, x: float, y: float, z: float, source_view: str = "3D") -> PlanningPoint:
+        """Stores physical coordinates (X, Y, Z) in mm for ENTRY and updates visual markers."""
+        pt = self.surgical_plan.set_entry(x, y, z, source_view=source_view)
+        self._render_planning_marker(pt)
+        self._render_planned_route()
+        self._sync_planning_landmarks_to_2d()
+        if hasattr(self, "info_bar") and self.info_bar:
+            self.info_bar.setText(f"  🎯 ENTRY set to ({x:.1f}, {y:.1f}, {z:.1f}) mm")
+        return pt
+
+    def set_target_point(self, x: float, y: float, z: float, source_view: str = "3D") -> PlanningPoint:
+        """Stores physical coordinates (X, Y, Z) in mm for TARGET and updates visual markers."""
+        pt = self.surgical_plan.set_target(x, y, z, source_view=source_view)
+        self._render_planning_marker(pt)
+        self._render_planned_route()
+        self._sync_planning_landmarks_to_2d()
+        if hasattr(self, "info_bar") and self.info_bar:
+            self.info_bar.setText(f"  🎯 TARGET set to ({x:.1f}, {y:.1f}, {z:.1f}) mm")
+        return pt
+
+    def clear_entry_point(self):
+        """Removes ENTRY landmark, leaving TARGET intact."""
+        self.surgical_plan.clear_entry()
+        self._remove_planning_marker("ENTRY")
+        self._render_planned_route()
+        self._sync_planning_landmarks_to_2d()
+        if hasattr(self, "info_bar") and self.info_bar:
+            self.info_bar.setText("  🎯 ENTRY landmark cleared")
+
+    def clear_target_point(self):
+        """Removes TARGET landmark, leaving ENTRY intact."""
+        self.surgical_plan.clear_target()
+        self._remove_planning_marker("TARGET")
+        self._render_planned_route()
+        self._sync_planning_landmarks_to_2d()
+        if hasattr(self, "info_bar") and self.info_bar:
+            self.info_bar.setText("  🎯 TARGET landmark cleared")
+
+    def clear_both_planning_points(self):
+        """Removes both ENTRY and TARGET landmarks and the planned route."""
+        self.surgical_plan.clear_both()
+        self._remove_planning_marker("ENTRY")
+        self._remove_planning_marker("TARGET")
+        self._remove_planned_route()
+        self._sync_planning_landmarks_to_2d()
+        if hasattr(self, "info_bar") and self.info_bar:
+            self.info_bar.setText("  🎯 Planning landmarks and route cleared")
+
+    def view_entry_point(self):
+        """Navigates 2D slice panel and MPR viewports to the physical coordinates of ENTRY."""
+        if not self.surgical_plan.entry_point:
+            if hasattr(self, "info_bar") and self.info_bar:
+                self.info_bar.setText("  ⚠️ ENTRY point not marked")
+            return
+        pt = self.surgical_plan.entry_point
+        if hasattr(self, "mpr_view") and self.mpr_view:
+            self.mpr_view.snap_to_volume_point(pt.x_mm, pt.y_mm, pt.z_mm)
+        if hasattr(self, "panel_2d") and self.panel_2d:
+            self.panel_2d.set_physical_position(pt.x_mm, pt.y_mm, pt.z_mm)
+        if hasattr(self, "info_bar") and self.info_bar:
+            self.info_bar.setText(f"  🎯 Viewing ENTRY: ({pt.x_mm:.1f}, {pt.y_mm:.1f}, {pt.z_mm:.1f}) mm")
+
+    def view_target_point(self):
+        """Navigates 2D slice panel and MPR viewports to the physical coordinates of TARGET."""
+        if not self.surgical_plan.target_point:
+            if hasattr(self, "info_bar") and self.info_bar:
+                self.info_bar.setText("  ⚠️ TARGET point not marked")
+            return
+        pt = self.surgical_plan.target_point
+        if hasattr(self, "mpr_view") and self.mpr_view:
+            self.mpr_view.snap_to_volume_point(pt.x_mm, pt.y_mm, pt.z_mm)
+        if hasattr(self, "panel_2d") and self.panel_2d:
+            self.panel_2d.set_physical_position(pt.x_mm, pt.y_mm, pt.z_mm)
+        if hasattr(self, "info_bar") and self.info_bar:
+            self.info_bar.setText(f"  🎯 Viewing TARGET: ({pt.x_mm:.1f}, {pt.y_mm:.1f}, {pt.z_mm:.1f}) mm")
+
+    def view_planned_route(self):
+        """Navigates 2D slice panel and MPR viewports to the midpoint of the planned route."""
+        route = self.surgical_plan.get_planned_route()
+        if not route:
+            if hasattr(self, "info_bar") and self.info_bar:
+                self.info_bar.setText("  ⚠️ Planned route requires both ENTRY and TARGET")
+            return
+
+        mx = (route.entry_point.x_mm + route.target_point.x_mm) / 2.0
+        my = (route.entry_point.y_mm + route.target_point.y_mm) / 2.0
+        mz = (route.entry_point.z_mm + route.target_point.z_mm) / 2.0
+
+        if hasattr(self, "mpr_view") and self.mpr_view:
+            self.mpr_view.snap_to_volume_point(mx, my, mz)
+        if hasattr(self, "panel_2d") and self.panel_2d:
+            self.panel_2d.set_physical_position(mx, my, mz)
+        if hasattr(self, "info_bar") and self.info_bar:
+            self.info_bar.setText(f"  🚀 Planned Route: {route.length_mm:.1f} mm · Midpoint ({mx:.1f}, {my:.1f}, {mz:.1f}) mm")
+
+    def clear_planned_route(self):
+        """Clears the planned route by clearing planning landmarks."""
+        self.clear_both_planning_points()
+
+    def set_planned_route_visible(self, visible: bool):
+        """Toggles visibility of the 3D planned route in the scene."""
+        self._planned_route_visible = bool(visible)
+        if hasattr(self, "plotter") and self.plotter is not None:
+            act = self.plotter.actors.get("or_planned_route")
+            if act:
+                act.SetVisibility(self._planned_route_visible)
+            for k in list(self.plotter.actors.keys()):
+                if "or_planned_route_label" in k:
+                    self.plotter.actors[k].SetVisibility(self._planned_route_visible)
+            self.plotter.render()
+
+    def _render_planning_marker(self, pt: PlanningPoint):
+        """Renders distinct 3D sphere marker and text label in plotter."""
+        if not hasattr(self, "plotter") or self.plotter is None:
+            return
+
+        is_entry = (pt.point_type == "ENTRY")
+        marker_name = "or_entry_marker" if is_entry else "or_target_marker"
+        label_name = "or_entry_label" if is_entry else "or_target_label"
+        color = "#00ff7f" if is_entry else "#ff3366"  # Distinct Emerald Green vs Coral Red
+        label_text = "ENTRY" if is_entry else "TARGET"
+
+        radius = 2.8
+        if getattr(self, "mesh_bounds", None) is not None:
+            xmin, xmax, ymin, ymax, zmin, zmax = self.mesh_bounds
+            diag = ((xmax - xmin)**2 + (ymax - ymin)**2 + (zmax - zmin)**2)**0.5
+            radius = max(2.0, diag * 0.016)
+
+        try:
+            sphere = pv.Sphere(radius=radius, center=(pt.x_mm, pt.y_mm, pt.z_mm))
+            self.plotter.add_mesh(
+                sphere,
+                name=marker_name,
+                color=color,
+                specular=0.7,
+                specular_power=25,
+                ambient=0.4,
+                render=False
+            )
+            self.plotter.add_point_labels(
+                [[pt.x_mm, pt.y_mm, pt.z_mm]],
+                [label_text],
+                name=label_name,
+                point_color=color,
+                point_size=1,
+                text_color="#ffffff",
+                fill_shape=True,
+                shape_color="#111111",
+                shape_opacity=0.85,
+                font_size=11,
+                always_visible=True,
+                render=False
+            )
+            self.plotter.render()
+        except Exception as exc:
+            print(f"[Viewer3D] Error rendering {pt.point_type} marker: {exc}")
+
+    def _remove_planning_marker(self, point_type: str):
+        """Removes the 3D marker and label for the specified landmark."""
+        if not hasattr(self, "plotter") or self.plotter is None:
+            return
+        is_entry = (point_type == "ENTRY")
+        marker_name = "or_entry_marker" if is_entry else "or_target_marker"
+        label_name = "or_entry_label" if is_entry else "or_target_label"
+        try:
+            self.plotter.remove_actor(marker_name, render=False)
+            self.plotter.remove_actor(label_name, render=False)
+            if f"{label_name}-labels" in self.plotter.actors:
+                self.plotter.remove_actor(f"{label_name}-labels", render=False)
+            if f"{label_name}-points" in self.plotter.actors:
+                self.plotter.remove_actor(f"{label_name}-points", render=False)
+            self.plotter.render()
+        except Exception:
+            pass
+
+    def _render_planned_route(self):
+        """Renders geometric planned route line/tube and length label connecting Entry and Target."""
+        if not hasattr(self, "plotter") or self.plotter is None:
+            return
+        route = self.surgical_plan.get_planned_route()
+        if not route or route.length_mm < 1e-3:
+            self._remove_planned_route()
+            return
+
+        p1 = (route.entry_point.x_mm, route.entry_point.y_mm, route.entry_point.z_mm)
+        p2 = (route.target_point.x_mm, route.target_point.y_mm, route.target_point.z_mm)
+
+        try:
+            line_mesh = pv.Line(p1, p2)
+            radius = 1.2
+            if getattr(self, "mesh_bounds", None) is not None:
+                xmin, xmax, ymin, ymax, zmin, zmax = self.mesh_bounds
+                diag = ((xmax - xmin)**2 + (ymax - ymin)**2 + (zmax - zmin)**2)**0.5
+                radius = max(0.8, diag * 0.007)
+
+            tube_mesh = line_mesh.tube(radius=radius)
+            self.plotter.add_mesh(
+                tube_mesh,
+                name="or_planned_route",
+                color="#00e5ff",  # Distinct Surgical Cyan
+                specular=0.8,
+                specular_power=30,
+                ambient=0.4,
+                render=False
+            )
+
+            midpoint = [
+                (p1[0] + p2[0]) / 2.0,
+                (p1[1] + p2[1]) / 2.0,
+                (p1[2] + p2[2]) / 2.0,
+            ]
+            self.plotter.add_point_labels(
+                [midpoint],
+                [f"Route: {route.length_mm:.1f} mm"],
+                name="or_planned_route_label",
+                point_color="#00e5ff",
+                point_size=1,
+                text_color="#ffffff",
+                fill_shape=True,
+                shape_color="#111111",
+                shape_opacity=0.85,
+                font_size=11,
+                always_visible=True,
+                render=False
+            )
+            self.plotter.render()
+            if hasattr(self, "surgical_plan") and self.surgical_plan.has_surgical_corridor():
+                self._render_surgical_corridor()
+            if hasattr(self, "surgical_plan") and self.surgical_plan.has_virtual_instrument() and self.surgical_plan.instrument_visible:
+                self._render_virtual_instrument()
+            if hasattr(self, "surgical_plan") and self.surgical_plan.has_live_deviation() and self.surgical_plan.deviation_visible:
+                self._render_live_deviation()
+        except Exception as exc:
+            print(f"[Viewer3D] Error rendering planned route: {exc}")
+
+    def _remove_planned_route(self):
+        """Removes the planned route actor and label from the 3D scene."""
+        self._remove_surgical_corridor()
+        self._remove_virtual_instrument()
+        self._remove_live_deviation()
+        if not hasattr(self, "plotter") or self.plotter is None:
+            return
+        try:
+            self.plotter.remove_actor("or_planned_route", render=False)
+            self.plotter.remove_actor("or_planned_route_label", render=False)
+            if "or_planned_route_label-labels" in self.plotter.actors:
+                self.plotter.remove_actor("or_planned_route_label-labels", render=False)
+            if "or_planned_route_label-points" in self.plotter.actors:
+                self.plotter.remove_actor("or_planned_route_label-points", render=False)
+            self.plotter.render()
+        except Exception:
+            pass
+
+    # ── Surgical Corridor Management Methods (OR Mode: Feature 4) ─────────────
+
+    def set_surgical_corridor_enabled(self, enabled: bool):
+        """Enables or disables 3D/2D rendering of the surgical corridor."""
+        self.surgical_plan.set_corridor_enabled(enabled)
+        if enabled and self.surgical_plan.has_planned_route():
+            self._render_surgical_corridor()
+        else:
+            self._remove_surgical_corridor()
+        self._sync_planning_landmarks_to_2d()
+
+    def set_surgical_corridor_radius(self, radius_mm: float):
+        """Updates corridor radius in mm and refreshes 3D/2D geometry immediately."""
+        self.surgical_plan.set_corridor_radius(radius_mm)
+        if self.surgical_plan.has_surgical_corridor():
+            self._render_surgical_corridor()
+        self._sync_planning_landmarks_to_2d()
+
+    def _render_surgical_corridor(self):
+        """Renders 3D translucent cylinder/tube around the planned route in plotter."""
+        if not hasattr(self, "plotter") or self.plotter is None:
+            return
+        corridor = self.surgical_plan.get_surgical_corridor()
+        if not corridor or not corridor.is_enabled or corridor.length_mm < 1e-3:
+            self._remove_surgical_corridor()
+            return
+
+        p1 = (corridor.route.entry_point.x_mm, corridor.route.entry_point.y_mm, corridor.route.entry_point.z_mm)
+        p2 = (corridor.route.target_point.x_mm, corridor.route.target_point.y_mm, corridor.route.target_point.z_mm)
+
+        try:
+            line_mesh = pv.Line(p1, p2)
+            cylinder_mesh = line_mesh.tube(radius=corridor.radius_mm)
+            self.plotter.add_mesh(
+                cylinder_mesh,
+                name="or_surgical_corridor",
+                color="#7c4dff",  # Distinct Translucent Violet
+                opacity=0.35,
+                specular=0.5,
+                ambient=0.3,
+                render=False
+            )
+            midpoint = [
+                (p1[0] + p2[0]) / 2.0,
+                (p1[1] + p2[1]) / 2.0,
+                (p1[2] + p2[2]) / 2.0,
+            ]
+            self.plotter.add_point_labels(
+                [midpoint],
+                [f"Corridor: R={corridor.radius_mm:.1f} mm"],
+                name="or_surgical_corridor_label",
+                point_color="#7c4dff",
+                point_size=1,
+                text_color="#ffffff",
+                fill_shape=True,
+                shape_color="#181818",
+                shape_opacity=0.85,
+                font_size=10,
+                always_visible=True,
+                render=False
+            )
+            self.plotter.render()
+        except Exception as exc:
+            print(f"[Viewer3D] Error rendering surgical corridor: {exc}")
+
+    def _remove_surgical_corridor(self):
+        """Removes the surgical corridor actor and label from the 3D scene."""
+        if not hasattr(self, "plotter") or self.plotter is None:
+            return
+        try:
+            self.plotter.remove_actor("or_surgical_corridor", render=False)
+            self.plotter.remove_actor("or_surgical_corridor_label", render=False)
+            if "or_surgical_corridor_label-labels" in self.plotter.actors:
+                self.plotter.remove_actor("or_surgical_corridor_label-labels", render=False)
+            if "or_surgical_corridor_label-points" in self.plotter.actors:
+                self.plotter.remove_actor("or_surgical_corridor_label-points", render=False)
+            self.plotter.render()
+        except Exception:
+            pass
+
+    # ── Virtual Instrument Management Methods (OR Mode: Feature 5) ─────────────
+
+    def set_virtual_instrument_visible(self, visible: bool):
+        """Enables or disables 3D/2D rendering of the virtual instrument."""
+        self.surgical_plan.set_instrument_visible(visible)
+        if visible and self.surgical_plan.has_planned_route():
+            self._render_virtual_instrument()
+        else:
+            self._remove_virtual_instrument()
+        self._sync_planning_landmarks_to_2d()
+
+    def set_virtual_instrument_depth(self, depth_mm: float):
+        """Updates virtual instrument insertion depth in mm and refreshes 3D/2D geometry."""
+        self.surgical_plan.set_insertion_depth(depth_mm)
+        if self.surgical_plan.has_virtual_instrument() and self.surgical_plan.instrument_visible:
+            self._render_virtual_instrument()
+        self._sync_planning_landmarks_to_2d()
+
+    def set_virtual_instrument_diameter(self, diameter_mm: float):
+        """Updates virtual instrument diameter in mm and refreshes 3D/2D geometry."""
+        self.surgical_plan.set_instrument_diameter(diameter_mm)
+        if self.surgical_plan.has_virtual_instrument() and self.surgical_plan.instrument_visible:
+            self._render_virtual_instrument()
+        self._sync_planning_landmarks_to_2d()
+
+    def view_virtual_instrument(self):
+        """Centers the 3D camera and snaps 2D/MPR slice views to the current virtual tip position."""
+        inst = self.surgical_plan.get_virtual_instrument() if hasattr(self, "surgical_plan") else None
+        if not inst:
+            return
+        tip_x, tip_y, tip_z = inst.tip_position_mm
+        if hasattr(self, "plotter") and self.plotter is not None:
+            self.plotter.camera.focal_point = (tip_x, tip_y, tip_z)
+            self.plotter.render()
+        if hasattr(self, "_snap_slice_viewers"):
+            self._snap_slice_viewers(tip_x, tip_y, tip_z)
+        elif hasattr(self, "snap_to_volume_point"):
+            self.snap_to_volume_point(tip_x, tip_y, tip_z)
+        elif hasattr(self, "panel_2d") and hasattr(self.panel_2d, "set_physical_position"):
+            self.panel_2d.set_physical_position(tip_x, tip_y, tip_z)
+
+    def _render_virtual_instrument(self):
+        """Renders 3D cylinder shaft and tip marker for the virtual instrument in plotter."""
+        if not hasattr(self, "plotter") or self.plotter is None:
+            return
+        inst = self.surgical_plan.get_virtual_instrument() if hasattr(self, "surgical_plan") else None
+        if not inst or not inst.is_visible:
+            self._remove_virtual_instrument()
+            return
+
+        ex, ey, ez = inst.route.entry_point.coordinates
+        tip_x, tip_y, tip_z = inst.tip_position_mm
+        depth = inst.insertion_depth_mm
+        radius = inst.diameter_mm / 2.0
+
+        try:
+            # 1. Shaft Cylinder (rendered when depth > 1e-3)
+            if depth > 1e-3:
+                line_mesh = pv.Line((ex, ey, ez), (tip_x, tip_y, tip_z))
+                cylinder_mesh = line_mesh.tube(radius=radius)
+                self.plotter.add_mesh(
+                    cylinder_mesh,
+                    name="or_virtual_instrument",
+                    color="#ffd600",  # High-visibility Gold / Amber
+                    opacity=0.85,
+                    specular=0.6,
+                    ambient=0.4,
+                    render=False
+                )
+            else:
+                self.plotter.remove_actor("or_virtual_instrument", render=False)
+
+            # 2. Tip Marker (Sphere at tip position)
+            tip_sphere = pv.Sphere(radius=max(1.5, radius * 1.2), center=(tip_x, tip_y, tip_z))
+            self.plotter.add_mesh(
+                tip_sphere,
+                name="or_virtual_instrument_tip",
+                color="#ffffff",  # White tip highlight
+                opacity=1.0,
+                specular=0.8,
+                ambient=0.5,
+                render=False
+            )
+
+            # 3. Tip Label
+            self.plotter.add_point_labels(
+                [[tip_x, tip_y, tip_z]],
+                [f"Tip: {depth:.1f} mm"],
+                name="or_virtual_instrument_label",
+                point_color="#ffd600",
+                point_size=1,
+                text_color="#ffffff",
+                fill_shape=True,
+                shape_color="#181818",
+                shape_opacity=0.85,
+                font_size=10,
+                always_visible=True,
+                render=False
+            )
+            self.plotter.render()
+        except Exception as exc:
+            print(f"[Viewer3D] Error rendering virtual instrument: {exc}")
+
+    def _remove_virtual_instrument(self):
+        """Removes virtual instrument actors and label from the 3D scene."""
+        if not hasattr(self, "plotter") or self.plotter is None:
+            return
+        try:
+            self.plotter.remove_actor("or_virtual_instrument", render=False)
+            self.plotter.remove_actor("or_virtual_instrument_tip", render=False)
+            self.plotter.remove_actor("or_virtual_instrument_label", render=False)
+            if "or_virtual_instrument_label-labels" in self.plotter.actors:
+                self.plotter.remove_actor("or_virtual_instrument_label-labels", render=False)
+            if "or_virtual_instrument_label-points" in self.plotter.actors:
+                self.plotter.remove_actor("or_virtual_instrument_label-points", render=False)
+            self.plotter.render()
+        except Exception:
+            pass
+
+    # ── Live Deviation Management Methods (OR Mode: Feature 6) ────────────────
+
+    def set_live_deviation_visible(self, visible: bool):
+        """Enables or disables 3D/2D rendering of simulated current instrument and deviation connector."""
+        self.surgical_plan.set_deviation_visible(visible)
+        if visible and self.surgical_plan.has_planned_route():
+            self._render_live_deviation()
+        else:
+            self._remove_live_deviation()
+        self._sync_planning_landmarks_to_2d()
+
+    def set_live_deviation_offsets(self, dx: float, dy: float, dz: float):
+        """Updates simulation offsets in physical mm and refreshes 3D/2D geometry."""
+        self.surgical_plan.set_deviation_offsets(dx, dy, dz)
+        if self.surgical_plan.has_live_deviation() and self.surgical_plan.deviation_visible:
+            self._render_live_deviation()
+        self._sync_planning_landmarks_to_2d()
+
+    def set_live_deviation_angles(self, yaw_deg: float, pitch_deg: float):
+        """Updates simulation yaw/pitch angles in degrees and refreshes 3D/2D geometry."""
+        self.surgical_plan.set_deviation_angles(yaw_deg, pitch_deg)
+        if self.surgical_plan.has_live_deviation() and self.surgical_plan.deviation_visible:
+            self._render_live_deviation()
+        self._sync_planning_landmarks_to_2d()
+
+    def reset_live_deviation_to_planned(self):
+        """Resets all simulation offsets and angles to 0.0, aligning the current instrument with the Planned Route."""
+        self.surgical_plan.reset_deviation_to_planned()
+        if self.surgical_plan.has_live_deviation() and self.surgical_plan.deviation_visible:
+            self._render_live_deviation()
+        self._sync_planning_landmarks_to_2d()
+
+    def _render_live_deviation(self):
+        """Renders 3D simulated instrument, current tip, deviation connector line, and label."""
+        if not hasattr(self, "plotter") or self.plotter is None:
+            return
+        pose = self.surgical_plan.get_current_instrument_pose() if hasattr(self, "surgical_plan") else None
+        if not pose or not pose.is_visible:
+            self._remove_live_deviation()
+            return
+
+        cx, cy, cz = pose.current_tip_position_mm
+        nx, ny, nz = pose.nearest_planned_point_mm
+        dx_vec, dy_vec, dz_vec = pose.current_direction_vector
+        route_len = pose.route.length_mm
+        radius = pose.diameter_mm / 2.0
+
+        # Shaft back point: tip - length * dir
+        sx = cx - route_len * dx_vec
+        sy = cy - route_len * dy_vec
+        sz = cz - route_len * dz_vec
+
+        try:
+            # 1. Simulated Current Instrument Shaft (Coral/Red cylinder)
+            shaft_line = pv.Line((sx, sy, sz), (cx, cy, cz))
+            shaft_mesh = shaft_line.tube(radius=radius)
+            self.plotter.add_mesh(
+                shaft_mesh,
+                name="or_live_instrument",
+                color="#ff5252",  # Coral / Red for current simulated instrument
+                opacity=0.85,
+                specular=0.6,
+                ambient=0.4,
+                render=False
+            )
+
+            # 2. Simulated Current Tip Marker (Sphere at current tip)
+            tip_sphere = pv.Sphere(radius=max(1.8, radius * 1.3), center=(cx, cy, cz))
+            self.plotter.add_mesh(
+                tip_sphere,
+                name="or_live_instrument_tip",
+                color="#ff1744",  # Vivid red tip
+                opacity=1.0,
+                specular=0.8,
+                ambient=0.5,
+                render=False
+            )
+
+            # 3. Deviation Connector Line from Nearest Planned Point to Current Tip
+            if pose.lateral_deviation_mm > 0.1:
+                dev_line = pv.Line((nx, ny, nz), (cx, cy, cz))
+                dev_mesh = dev_line.tube(radius=max(0.5, radius * 0.4))
+                self.plotter.add_mesh(
+                    dev_mesh,
+                    name="or_live_deviation_line",
+                    color="#ff1744",  # High-visibility red connector
+                    opacity=0.9,
+                    render=False
+                )
+            else:
+                self.plotter.remove_actor("or_live_deviation_line", render=False)
+
+            # 4. Neutral Deviation Label at midpoint of connector
+            mid_pt = [(nx + cx) / 2.0, (ny + cy) / 2.0, (nz + cz) / 2.0]
+            label_text = f"Dev: {pose.lateral_deviation_mm:.1f} mm"
+            if abs(pose.yaw_deg) > 0.1 or abs(pose.pitch_deg) > 0.1:
+                label_text += f" | {pose.angular_deviation_deg:.1f}°"
+
+            self.plotter.add_point_labels(
+                [mid_pt],
+                [label_text],
+                name="or_live_deviation_label",
+                point_color="#ff1744",
+                point_size=1,
+                text_color="#ffffff",
+                fill_shape=True,
+                shape_color="#181818",
+                shape_opacity=0.85,
+                font_size=10,
+                always_visible=True,
+                render=False
+            )
+            self.plotter.render()
+        except Exception as exc:
+            print(f"[Viewer3D] Error rendering live deviation: {exc}")
+
+    def _remove_live_deviation(self):
+        """Removes simulated current instrument actors, tip, connector, and labels from 3D scene."""
+        if not hasattr(self, "plotter") or self.plotter is None:
+            return
+        try:
+            self.plotter.remove_actor("or_live_instrument", render=False)
+            self.plotter.remove_actor("or_live_instrument_tip", render=False)
+            self.plotter.remove_actor("or_live_deviation_line", render=False)
+            self.plotter.remove_actor("or_live_deviation_label", render=False)
+            if "or_live_deviation_label-labels" in self.plotter.actors:
+                self.plotter.remove_actor("or_live_deviation_label-labels", render=False)
+            if "or_live_deviation_label-points" in self.plotter.actors:
+                self.plotter.remove_actor("or_live_deviation_label-points", render=False)
+            self.plotter.render()
+        except Exception:
+            pass
+
+    def _sync_planning_landmarks_to_2d(self):
+        """Passes active Entry, Target, Avoid Structures, Surgical Corridor, Virtual Instrument, and Live Deviation to 2D slice panel and MPR views."""
+        entry = self.surgical_plan.entry_point.coordinates if self.surgical_plan.entry_point else None
+        target = self.surgical_plan.target_point.coordinates if self.surgical_plan.target_point else None
+        avoid_structs = self.surgical_plan.get_avoid_structures() if hasattr(self, "surgical_plan") else []
+        corridor = self.surgical_plan.get_surgical_corridor() if hasattr(self, "surgical_plan") else None
+        instrument = self.surgical_plan.get_virtual_instrument() if hasattr(self, "surgical_plan") else None
+        pose = self.surgical_plan.get_current_instrument_pose() if hasattr(self, "surgical_plan") else None
+        if hasattr(self, "panel_2d") and self.panel_2d is not None:
+            self.panel_2d.set_planning_landmarks(entry, target)
+            self.panel_2d.set_avoid_structures(avoid_structs)
+            self.panel_2d.set_surgical_corridor(corridor)
+            self.panel_2d.set_virtual_instrument(instrument)
+            self.panel_2d.set_current_instrument_pose(pose)
+        if hasattr(self, "mpr_view") and self.mpr_view is not None:
+            self.mpr_view.set_planned_route(entry, target)
+            self.mpr_view.set_avoid_structures(avoid_structs)
+            self.mpr_view.set_surgical_corridor(corridor)
+            self.mpr_view.set_virtual_instrument(instrument)
+            self.mpr_view.set_current_instrument_pose(pose)
+
+
+
+    def _on_2d_planning_point_selected(self, pt_type: str, x_mm: float, y_mm: float, z_mm: float):
+        """Slot called when 2D slice click commits an ENTRY, TARGET, or STRUCTURE point."""
+        if pt_type == "ENTRY":
+            self.set_entry_point(x_mm, y_mm, z_mm, source_view="2D")
+        elif pt_type == "TARGET":
+            self.set_target_point(x_mm, y_mm, z_mm, source_view="2D")
+        elif pt_type == "STRUCTURE":
+            self.add_avoid_structure(x_mm, y_mm, z_mm, source_view="2D")
+        self.set_planning_picking_mode("IDLE")
+
+    def restore_surgical_plan_snapshot(self, snapshot: dict) -> bool:
+        """Restores planning state from snapshot and updates 3D, 2D, and MPR views."""
+        # 1. Clear 3D actors
+        self._remove_planning_marker("ENTRY")
+        self._remove_planning_marker("TARGET")
+        self._remove_planned_route()
+        self._remove_all_avoid_structure_actors()
+        self._remove_surgical_corridor()
+        self._remove_virtual_instrument()
+        self._remove_live_deviation()
+
+        # 2. Restore session
+        success = self.surgical_plan.restore_snapshot(snapshot)
+        if not success:
+            return False
+
+        # 3. Render 3D actors
+        if self.surgical_plan.entry_point:
+            self._render_planning_marker(self.surgical_plan.entry_point)
+        if self.surgical_plan.target_point:
+            self._render_planning_marker(self.surgical_plan.target_point)
+        if self.surgical_plan.has_planned_route():
+            self._render_planned_route()
+        for struct in self.surgical_plan.get_avoid_structures():
+            self._render_avoid_structure(struct)
+        if self.surgical_plan.has_surgical_corridor():
+            self._render_surgical_corridor()
+        if self.surgical_plan.has_virtual_instrument() and self.surgical_plan.instrument_visible:
+            self._render_virtual_instrument()
+        if self.surgical_plan.has_live_deviation() and self.surgical_plan.deviation_visible:
+            self._render_live_deviation()
+
+        # 4. Synchronize 2D & MPR
+        self._sync_planning_landmarks_to_2d()
+        if hasattr(self, "info_bar") and self.info_bar:
+            self.info_bar.setText("  📂 Restored surgical plan version")
+        return True
+
+    # ── Before vs After Comparison Methods (OR Mode: Feature 8) ───────────────
+
+    def start_before_after_comparison(self, before_scan: dict, after_scan: dict, mode: str = "TOGGLE") -> bool:
+        """Initiates visual comparison between Before and After scans for the same patient.
+        
+        Strictly preserves the current active surgical plan and avoids duplicate viewer creation.
+        """
+        mrn = str(self.current_patient.get("mrn", "") if self.current_patient else "").strip() or None
+        if not self.comparison.set_before_scan(before_scan, mrn):
+            if hasattr(self, "info_bar") and self.info_bar:
+                self.info_bar.setText(f"  ❌ {self.comparison.validation_error}")
+            return False
+
+        if not self.comparison.set_after_scan(after_scan, mrn):
+            if hasattr(self, "info_bar") and self.info_bar:
+                self.info_bar.setText(f"  ❌ {self.comparison.validation_error}")
+            return False
+
+        if not self.comparison.can_compare():
+            if hasattr(self, "info_bar") and self.info_bar:
+                self.info_bar.setText(f"  ❌ {self.comparison.validation_error or 'Both Before and After scans required'}")
+            return False
+
+        # Cache active After volume & mesh data from currently loaded state
+        if self.comparison.after_volume is None and hasattr(self, "mpr_view"):
+            self.comparison.after_volume = getattr(self.mpr_view, "vol_data", None)
+            self.comparison.after_pixel_spacing = getattr(self.mpr_view, "pixel_spacing", (1.0, 1.0))
+            self.comparison.after_slice_thickness = getattr(self.mpr_view, "slice_thickness", 1.0)
+            self.comparison.after_anatomy = getattr(self.mpr_view, "current_anatomy", "general")
+        if self.comparison.after_mesh is None:
+            self.comparison.after_mesh = getattr(self, "_bone_mesh", None)
+
+        # Pre-load & cache Before scan volume data ONCE
+        before_path = before_scan.get("file_path", "")
+        if before_path and os.path.isdir(before_path) and self.comparison.before_volume is None:
+            try:
+                from dicom_engine import load_volume_for_mpr
+                vol, sp, z_sp, anat = load_volume_for_mpr(before_path)
+                self.comparison.before_volume = vol
+                self.comparison.before_pixel_spacing = sp
+                self.comparison.before_slice_thickness = z_sp
+                self.comparison.before_anatomy = anat
+            except Exception as exc:
+                print(f"[Viewer3D] Warning: could not load Before volume: {exc}")
+
+        # Pre-load & cache Before scan bone mesh ONCE
+        if before_path and os.path.isdir(before_path) and self.comparison.before_mesh is None:
+            try:
+                from dicom_engine import DicomLoader
+                preset = "skull" if "skull" in before_path.lower() else "body"
+                loader = DicomLoader(before_path)
+                mset = loader.load_scan(iso_preset=preset)
+                if mset and mset.bone_mesh:
+                    self.comparison.before_mesh = mset.bone_mesh
+            except Exception as exc:
+                print(f"[Viewer3D] Warning: could not load Before mesh: {exc}")
+
+        # Start comparison
+        self.comparison.start_comparison(mode)
+        self._apply_comparison_visualization()
+        if hasattr(self, "info_bar") and self.info_bar:
+            self.info_bar.setText(f"  ⚖️ Before vs After comparison active [{mode}]")
+        return True
+
+    def exit_before_after_comparison(self):
+        """Exits comparison mode, cleans up comparison actors, and restores active view."""
+        self.comparison.exit_comparison()
+        self._remove_comparison_actors()
+
+        # Restore normal active bone mesh in 3D
+        if getattr(self, "_bone_mesh", None) is not None:
+            self._render_normal_bone(self._bone_mesh)
+
+        # Restore 2D slice viewer
+        if hasattr(self, "panel_2d") and self.panel_2d is not None:
+            self.panel_2d.set_comparison_state(False)
+
+        # Restore MPR view
+        if hasattr(self, "mpr_view") and self.mpr_view is not None:
+            self.mpr_view.set_comparison_view(None)
+
+        self.plotter.render()
+        if hasattr(self, "info_bar") and self.info_bar:
+            self.info_bar.setText("  Comparison inactive")
+
+    def toggle_before_after_view(self, target: str | None = None):
+        """Toggles between BEFORE and AFTER in TOGGLE mode."""
+        if not self.comparison.is_active:
+            return
+        if target in ("BEFORE", "AFTER"):
+            self.comparison.current_view = target
+        else:
+            self.comparison.toggle_view()
+        self._apply_comparison_visualization()
+
+    def set_comparison_mode(self, mode: str):
+        """Updates comparison display mode ('TOGGLE', 'SIDE_BY_SIDE', 'OVERLAY')."""
+        if not self.comparison.is_active:
+            return
+        self.comparison.set_display_mode(mode)
+        self._apply_comparison_visualization()
+
+    def set_comparison_overlay_opacity(self, opacity: float):
+        """Updates overlay opacity in 2D and 3D views."""
+        self.comparison.set_overlay_opacity(opacity)
+        if self.comparison.is_active:
+            if hasattr(self, "panel_2d") and self.panel_2d is not None:
+                self.panel_2d.set_comparison_state(
+                    True,
+                    self.comparison.display_mode,
+                    self.comparison.current_view,
+                    self.comparison.before_volume,
+                    self.comparison.overlay_opacity
+                )
+            if self.comparison.display_mode == "OVERLAY":
+                self._apply_comparison_visualization()
+
+    def _remove_comparison_actors(self):
+        """Cleans up all comparison 3D actors from plotter without touching planning actors."""
+        actor_names = [
+            "comparison_before_mesh",
+            "comparison_label",
+            "comparison_label-labels",
+            "comparison_label-points",
+            "comparison_watermark",
+            "comparison_watermark-labels",
+            "comparison_watermark-points",
+        ]
+        for name in actor_names:
+            try:
+                self.plotter.remove_actor(name, render=False)
+            except Exception:
+                pass
+
+    def _apply_comparison_visualization(self):
+        """Applies neutral visual comparison to 3D, 2D, and MPR without modifying planning state."""
+        self._remove_comparison_actors()
+
+        # 1. 3D Visualization
+        mode = self.comparison.display_mode
+        view = self.comparison.current_view
+
+        if mode == "TOGGLE":
+            if view == "BEFORE":
+                # Render Before mesh in cyan with BEFORE label
+                mesh_to_show = self.comparison.before_mesh or getattr(self, "_bone_mesh", None)
+                if mesh_to_show is not None:
+                    try:
+                        self.plotter.remove_actor("bone", render=False)
+                    except Exception:
+                        pass
+                    self.plotter.add_mesh(
+                        mesh_to_show,
+                        color="#00e5ff",
+                        smooth_shading=True,
+                        ambient=0.35,
+                        diffuse=0.75,
+                        opacity=1.0,
+                        name="comparison_before_mesh"
+                    )
+                self.plotter.add_text("PREVIOUS", position="upper_right", font_size=12, color="#00e5ff", name="comparison_label")
+            else:  # AFTER
+                if getattr(self, "_bone_mesh", None) is not None:
+                    self._render_normal_bone(self._bone_mesh)
+                self.plotter.add_text("CURRENT", position="upper_right", font_size=12, color="#7cfc00", name="comparison_label")
+
+        elif mode == "SIDE_BY_SIDE":
+            # Render After in normal position, Before shifted along X
+            if getattr(self, "_bone_mesh", None) is not None:
+                self._render_normal_bone(self._bone_mesh)
+            mesh_to_shift = self.comparison.before_mesh or getattr(self, "_bone_mesh", None)
+            if mesh_to_shift is not None:
+                bnds = mesh_to_shift.bounds
+                span_x = (bnds[1] - bnds[0]) * 1.25 if bnds else 200.0
+                try:
+                    shifted_before = mesh_to_shift.copy().translate([-span_x, 0.0, 0.0])
+                    self.plotter.add_mesh(
+                        shifted_before,
+                        color="#00e5ff",
+                        smooth_shading=True,
+                        ambient=0.35,
+                        diffuse=0.75,
+                        opacity=1.0,
+                        name="comparison_before_mesh"
+                    )
+                except Exception as exc:
+                    print(f"[Viewer3D] Side-by-side shift error: {exc}")
+            self.plotter.add_text("BEFORE (Left)  |  AFTER (Right)", position="upper_right", font_size=11, color="#e0e0e0", name="comparison_label")
+
+        elif mode == "OVERLAY":
+            # Render After mesh + Before mesh with opacity and 'Unregistered Overlay' watermark
+            if getattr(self, "_bone_mesh", None) is not None:
+                self._render_normal_bone(self._bone_mesh)
+            mesh_overlay = self.comparison.before_mesh or getattr(self, "_bone_mesh", None)
+            if mesh_overlay is not None:
+                self.plotter.add_mesh(
+                    mesh_overlay,
+                    color="#00e5ff",
+                    smooth_shading=True,
+                    opacity=self.comparison.overlay_opacity,
+                    name="comparison_before_mesh"
+                )
+            self.plotter.add_text("Unregistered Overlay", position="lower_left", font_size=11, color="#ffb300", name="comparison_watermark")
+
+        # 2. 2D Slice Viewer Synchronization
+        if hasattr(self, "panel_2d") and self.panel_2d is not None:
+            self.panel_2d.set_comparison_state(
+                True,
+                mode,
+                view,
+                self.comparison.before_volume,
+                self.comparison.overlay_opacity
+            )
+
+        # 3. MPR View Synchronization
+        if hasattr(self, "mpr_view") and self.mpr_view is not None:
+            mpr_view_target = view if mode == "TOGGLE" else "AFTER"
+            self.mpr_view.set_comparison_view(
+                mpr_view_target,
+                self.comparison.before_volume,
+                (self.comparison.before_pixel_spacing, self.comparison.before_slice_thickness)
+            )
+
+        self.plotter.render()
+
+    # ── Structures to Avoid Management Methods (OR Mode: Feature 3) ─────────
+
+    def add_avoid_structure(self, x: float, y: float, z: float, radius_mm: float = 5.0, name: str = "", source_view: str = "3D") -> AvoidStructure:
+        """Stores physical coordinates (X, Y, Z) in mm for a structure to avoid and renders its 3D marker."""
+        struct = self.surgical_plan.add_avoid_structure(x, y, z, radius_mm=radius_mm, name=name, source_view=source_view)
+        self._render_avoid_structure(struct)
+        self._sync_planning_landmarks_to_2d()
+        if hasattr(self, "info_bar") and self.info_bar:
+            self.info_bar.setText(f"  ⚠️ Added {struct.name} at ({x:.1f}, {y:.1f}, {z:.1f}) mm · Radius {struct.radius_mm:.1f} mm")
+        return struct
+
+    def remove_avoid_structure(self, structure_id: str) -> bool:
+        """Removes a single avoid structure by its identifier and removes its 3D actor."""
+        struct = self.surgical_plan.get_avoid_structure(structure_id)
+        sname = struct.name if struct else structure_id
+        removed = self.surgical_plan.remove_avoid_structure(structure_id)
+        if removed:
+            self._remove_avoid_structure_actor(structure_id)
+            self._sync_planning_landmarks_to_2d()
+            if hasattr(self, "info_bar") and self.info_bar:
+                self.info_bar.setText(f"  ⚠️ Removed {sname}")
+        return removed
+
+    def clear_avoid_structures(self):
+        """Removes all avoid structures and their 3D actors."""
+        self.surgical_plan.clear_avoid_structures()
+        self._remove_all_avoid_structure_actors()
+        self._sync_planning_landmarks_to_2d()
+        if hasattr(self, "info_bar") and self.info_bar:
+            self.info_bar.setText("  ⚠️ All avoid structures cleared")
+
+    def view_avoid_structure(self, structure_id: str):
+        """Navigates 2D slice panel and MPR viewports to the physical coordinates of the structure."""
+        struct = self.surgical_plan.get_avoid_structure(structure_id)
+        if not struct:
+            if hasattr(self, "info_bar") and self.info_bar:
+                self.info_bar.setText("  ⚠️ Structure not found")
+            return
+        if hasattr(self, "mpr_view") and self.mpr_view:
+            self.mpr_view.snap_to_volume_point(struct.center_x_mm, struct.center_y_mm, struct.center_z_mm)
+        if hasattr(self, "panel_2d") and self.panel_2d:
+            self.panel_2d.set_physical_position(struct.center_x_mm, struct.center_y_mm, struct.center_z_mm)
+        if hasattr(self, "info_bar") and self.info_bar:
+            self.info_bar.setText(f"  ⚠️ Viewing {struct.name}: ({struct.center_x_mm:.1f}, {struct.center_y_mm:.1f}, {struct.center_z_mm:.1f}) mm")
+
+    def _render_avoid_structure(self, struct: AvoidStructure):
+        """Renders 3D sphere marker and text label in plotter for an avoid structure."""
+        if not hasattr(self, "plotter") or self.plotter is None:
+            return
+        actor_name = f"or_avoid_structure_{struct.structure_id}"
+        label_name = f"or_avoid_structure_label_{struct.structure_id}"
+        try:
+            sphere = pv.Sphere(radius=struct.radius_mm, center=struct.center)
+            self.plotter.add_mesh(
+                sphere,
+                name=actor_name,
+                color="#ff9100",  # Distinct Amber Warning
+                opacity=0.55,
+                specular=0.7,
+                specular_power=25,
+                ambient=0.4,
+                render=False
+            )
+            self.plotter.add_point_labels(
+                [[struct.center_x_mm, struct.center_y_mm, struct.center_z_mm]],
+                [struct.name],
+                name=label_name,
+                point_color="#ff9100",
+                point_size=1,
+                text_color="#ffffff",
+                fill_shape=True,
+                shape_color="#181818",
+                shape_opacity=0.85,
+                font_size=10,
+                always_visible=True,
+                render=False
+            )
+            self.plotter.render()
+        except Exception as exc:
+            print(f"[Viewer3D] Error rendering avoid structure {struct.structure_id}: {exc}")
+
+    def _remove_avoid_structure_actor(self, structure_id: str):
+        """Removes the 3D marker and label for the specified avoid structure."""
+        if not hasattr(self, "plotter") or self.plotter is None:
+            return
+        actor_name = f"or_avoid_structure_{structure_id}"
+        label_name = f"or_avoid_structure_label_{structure_id}"
+        try:
+            self.plotter.remove_actor(actor_name, render=False)
+            self.plotter.remove_actor(label_name, render=False)
+            if f"{label_name}-labels" in self.plotter.actors:
+                self.plotter.remove_actor(f"{label_name}-labels", render=False)
+            if f"{label_name}-points" in self.plotter.actors:
+                self.plotter.remove_actor(f"{label_name}-points", render=False)
+            self.plotter.render()
+        except Exception:
+            pass
+
+    def _remove_all_avoid_structure_actors(self):
+        """Removes all avoid structure actors and labels from the 3D scene."""
+        if not hasattr(self, "plotter") or self.plotter is None:
+            return
+        actors_to_remove = [k for k in self.plotter.actors.keys() if k.startswith("or_avoid_structure_")]
+        for act in actors_to_remove:
+            try:
+                self.plotter.remove_actor(act, render=False)
+            except Exception:
+                pass
+        self.plotter.render()
+
+    # ── ICU Feature 2: Same-Location Review 3D Marker ─────────────────────────
+    def set_same_location_marker(self, x_mm: float, y_mm: float, z_mm: float):
+        """Renders 3D sphere marker and text label for ICU Same-Location Review."""
+        if not hasattr(self, "plotter") or self.plotter is None:
+            return
+        self.clear_same_location_marker()
+        actor_name = "icu_same_location_marker"
+        label_name = "icu_same_location_label"
+        try:
+            sphere = pv.Sphere(radius=2.5, center=(float(x_mm), float(y_mm), float(z_mm)))
+            self.plotter.add_mesh(
+                sphere,
+                name=actor_name,
+                color="#00e5ff",  # Vibrant Cyan
+                opacity=0.9,
+                specular=0.8,
+                ambient=0.3,
+                render=False
+            )
+            self.plotter.add_point_labels(
+                [[float(x_mm), float(y_mm), float(z_mm)]],
+                ["Same Location"],
+                name=label_name,
+                point_color="#00e5ff",
+                point_size=1,
+                text_color="#ffffff",
+                fill_shape=True,
+                shape_color="#101010",
+                shape_opacity=0.85,
+                font_size=10,
+                always_visible=True,
+                render=False
+            )
+            self.plotter.render()
+        except Exception as exc:
+            print(f"[Viewer3D] Error rendering same-location marker: {exc}")
+
+    def clear_same_location_marker(self):
+        """Removes the 3D marker and label for ICU Same-Location Review."""
+        if not hasattr(self, "plotter") or self.plotter is None:
+            return
+        try:
+            self.plotter.remove_actor("icu_same_location_marker", render=False)
+            self.plotter.remove_actor("icu_same_location_label", render=False)
+            if "icu_same_location_label-labels" in self.plotter.actors:
+                self.plotter.remove_actor("icu_same_location_label-labels", render=False)
+            if "icu_same_location_label-points" in self.plotter.actors:
+                self.plotter.remove_actor("icu_same_location_label-points", render=False)
+            self.plotter.render()
+        except Exception:
+            pass
+
+    # ── Quick Surgical Views Methods (OR Mode: Feature 9) ───────────────────
+
+    def _center_camera_point(self, x: float, y: float, z: float, dist: float = 120.0):
+        """Centers the 3D camera focal point on a physical point (X, Y, Z) in mm, preserving viewing angle."""
+        if not hasattr(self, "plotter") or self.plotter is None:
+            return
+        center = np.array([x, y, z], dtype=float)
+        cam = self.plotter.camera
+        curr_focal = np.array(cam.focal_point, dtype=float)
+        curr_pos = np.array(cam.position, dtype=float)
+        direction = curr_pos - curr_focal
+        dir_len = np.linalg.norm(direction)
+        if dir_len < 1e-4:
+            norm_dir = np.array([0.0, -1.0, 0.0], dtype=float)
+        else:
+            norm_dir = direction / dir_len
+
+        cam.focal_point = tuple(center)
+        cam.position = tuple(center + norm_dir * dist)
+        self.plotter.render()
+
+    def _frame_camera_bounds(self, bounds: tuple[float, float, float, float, float, float], margin_factor: float = 1.3):
+        """Frames the 3D camera smoothly around physical bounding box (xmin, xmax, ymin, ymax, zmin, zmax) in mm."""
+        if not hasattr(self, "plotter") or self.plotter is None:
+            return
+        xmin, xmax, ymin, ymax, zmin, zmax = bounds
+        cx = (xmin + xmax) / 2.0
+        cy = (ymin + ymax) / 2.0
+        cz = (zmin + zmax) / 2.0
+        center = np.array([cx, cy, cz], dtype=float)
+
+        dx = max(10.0, xmax - xmin)
+        dy = max(10.0, ymax - ymin)
+        dz = max(10.0, zmax - zmin)
+        diag = np.sqrt(dx ** 2 + dy ** 2 + dz ** 2)
+        dist = max(50.0, float(diag * margin_factor))
+
+        cam = self.plotter.camera
+        curr_focal = np.array(cam.focal_point, dtype=float)
+        curr_pos = np.array(cam.position, dtype=float)
+        direction = curr_pos - curr_focal
+        dir_len = np.linalg.norm(direction)
+        if dir_len < 1e-4:
+            norm_dir = np.array([0.0, -1.0, 0.0], dtype=float)
+        else:
+            norm_dir = direction / dir_len
+
+        cam.focal_point = tuple(center)
+        cam.position = tuple(center + norm_dir * dist)
+        self.plotter.render()
+
+    def _snap_slice_viewers(self, x_mm: float, y_mm: float, z_mm: float):
+        """Helper to snap both 2D slice viewer and MPR viewports to physical point (X, Y, Z) in mm."""
+        if hasattr(self, "mpr_view") and self.mpr_view is not None:
+            self.mpr_view.snap_to_volume_point(x_mm, y_mm, z_mm)
+        if hasattr(self, "panel_2d") and self.panel_2d is not None:
+            self.panel_2d.set_physical_position(x_mm, y_mm, z_mm)
+
+    def get_quick_view_availability(self) -> dict[str, bool]:
+        """Returns the availability state of all 6 Quick Surgical View presets."""
+        plan = getattr(self, "surgical_plan", None)
+        if not plan:
+            return {
+                "ENTRY": False,
+                "TARGET": False,
+                "ROUTE": False,
+                "STRUCTURES": False,
+                "INSTRUMENT": False,
+                "FULL PLAN": False,
+            }
+
+        has_entry = plan.has_entry()
+        has_target = plan.has_target()
+        has_route = plan.has_planned_route()
+        has_structures = len(plan.get_avoid_structures()) > 0
+        has_instrument = (
+            (plan.has_virtual_instrument() and getattr(plan, "instrument_visible", False)) or
+            (plan.has_live_deviation() and getattr(plan, "deviation_visible", False))
+        )
+        has_any = has_entry or has_target or has_structures or has_instrument
+
+        return {
+            "ENTRY": has_entry,
+            "TARGET": has_target,
+            "ROUTE": has_route,
+            "STRUCTURES": has_structures,
+            "INSTRUMENT": has_instrument,
+            "FULL PLAN": has_any,
+        }
+
+    def apply_quick_surgical_view(self, preset: str) -> bool:
+        """Applies a Quick Surgical View preset, centering camera, 2D, and MPR without altering surgical planning state.
+
+        Supported presets:
+          - "ENTRY": Centers views on Entry point.
+          - "TARGET": Centers views on Target point.
+          - "ROUTE": Centers 2D/MPR on route midpoint; frames 3D camera to route extent.
+          - "STRUCTURES": Centers 2D/MPR on structure centroid; frames 3D camera to all structures.
+          - "INSTRUMENT": Centers views on currently visible virtual/live deviation tip.
+          - "FULL PLAN": Frames all available planning geometry in 3D, snaps 2D/MPR to centroid.
+        """
+        preset_clean = preset.strip().upper()
+        plan = getattr(self, "surgical_plan", None)
+        if not plan:
+            if hasattr(self, "info_bar") and self.info_bar:
+                self.info_bar.setText("  ⚠️ No surgical plan active")
+            return False
+
+        if preset_clean == "ENTRY":
+            if not plan.has_entry():
+                if hasattr(self, "info_bar") and self.info_bar:
+                    self.info_bar.setText("  ⚠️ Requires Entry")
+                return False
+            pt = plan.entry_point
+            self.view_entry_point()
+            self._center_camera_point(pt.x_mm, pt.y_mm, pt.z_mm)
+            if hasattr(self, "info_bar") and self.info_bar:
+                self.info_bar.setText(f"  🎯 Quick View: ENTRY ({pt.x_mm:.1f}, {pt.y_mm:.1f}, {pt.z_mm:.1f}) mm")
+            self.quick_view_applied.emit("ENTRY")
+            return True
+
+        elif preset_clean == "TARGET":
+            if not plan.has_target():
+                if hasattr(self, "info_bar") and self.info_bar:
+                    self.info_bar.setText("  ⚠️ Requires Target")
+                return False
+            pt = plan.target_point
+            self.view_target_point()
+            self._center_camera_point(pt.x_mm, pt.y_mm, pt.z_mm)
+            if hasattr(self, "info_bar") and self.info_bar:
+                self.info_bar.setText(f"  🎯 Quick View: TARGET ({pt.x_mm:.1f}, {pt.y_mm:.1f}, {pt.z_mm:.1f}) mm")
+            self.quick_view_applied.emit("TARGET")
+            return True
+
+        elif preset_clean == "ROUTE":
+            route = plan.get_planned_route()
+            if not route:
+                if hasattr(self, "info_bar") and self.info_bar:
+                    self.info_bar.setText("  ⚠️ Requires Planned Route")
+                return False
+            ex, ey, ez = route.entry_point.coordinates
+            tx, ty, tz = route.target_point.coordinates
+            self.view_planned_route()
+
+            corridor = plan.get_surgical_corridor()
+            r = corridor.radius_mm if (corridor and corridor.is_enabled) else 10.0
+            bounds = (
+                min(ex, tx) - r, max(ex, tx) + r,
+                min(ey, ty) - r, max(ey, ty) + r,
+                min(ez, tz) - r, max(ez, tz) + r
+            )
+            self._frame_camera_bounds(bounds, margin_factor=1.3)
+            if hasattr(self, "info_bar") and self.info_bar:
+                self.info_bar.setText(f"  🚀 Quick View: ROUTE ({route.length_mm:.1f} mm)")
+            self.quick_view_applied.emit("ROUTE")
+            return True
+
+        elif preset_clean == "STRUCTURES":
+            structs = plan.get_avoid_structures()
+            if not structs:
+                if hasattr(self, "info_bar") and self.info_bar:
+                    self.info_bar.setText("  ⚠️ No structures marked")
+                return False
+            if len(structs) == 1:
+                s = structs[0]
+                self.view_avoid_structure(s.structure_id)
+                self._center_camera_point(s.center_x_mm, s.center_y_mm, s.center_z_mm, dist=100.0)
+                if hasattr(self, "info_bar") and self.info_bar:
+                    self.info_bar.setText(f"  ⚠️ Quick View: STRUCTURE ({s.name})")
+                self.quick_view_applied.emit("STRUCTURES")
+                return True
+
+            avg_x = float(np.mean([s.center_x_mm for s in structs]))
+            avg_y = float(np.mean([s.center_y_mm for s in structs]))
+            avg_z = float(np.mean([s.center_z_mm for s in structs]))
+            self._snap_slice_viewers(avg_x, avg_y, avg_z)
+
+            bounds = (
+                min(s.center_x_mm - s.radius_mm for s in structs),
+                max(s.center_x_mm + s.radius_mm for s in structs),
+                min(s.center_y_mm - s.radius_mm for s in structs),
+                max(s.center_y_mm + s.radius_mm for s in structs),
+                min(s.center_z_mm - s.radius_mm for s in structs),
+                max(s.center_z_mm + s.radius_mm for s in structs),
+            )
+            self._frame_camera_bounds(bounds, margin_factor=1.4)
+            if hasattr(self, "info_bar") and self.info_bar:
+                self.info_bar.setText(f"  ⚠️ Quick View: STRUCTURES ({len(structs)} marked)")
+            self.quick_view_applied.emit("STRUCTURES")
+            return True
+
+        elif preset_clean == "INSTRUMENT":
+            tip_pos = None
+            source_lbl = ""
+            if plan.has_live_deviation() and getattr(plan, "deviation_visible", False):
+                pose = plan.get_current_instrument_pose()
+                if pose:
+                    tip_pos = pose.current_tip_position_mm
+                    source_lbl = "Live Deviation"
+                    self._snap_slice_viewers(*tip_pos)
+                    self._center_camera_point(*tip_pos, dist=100.0)
+            elif plan.has_virtual_instrument() and getattr(plan, "instrument_visible", False):
+                inst = plan.get_virtual_instrument()
+                if inst:
+                    tip_pos = inst.tip_position_mm
+                    source_lbl = "Virtual Instrument"
+                    self._snap_slice_viewers(*tip_pos)
+                    self._center_camera_point(*tip_pos, dist=100.0)
+
+            if tip_pos is None:
+                if hasattr(self, "info_bar") and self.info_bar:
+                    self.info_bar.setText("  ⚠️ No instrument visible")
+                return False
+
+            if hasattr(self, "info_bar") and self.info_bar:
+                self.info_bar.setText(f"  📍 Quick View: INSTRUMENT ({source_lbl})")
+            self.quick_view_applied.emit("INSTRUMENT")
+            return True
+
+        elif preset_clean == "FULL PLAN":
+            points = []
+            pad = 5.0
+            if plan.has_entry():
+                points.append(plan.entry_point.coordinates)
+            if plan.has_target():
+                points.append(plan.target_point.coordinates)
+            if plan.has_planned_route() and getattr(plan, "corridor_enabled", False):
+                cr = getattr(plan, "corridor_radius_mm", 5.0)
+                ex, ey, ez = plan.entry_point.coordinates
+                tx, ty, tz = plan.target_point.coordinates
+                points.extend([
+                    (ex - cr, ey, ez), (ex + cr, ey, ez),
+                    (ex, ey - cr, ez), (ex, ey + cr, ez),
+                    (ex, ey, ez - cr), (ex, ey, ez + cr),
+                    (tx - cr, ty, tz), (tx + cr, ty, tz),
+                    (tx, ty - cr, tz), (tx, ty + cr, tz),
+                    (tx, ty, tz - cr), (tx, ty, tz + cr),
+                ])
+            for s in plan.get_avoid_structures():
+                r = s.radius_mm
+                cx, cy, cz = s.center
+                points.extend([
+                    (cx - r, cy, cz), (cx + r, cy, cz),
+                    (cx, cy - r, cz), (cx, cy + r, cz),
+                    (cx, cy, cz - r), (cx, cy, cz + r),
+                ])
+            if plan.has_virtual_instrument() and getattr(plan, "instrument_visible", False):
+                inst = plan.get_virtual_instrument()
+                if inst:
+                    points.append(inst.tip_position_mm)
+            if plan.has_live_deviation() and getattr(plan, "deviation_visible", False):
+                pose = plan.get_current_instrument_pose()
+                if pose:
+                    points.append(pose.current_tip_position_mm)
+
+            if not points:
+                if hasattr(self, "info_bar") and self.info_bar:
+                    self.info_bar.setText("  ⚠️ No planning elements to display")
+                return False
+
+            xs = [p[0] for p in points]
+            ys = [p[1] for p in points]
+            zs = [p[2] for p in points]
+
+            bounds = (
+                min(xs) - pad, max(xs) + pad,
+                min(ys) - pad, max(ys) + pad,
+                min(zs) - pad, max(zs) + pad,
+            )
+            mid_x = (min(xs) + max(xs)) / 2.0
+            mid_y = (min(ys) + max(ys)) / 2.0
+            mid_z = (min(zs) + max(zs)) / 2.0
+            self._snap_slice_viewers(mid_x, mid_y, mid_z)
+            self._frame_camera_bounds(bounds, margin_factor=1.4)
+            if hasattr(self, "info_bar") and self.info_bar:
+                self.info_bar.setText("  📐 Quick View: FULL PLAN")
+            self.quick_view_applied.emit("FULL PLAN")
+            return True
+
+        else:
+            if hasattr(self, "info_bar") and self.info_bar:
+                self.info_bar.setText(f"  ⚠️ Unknown preset: {preset}")
+            return False
+
     # ── Study Information & Scan Metadata Panel Methods ───────────────────────
 
     def show_study_info(self):
@@ -1770,6 +3152,21 @@ class Viewer3D(QWidget):
             return
         x_mm, y_mm, z_mm = float(point[0]), float(point[1]), float(point[2])
 
+        # ── Explicit Surgical Landmark/Structure Placement Mode (SET_ENTRY / SET_TARGET / ADD_STRUCTURE) ─
+        picking_mode = getattr(self, "_planning_picking_mode", "IDLE")
+        if picking_mode == "SET_ENTRY":
+            self.set_entry_point(x_mm, y_mm, z_mm, source_view="3D")
+            self.set_planning_picking_mode("IDLE")
+            return
+        elif picking_mode == "SET_TARGET":
+            self.set_target_point(x_mm, y_mm, z_mm, source_view="3D")
+            self.set_planning_picking_mode("IDLE")
+            return
+        elif picking_mode == "ADD_STRUCTURE":
+            self.add_avoid_structure(x_mm, y_mm, z_mm, source_view="3D")
+            self.set_planning_picking_mode("IDLE")
+            return
+
         if getattr(self, "_measuring_3d", False):
             if self._pending_3d_point is None:
                 self._pending_3d_point = (x_mm, y_mm, z_mm)
@@ -1838,8 +3235,29 @@ class Viewer3D(QWidget):
     def load_scan(self, patient: dict, scan: dict):
         """Load a specific patient scan from the DB-backed gallery."""
         # Kept so MainWindow.export_case_report() knows what is on screen
+        old_mrn = str(getattr(self, "current_patient", {}).get("mrn", "") if hasattr(self, "current_patient") and self.current_patient else "").strip()
+        new_mrn = str(patient.get("mrn", "") if patient else "").strip()
+        if old_mrn != new_mrn and hasattr(self, "comparison"):
+            self.comparison.clear()
+            self._remove_comparison_actors()
+
         self.current_patient = patient
         self.current_scan = scan
+
+        # Reset surgical planning landmarks if scan changed
+        scan_id = (scan.get("file_path") if scan else "") or str(scan.get("id", "") if scan else "")
+        if hasattr(self, "surgical_plan"):
+            self.surgical_plan.reset_for_scan(scan_id)
+            self._remove_planning_marker("ENTRY")
+            self._remove_planning_marker("TARGET")
+            self._remove_planned_route()
+            self._remove_all_avoid_structure_actors()
+            self._remove_surgical_corridor()
+            self._remove_virtual_instrument()
+            self._remove_live_deviation()
+            self._sync_planning_landmarks_to_2d()
+
+
         label = (
             f"{patient.get('name', 'Patient')} — "
             f"{scan.get('type', 'CT')} ({scan.get('slice_count', 1)} slices)"
@@ -2197,6 +3615,16 @@ class Viewer3D(QWidget):
             "toggle study info": "toggle study info",
             "toggle scan metadata": "toggle study info",
             "toggle study information": "toggle study info",
+
+            # Before vs After voice aliases (OR Feature 8)
+            "compare before and after": "compare before and after",
+            "show before scan": "show before scan",
+            "show before": "show before scan",
+            "show after scan": "show after scan",
+            "show after": "show after scan",
+            "toggle before after": "toggle before after",
+            "exit comparison": "exit comparison",
+            "stop comparison": "exit comparison",
         }
 
         command = aliases.get(command, command)
@@ -2414,6 +3842,127 @@ class Viewer3D(QWidget):
                 self.panel_2d.set_measurements_visible(False)
             return
 
+        # ── Surgical Planning Landmark Voice Commands ────────────────────────
+        if command in ("set entry", "place entry", "mark entry"):
+            self.set_planning_picking_mode("SET_ENTRY")
+            return
+
+        if command in ("set target", "place target", "mark target"):
+            self.set_planning_picking_mode("SET_TARGET")
+            return
+
+        if command in ("view entry", "show entry", "go to entry"):
+            self.view_entry_point()
+            return
+
+        if command in ("view target", "show target", "go to target"):
+            self.view_target_point()
+            return
+
+        if command in ("clear entry", "remove entry", "delete entry"):
+            self.clear_entry_point()
+            return
+
+        if command in ("clear target", "remove target", "delete target"):
+            self.clear_target_point()
+            return
+
+        if command in ("clear both", "clear planning", "clear landmarks"):
+            self.clear_both_planning_points()
+            return
+
+        # ── Planned Route Voice Commands ─────────────────────────────────────
+        if command in ("show planned route", "view planned route", "show route", "view route"):
+            self.view_planned_route()
+            return
+
+        if command in ("hide planned route", "hide route"):
+            self.set_planned_route_visible(False)
+            return
+
+        if command in ("clear planned route", "clear route"):
+            self.clear_planned_route()
+            return
+
+        # ── Structures to Avoid Voice Commands ─────────────────────────────────
+        if command in ("add structure", "mark structure", "avoid structure", "place structure"):
+            self.set_planning_picking_mode("ADD_STRUCTURE")
+            return
+
+        if command in ("show structures", "view structures"):
+            structs = self.surgical_plan.get_avoid_structures() if hasattr(self, "surgical_plan") else []
+            if structs:
+                self.view_avoid_structure(structs[0].structure_id)
+            return
+
+        if command in ("clear structures", "clear avoid structures", "remove structures"):
+            self.clear_avoid_structures()
+            return
+
+        # ── Surgical Corridor Voice Commands (OR Mode: Feature 4) ─────────────
+        if command in ("show surgical corridor", "show corridor", "enable corridor", "enable surgical corridor"):
+            self.set_surgical_corridor_enabled(True)
+            return
+
+        if command in ("hide surgical corridor", "hide corridor", "disable corridor", "disable surgical corridor"):
+            self.set_surgical_corridor_enabled(False)
+            return
+
+        if command in ("increase corridor radius", "increase corridor", "wider corridor"):
+            new_r = (self.surgical_plan.corridor_radius_mm if hasattr(self, "surgical_plan") else 5.0) + 1.0
+            self.set_surgical_corridor_radius(new_r)
+            return
+
+        if command in ("decrease corridor radius", "decrease corridor", "narrower corridor"):
+            new_r = (self.surgical_plan.corridor_radius_mm if hasattr(self, "surgical_plan") else 5.0) - 1.0
+            self.set_surgical_corridor_radius(new_r)
+            return
+
+        # ── Virtual Instrument Voice Commands (OR Mode: Feature 5) ─────────────
+        if command in ("show virtual instrument", "show instrument", "enable virtual instrument", "enable instrument"):
+            self.set_virtual_instrument_visible(True)
+            return
+
+        if command in ("hide virtual instrument", "hide instrument", "disable virtual instrument", "disable instrument"):
+            self.set_virtual_instrument_visible(False)
+            return
+
+        if command in ("view virtual instrument", "view instrument", "center instrument", "center virtual instrument"):
+            self.view_virtual_instrument()
+            return
+
+        if command in ("increase instrument depth", "increase depth", "insert instrument", "advance instrument"):
+            current_d = self.surgical_plan.instrument_depth_mm if hasattr(self, "surgical_plan") else 0.0
+            self.set_virtual_instrument_depth(current_d + 5.0)
+            return
+
+        if command in ("decrease instrument depth", "decrease depth", "retract instrument", "withdraw instrument"):
+            current_d = self.surgical_plan.instrument_depth_mm if hasattr(self, "surgical_plan") else 0.0
+            self.set_virtual_instrument_depth(current_d - 5.0)
+            return
+
+        # ── Live Deviation Voice Commands (OR Mode: Feature 6) ─────────────────
+        if command in ("show live deviation", "show current instrument", "enable live deviation"):
+            self.set_live_deviation_visible(True)
+            return
+
+        if command in ("hide live deviation", "hide current instrument", "disable live deviation"):
+            self.set_live_deviation_visible(False)
+            return
+
+        if command in ("reset deviation", "reset instrument", "reset to planned route"):
+            self.reset_live_deviation_to_planned()
+            return
+
+        # ── Plan Saving / Versions Voice Commands (OR Mode: Feature 7) ─────────
+        if command in ("save plan", "save surgical plan"):
+            self.plan_save_requested.emit()
+            return
+
+        if command in ("show plan versions", "show plans", "list plans"):
+            self.plan_versions_requested.emit()
+            return
+
         # ── Study Information & Scan Metadata Voice Commands ──────────────────
         if command in ("show study info", "open scan metadata", "show scan details"):
             self.show_study_info()
@@ -2425,6 +3974,103 @@ class Viewer3D(QWidget):
 
         if command in ("toggle study info", "toggle scan metadata"):
             self.toggle_study_info()
+            return
+
+        # ── Before vs After Voice Commands (OR Mode: Feature 8) ───────────────
+        if command in ("compare before and after", "toggle before after"):
+            if self.comparison.is_active:
+                self.toggle_before_after_view()
+            return
+
+        if command == "show before scan":
+            if self.comparison.is_active:
+                self.toggle_before_after_view("BEFORE")
+            return
+
+        if command == "show after scan":
+            if self.comparison.is_active:
+                self.toggle_before_after_view("AFTER")
+            return
+
+        if command in ("exit comparison", "stop comparison"):
+            if self.comparison.is_active:
+                self.exit_before_after_comparison()
+            return
+
+        # ── Quick Surgical Views Voice Commands (OR Mode: Feature 9) ─────────
+        if command in ("show entry view", "entry view", "quick entry"):
+            self.apply_quick_surgical_view("ENTRY")
+            return
+
+        if command in ("show target view", "target view", "quick target"):
+            self.apply_quick_surgical_view("TARGET")
+            return
+
+        if command in ("show route view", "route view", "quick route"):
+            self.apply_quick_surgical_view("ROUTE")
+            return
+
+        if command in ("show structures view", "structures view", "quick structures"):
+            self.apply_quick_surgical_view("STRUCTURES")
+            return
+
+        if command in ("show instrument view", "instrument view", "quick instrument"):
+            self.apply_quick_surgical_view("INSTRUMENT")
+            return
+
+        if command in ("show full plan", "full plan view", "full plan", "quick full plan"):
+            self.apply_quick_surgical_view("FULL PLAN")
+            return
+
+        # ── ICU Feature 1: Current vs Previous Voice Commands ─────────────────
+        if command in ("show previous scan", "view previous scan", "previous scan"):
+            if not self.comparison.is_active:
+                mrn = getattr(self, "current_patient", {}).get("mrn", "")
+                curr = getattr(self, "current_scan", {})
+                from database import get_previous_scan_for_patient
+                prev = get_previous_scan_for_patient(mrn, curr)
+                if prev:
+                    self.start_before_after_comparison(prev, curr, "TOGGLE")
+            self.toggle_before_after_view("BEFORE")
+            return
+
+        if command in ("show current scan", "view current scan", "current scan"):
+            if self.comparison.is_active:
+                self.toggle_before_after_view("AFTER")
+            return
+
+        if command in ("compare current and previous", "toggle previous scan"):
+            if not self.comparison.is_active:
+                mrn = getattr(self, "current_patient", {}).get("mrn", "")
+                curr = getattr(self, "current_scan", {})
+                from database import get_previous_scan_for_patient
+                prev = get_previous_scan_for_patient(mrn, curr)
+                if prev:
+                    self.start_before_after_comparison(prev, curr, "TOGGLE")
+            else:
+                self.toggle_before_after_view()
+            return
+
+        # ── ICU Feature 2: Same-Location Voice Commands ───────────────────────
+        if command in ("mark same location", "mark location"):
+            self.icu_mark_same_location_requested.emit()
+            return
+
+        if command in ("show same location", "view same location"):
+            self.icu_view_same_location_requested.emit()
+            return
+
+        if command in ("view previous location", "show previous location"):
+            self.icu_view_previous_location_requested.emit()
+            return
+
+        if command in ("view current location", "show current location"):
+            self.icu_view_current_location_requested.emit()
+            return
+
+        if command in ("clear location", "clear same location"):
+            self.clear_same_location_marker()
+            self.icu_clear_same_location_requested.emit()
             return
 
     # Anatomical views.

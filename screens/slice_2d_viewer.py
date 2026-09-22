@@ -61,6 +61,8 @@ class CTSliceCanvas(QWidget):
     crosshair_moved = pyqtSignal(float, float)     # normalized (u, v) in [0, 1]
     measurement_point_selected = pyqtSignal(int, float, float)  # point_num (1 or 2), u, v
     physical_point_selected = pyqtSignal(int, float, float, float)  # point_num (1 or 2), x_mm, y_mm, z_mm
+    planning_point_selected = pyqtSignal(str, float, float, float)  # point_type ("ENTRY" or "TARGET"), x_mm, y_mm, z_mm
+    same_location_selected = pyqtSignal(float, float, float)        # physical x_mm, y_mm, z_mm
     measurement_added = pyqtSignal(object)         # Measurement2D
     measurement_state_changed = pyqtSignal(str)    # status string
 
@@ -82,6 +84,12 @@ class CTSliceCanvas(QWidget):
         self.current_slice_idx: int = 0
         self.show_crosshair: bool = True
 
+        # Planning landmark & structure state
+        self.planning_picking_mode: str = "IDLE"  # "IDLE", "SET_ENTRY", "SET_TARGET", "ADD_STRUCTURE"
+        self.entry_landmark: tuple[float, float, float] | None = None
+        self.target_landmark: tuple[float, float, float] | None = None
+        self.avoid_structures: list = []
+
         # Measurement state
         self.measuring_active: bool = False
         self.show_measurements: bool = True
@@ -93,6 +101,85 @@ class CTSliceCanvas(QWidget):
 
         self._hover_pixel: tuple[int, int] | None = None
         self._hover_hu: float | None = None
+
+        # Before vs After comparison state
+        self.comparison_active: bool = False
+        self.comparison_mode: str = "TOGGLE"
+        self.comparison_view: str = "AFTER"
+        self.comparison_before_pixmap: QPixmap | None = None
+        self.comparison_opacity: float = 0.5
+
+        # ICU Feature 2: Same-Location Review state
+        self.icu_same_location_picking: bool = False
+        self.icu_same_location: dict | None = None
+
+    def set_same_location_picking(self, enabled: bool):
+        """Toggles picking mode for ICU Same-Location Review."""
+        self.icu_same_location_picking = bool(enabled)
+        if self.icu_same_location_picking:
+            self.setCursor(Qt.CursorShape.CrossCursor)
+        else:
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+        self.update()
+
+    def set_same_location(self, loc_data: dict | None):
+        """Sets ICU same-location coordinates and metadata for marker display."""
+        self.icu_same_location = dict(loc_data) if loc_data else None
+        self.update()
+
+    def clear_same_location(self):
+        """Clears ICU same-location coordinates and removes marker display."""
+        self.icu_same_location = None
+        self.icu_same_location_picking = False
+        self.setCursor(Qt.CursorShape.ArrowCursor)
+        self.update()
+
+    def set_comparison_data(
+        self,
+        active: bool,
+        mode: str = "TOGGLE",
+        view: str = "AFTER",
+        before_pixmap: QPixmap | None = None,
+        opacity: float = 0.5
+    ):
+        """Updates 2D slice comparison presentation state."""
+        self.comparison_active = bool(active)
+        self.comparison_mode = mode
+        self.comparison_view = view
+        self.comparison_before_pixmap = before_pixmap
+        self.comparison_opacity = float(opacity)
+        self.update()
+
+    def set_planning_picking_mode(self, mode: str):
+        """Sets active surgical landmark/structure placement mode (IDLE, SET_ENTRY, SET_TARGET, ADD_STRUCTURE)."""
+        self.planning_picking_mode = mode if mode in ("SET_ENTRY", "SET_TARGET", "ADD_STRUCTURE") else "IDLE"
+        self.update()
+
+    def set_planning_landmarks(self, entry: tuple[float, float, float] | None, target: tuple[float, float, float] | None):
+        """Sets active Entry and Target coordinates for 2D slice visualization."""
+        self.entry_landmark = entry
+        self.target_landmark = target
+        self.update()
+
+    def set_avoid_structures(self, structures: list):
+        """Sets active structures to avoid for 2D slice visualization."""
+        self.avoid_structures = list(structures) if structures else []
+        self.update()
+
+    def set_surgical_corridor(self, corridor):
+        """Sets active surgical corridor for 2D slice visualization."""
+        self.surgical_corridor = corridor
+        self.update()
+
+    def set_virtual_instrument(self, instrument):
+        """Sets active virtual instrument for 2D slice visualization."""
+        self.virtual_instrument = instrument
+        self.update()
+
+    def set_current_instrument_pose(self, pose):
+        """Sets active simulated current instrument pose for 2D slice visualization."""
+        self.current_instrument_pose = pose
+        self.update()
 
     def set_measuring(self, active: bool):
         """Enable or disable distance measurement mode."""
@@ -198,13 +285,89 @@ class CTSliceCanvas(QWidget):
 
         rect = self._get_target_rect()
 
-        if self._pixmap and not self._pixmap.isNull():
-            painter.drawPixmap(rect.toRect(), self._pixmap)
+        if self.comparison_active and self.comparison_mode == "SIDE_BY_SIDE":
+            w_half = rect.width() / 2.0
+            left_rect = QRectF(rect.left(), rect.top(), w_half - 2, rect.height())
+            right_rect = QRectF(rect.left() + w_half + 2, rect.top(), w_half - 2, rect.height())
+
+            # Left half: BEFORE
+            if self.comparison_before_pixmap and not self.comparison_before_pixmap.isNull():
+                painter.drawPixmap(left_rect.toRect(), self.comparison_before_pixmap)
+            elif self._pixmap and not self._pixmap.isNull() and self.comparison_view == "BEFORE":
+                painter.drawPixmap(left_rect.toRect(), self._pixmap)
+            else:
+                painter.setPen(QColor(80, 80, 80))
+                painter.drawText(left_rect, Qt.AlignmentFlag.AlignCenter, "No Before Slice")
+
+            # Right half: AFTER
+            if self._pixmap and not self._pixmap.isNull():
+                painter.drawPixmap(right_rect.toRect(), self._pixmap)
+
+            # Divider line
+            painter.setPen(QPen(QColor(80, 80, 80), 1))
+            painter.drawLine(int(rect.left() + w_half), int(rect.top()), int(rect.left() + w_half), int(rect.bottom()))
+
+            # Badges
+            font_lbl = QFont("sans-serif", 8, QFont.Weight.Bold)
+            painter.setFont(font_lbl)
+            b_rect = QRectF(left_rect.left() + 6, left_rect.top() + 6, 60, 18)
+            painter.setBrush(QBrush(QColor(0, 229, 255, 200)))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawRoundedRect(b_rect, 3, 3)
+            painter.setPen(QColor(0, 0, 0))
+            painter.drawText(b_rect, Qt.AlignmentFlag.AlignCenter, "BEFORE")
+
+            a_rect = QRectF(right_rect.left() + 6, right_rect.top() + 6, 60, 18)
+            painter.setBrush(QBrush(QColor(124, 252, 0, 200)))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawRoundedRect(a_rect, 3, 3)
+            painter.setPen(QColor(0, 0, 0))
+            painter.drawText(a_rect, Qt.AlignmentFlag.AlignCenter, "AFTER")
+
+        elif self.comparison_active and self.comparison_mode == "OVERLAY":
+            if self._pixmap and not self._pixmap.isNull():
+                painter.drawPixmap(rect.toRect(), self._pixmap)
+            if self.comparison_before_pixmap and not self.comparison_before_pixmap.isNull():
+                painter.save()
+                painter.setOpacity(self.comparison_opacity)
+                painter.drawPixmap(rect.toRect(), self.comparison_before_pixmap)
+                painter.restore()
+
+            # Watermark badge
+            painter.save()
+            font_wm = QFont("sans-serif", 8, QFont.Weight.Bold)
+            painter.setFont(font_wm)
+            wm_rect = QRectF(rect.left() + 8, rect.bottom() - 28, 150, 20)
+            painter.setBrush(QBrush(QColor(20, 20, 20, 220)))
+            painter.setPen(QPen(QColor(255, 179, 0), 1))
+            painter.drawRoundedRect(wm_rect, 3, 3)
+            painter.setPen(QColor(255, 179, 0))
+            painter.drawText(wm_rect, Qt.AlignmentFlag.AlignCenter, "Unregistered Overlay")
+            painter.restore()
+
         else:
-            painter.setPen(QColor(100, 100, 100))
-            painter.setFont(QFont("sans-serif", 10))
-            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "No CT Scan Loaded")
-            return
+            # Normal or TOGGLE display
+            if self._pixmap and not self._pixmap.isNull():
+                painter.drawPixmap(rect.toRect(), self._pixmap)
+            else:
+                painter.setPen(QColor(100, 100, 100))
+                painter.setFont(QFont("sans-serif", 10))
+                painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "No CT Scan Loaded")
+                return
+
+            if self.comparison_active and self.comparison_mode == "TOGGLE":
+                painter.save()
+                font_comp = QFont("sans-serif", 9, QFont.Weight.Bold)
+                painter.setFont(font_comp)
+                badge_txt = self.comparison_view.upper()
+                bg_color = QColor(0, 229, 255, 200) if badge_txt == "BEFORE" else QColor(124, 252, 0, 200)
+                comp_rect = QRectF(rect.right() - 85, rect.top() + 8, 75, 20)
+                painter.setBrush(QBrush(bg_color))
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.drawRoundedRect(comp_rect, 3, 3)
+                painter.setPen(QColor(0, 0, 0))
+                painter.drawText(comp_rect, Qt.AlignmentFlag.AlignCenter, badge_txt)
+                painter.restore()
 
         # 1. Crosshair lines (dashed cyan) - drawn only when enabled
         if getattr(self, "show_crosshair", True):
@@ -345,6 +508,455 @@ class CTSliceCanvas(QWidget):
                         painter.setPen(QColor(255, 255, 255))
                         painter.drawText(p_badge, Qt.AlignmentFlag.AlignCenter, p_str)
 
+        # 5. Surgical Planning Landmarks (ENTRY & TARGET)
+        landmarks = [
+            ("ENTRY", getattr(self, "entry_landmark", None), QColor(0, 255, 127), "E"),
+            ("TARGET", getattr(self, "target_landmark", None), QColor(255, 51, 102), "T"),
+        ]
+        cur_orient = self.plane_name.lower()
+        cur_slice = getattr(self, "current_slice_idx", 0)
+        parent_w = self.parent()
+        dz = getattr(parent_w, "slice_thickness", 1.0) if parent_w else 1.0
+        dy = getattr(parent_w, "pixel_spacing", (1.0, 1.0))[0] if parent_w else 1.0
+        dx = getattr(parent_w, "pixel_spacing", (1.0, 1.0))[1] if parent_w else 1.0
+        vol = getattr(parent_w, "vol_data", None)
+        H, W, D = vol.shape if vol is not None and vol.ndim == 3 else (1, 1, 1)
+
+        for l_type, l_pt, l_color, l_char in landmarks:
+            if l_pt is None:
+                continue
+            lx, ly, lz = l_pt
+            should_draw = False
+            lu, lv = 0.5, 0.5
+            if cur_orient == "axial":
+                z_cur = cur_slice * dz
+                if abs(z_cur - lz) <= 1.5 * dz:
+                    should_draw = True
+                    lu = float(np.clip(lx / max(1e-4, (W - 1) * dx), 0.0, 1.0))
+                    lv = float(np.clip(ly / max(1e-4, (H - 1) * dy), 0.0, 1.0))
+            elif cur_orient == "coronal":
+                y_cur = cur_slice * dy
+                if abs(y_cur - ly) <= 1.5 * dy:
+                    should_draw = True
+                    lu = float(np.clip(lx / max(1e-4, (W - 1) * dx), 0.0, 1.0))
+                    lv = float(np.clip(1.0 - lz / max(1e-4, (D - 1) * dz), 0.0, 1.0))
+            else:  # sagittal
+                x_cur = cur_slice * dx
+                if abs(x_cur - lx) <= 1.5 * dx:
+                    should_draw = True
+                    lu = float(np.clip(ly / max(1e-4, (H - 1) * dy), 0.0, 1.0))
+                    lv = float(np.clip(1.0 - lz / max(1e-4, (D - 1) * dz), 0.0, 1.0))
+
+            if should_draw:
+                cx = rect.left() + lu * rect.width()
+                cy = rect.top()  + lv * rect.height()
+
+                painter.setPen(QPen(QColor(255, 255, 255, 220), 1.5))
+                painter.setBrush(QBrush(l_color))
+                painter.drawEllipse(QPointF(cx, cy), 5.5, 5.5)
+
+                painter.setFont(QFont("sans-serif", 8, QFont.Weight.Bold))
+                fm = painter.fontMetrics()
+                tw = fm.horizontalAdvance(l_type) + 8
+                th = fm.height() + 2
+                badge_r = QRectF(cx + 8, cy - th / 2.0, tw, th)
+                painter.setPen(QPen(l_color, 1))
+                painter.setBrush(QBrush(QColor(10, 10, 10, 220)))
+                painter.drawRoundedRect(badge_r, 2, 2)
+                painter.setPen(QColor(255, 255, 255))
+                painter.drawText(badge_r, Qt.AlignmentFlag.AlignCenter, l_type)
+
+        # 6. Planned Route 2D Projection & Slice Intersection
+        entry_pt = getattr(self, "entry_landmark", None)
+        target_pt = getattr(self, "target_landmark", None)
+        if entry_pt is not None and target_pt is not None:
+            ex, ey, ez = entry_pt
+            tx, ty, tz = target_pt
+
+            # Project Entry & Target to 2D normalized (u, v)
+            if cur_orient == "axial":
+                ue = float(np.clip(ex / max(1e-4, (W - 1) * dx), 0.0, 1.0))
+                ve = float(np.clip(ey / max(1e-4, (H - 1) * dy), 0.0, 1.0))
+                ut = float(np.clip(tx / max(1e-4, (W - 1) * dx), 0.0, 1.0))
+                vt = float(np.clip(ty / max(1e-4, (H - 1) * dy), 0.0, 1.0))
+            elif cur_orient == "coronal":
+                ue = float(np.clip(ex / max(1e-4, (W - 1) * dx), 0.0, 1.0))
+                ve = float(np.clip(1.0 - ez / max(1e-4, (D - 1) * dz), 0.0, 1.0))
+                ut = float(np.clip(tx / max(1e-4, (W - 1) * dx), 0.0, 1.0))
+                vt = float(np.clip(1.0 - tz / max(1e-4, (D - 1) * dz), 0.0, 1.0))
+            else:  # sagittal
+                ue = float(np.clip(ey / max(1e-4, (H - 1) * dy), 0.0, 1.0))
+                ve = float(np.clip(1.0 - ez / max(1e-4, (D - 1) * dz), 0.0, 1.0))
+                ut = float(np.clip(ty / max(1e-4, (H - 1) * dy), 0.0, 1.0))
+                vt = float(np.clip(1.0 - tz / max(1e-4, (D - 1) * dz), 0.0, 1.0))
+
+            cxe = rect.left() + ue * rect.width()
+            cye = rect.top()  + ve * rect.height()
+            cxt = rect.left() + ut * rect.width()
+            cyt = rect.top()  + vt * rect.height()
+
+            # Render corridor boundaries if active and enabled
+            corridor = getattr(self, "surgical_corridor", None)
+            if corridor and getattr(corridor, "is_enabled", True):
+                c_rad = getattr(corridor, "radius_mm", 5.0)
+                if cur_orient == "axial":
+                    scale_norm = rect.width() / max(1e-4, (W - 1) * dx)
+                elif cur_orient == "coronal":
+                    scale_norm = rect.width() / max(1e-4, (W - 1) * dx)
+                else:
+                    scale_norm = rect.width() / max(1e-4, (H - 1) * dy)
+                px_c_rad = c_rad * scale_norm
+
+                dx_px = cxt - cxe
+                dy_px = cyt - cye
+                len_px = float(np.hypot(dx_px, dy_px))
+                if len_px > 1e-3:
+                    nx = -dy_px / len_px * px_c_rad
+                    ny = dx_px / len_px * px_c_rad
+                    corridor_pen = QPen(QColor(124, 77, 255, 140), 1.25, Qt.PenStyle.DashLine)
+                    painter.setPen(corridor_pen)
+                    painter.drawLine(QPointF(cxe + nx, cye + ny), QPointF(cxt + nx, cyt + ny))
+                    painter.drawLine(QPointF(cxe - nx, cye - ny), QPointF(cxt - nx, cyt - ny))
+
+            # Draw dashed trajectory projection line
+            route_pen = QPen(QColor(0, 229, 255, 175), 1.75, Qt.PenStyle.DashLine)
+            painter.setPen(route_pen)
+            painter.drawLine(QPointF(cxe, cye), QPointF(cxt, cyt))
+
+            # Check if current slice plane intersects the 3D line segment
+            has_inter = False
+            u_inter, v_inter = 0.5, 0.5
+            if cur_orient == "axial":
+                z_cur = cur_slice * dz
+                z_min, z_max = min(ez, tz), max(ez, tz)
+                if z_min <= z_cur <= z_max and abs(tz - ez) > 1e-4:
+                    t = (z_cur - ez) / (tz - ez)
+                    xi = ex + t * (tx - ex)
+                    yi = ey + t * (ty - ey)
+                    u_inter = float(np.clip(xi / max(1e-4, (W - 1) * dx), 0.0, 1.0))
+                    v_inter = float(np.clip(yi / max(1e-4, (H - 1) * dy), 0.0, 1.0))
+                    has_inter = True
+            elif cur_orient == "coronal":
+                y_cur = cur_slice * dy
+                y_min, y_max = min(ey, ty), max(ey, ty)
+                if y_min <= y_cur <= y_max and abs(ty - ey) > 1e-4:
+                    t = (y_cur - ey) / (ty - ey)
+                    xi = ex + t * (tx - ex)
+                    zi = ez + t * (tz - ez)
+                    u_inter = float(np.clip(xi / max(1e-4, (W - 1) * dx), 0.0, 1.0))
+                    v_inter = float(np.clip(1.0 - zi / max(1e-4, (D - 1) * dz), 0.0, 1.0))
+                    has_inter = True
+            else:  # sagittal
+                x_cur = cur_slice * dx
+                x_min, x_max = min(ex, tx), max(ex, tx)
+                if x_min <= x_cur <= x_max and abs(tx - ex) > 1e-4:
+                    t = (x_cur - ex) / (tx - ex)
+                    yi = ey + t * (ty - ey)
+                    zi = ez + t * (tz - ez)
+                    u_inter = float(np.clip(yi / max(1e-4, (H - 1) * dy), 0.0, 1.0))
+                    v_inter = float(np.clip(1.0 - zi / max(1e-4, (D - 1) * dz), 0.0, 1.0))
+                    has_inter = True
+
+            if has_inter:
+                cxi = rect.left() + u_inter * rect.width()
+                cyi = rect.top()  + v_inter * rect.height()
+
+                # If corridor is active and enabled, draw cross-section
+                if corridor and getattr(corridor, "is_enabled", True):
+                    c_rad = getattr(corridor, "radius_mm", 5.0)
+                    if cur_orient == "axial":
+                        scale_norm = rect.width() / max(1e-4, (W - 1) * dx)
+                    elif cur_orient == "coronal":
+                        scale_norm = rect.width() / max(1e-4, (W - 1) * dx)
+                    else:
+                        scale_norm = rect.width() / max(1e-4, (H - 1) * dy)
+                    px_c_rad = max(3.0, c_rad * scale_norm)
+
+                    painter.setPen(QPen(QColor(124, 77, 255, 200), 1.5))
+                    painter.setBrush(QBrush(QColor(124, 77, 255, 60)))
+                    painter.drawEllipse(QPointF(cxi, cyi), px_c_rad, px_c_rad)
+
+                painter.setPen(QPen(QColor(0, 229, 255, 230), 1.5))
+                painter.setBrush(QBrush(QColor(0, 229, 255, 90)))
+                painter.drawEllipse(QPointF(cxi, cyi), 5.0, 5.0)
+                # Crosshair ticks on intersection
+                painter.drawLine(QPointF(cxi - 8, cyi), QPointF(cxi + 8, cyi))
+                painter.drawLine(QPointF(cxi, cyi - 8), QPointF(cxi, cyi + 8))
+
+        # 6.5. Virtual Instrument Projection & Tip Marker
+        inst = getattr(self, "virtual_instrument", None)
+        if inst and getattr(inst, "is_visible", False) and hasattr(inst, "route"):
+            ex, ey, ez = inst.route.entry_point.coordinates
+            tip_x, tip_y, tip_z = inst.tip_position_mm
+
+            if cur_orient == "axial":
+                ue = float(np.clip(ex / max(1e-4, (W - 1) * dx), 0.0, 1.0))
+                ve = float(np.clip(ey / max(1e-4, (H - 1) * dy), 0.0, 1.0))
+                ut = float(np.clip(tip_x / max(1e-4, (W - 1) * dx), 0.0, 1.0))
+                vt = float(np.clip(tip_y / max(1e-4, (H - 1) * dy), 0.0, 1.0))
+            elif cur_orient == "coronal":
+                ue = float(np.clip(ex / max(1e-4, (W - 1) * dx), 0.0, 1.0))
+                ve = float(np.clip(1.0 - ez / max(1e-4, (D - 1) * dz), 0.0, 1.0))
+                ut = float(np.clip(tip_x / max(1e-4, (W - 1) * dx), 0.0, 1.0))
+                vt = float(np.clip(1.0 - tip_z / max(1e-4, (D - 1) * dz), 0.0, 1.0))
+            else:  # sagittal
+                ue = float(np.clip(ey / max(1e-4, (H - 1) * dy), 0.0, 1.0))
+                ve = float(np.clip(1.0 - ez / max(1e-4, (D - 1) * dz), 0.0, 1.0))
+                ut = float(np.clip(tip_y / max(1e-4, (H - 1) * dy), 0.0, 1.0))
+                vt = float(np.clip(1.0 - tip_z / max(1e-4, (D - 1) * dz), 0.0, 1.0))
+
+            cxe = rect.left() + ue * rect.width()
+            cye = rect.top()  + ve * rect.height()
+            cxtip = rect.left() + ut * rect.width()
+            cytip = rect.top()  + vt * rect.height()
+
+            # Solid golden shaft line from Entry to Tip
+            if inst.insertion_depth_mm > 1e-3:
+                diam = getattr(inst, "diameter_mm", 2.0)
+                pen_width = max(2.0, min(8.0, diam * 1.5))
+                inst_pen = QPen(QColor(255, 214, 0, 220), pen_width, Qt.PenStyle.SolidLine)
+                painter.setPen(inst_pen)
+                painter.drawLine(QPointF(cxe, cye), QPointF(cxtip, cytip))
+
+            # Virtual Instrument Tip Marker (golden ring with white center dot)
+            painter.setPen(QPen(QColor(255, 255, 255, 240), 1.5))
+            painter.setBrush(QBrush(QColor(255, 214, 0, 240)))
+            painter.drawEllipse(QPointF(cxtip, cytip), 4.5, 4.5)
+            painter.setBrush(QBrush(QColor(255, 255, 255)))
+            painter.drawEllipse(QPointF(cxtip, cytip), 1.5, 1.5)
+
+            # Tip depth badge
+            tip_label = f"Tip: {inst.insertion_depth_mm:.1f} mm"
+            painter.setFont(QFont("sans-serif", 7, QFont.Weight.Bold))
+            fm = painter.fontMetrics()
+            tw = fm.horizontalAdvance(tip_label) + 6
+            th = fm.height() + 2
+            tip_badge = QRectF(cxtip + 8, cytip - th / 2.0, tw, th)
+            painter.setPen(QPen(QColor(255, 214, 0), 1))
+            painter.setBrush(QBrush(QColor(20, 20, 20, 220)))
+            painter.drawRoundedRect(tip_badge, 2, 2)
+            painter.setPen(QColor(255, 214, 0))
+            painter.drawText(tip_badge, Qt.AlignmentFlag.AlignCenter, tip_label)
+
+        # 6.6. Simulated Current Instrument & Live Deviation Projection
+        pose = getattr(self, "current_instrument_pose", None)
+        if pose and getattr(pose, "is_visible", False) and hasattr(pose, "route"):
+            cx, cy, cz = pose.current_tip_position_mm
+            nx, ny, nz = pose.nearest_planned_point_mm
+            dx_vec, dy_vec, dz_vec = pose.current_direction_vector
+            route_len = pose.route.length_mm
+
+            # Shaft back point: tip - length * dir
+            sx = cx - route_len * dx_vec
+            sy = cy - route_len * dy_vec
+            sz = cz - route_len * dz_vec
+
+            if cur_orient == "axial":
+                uc = float(np.clip(cx / max(1e-4, (W - 1) * dx), 0.0, 1.0))
+                vc = float(np.clip(cy / max(1e-4, (H - 1) * dy), 0.0, 1.0))
+                un = float(np.clip(nx / max(1e-4, (W - 1) * dx), 0.0, 1.0))
+                vn = float(np.clip(ny / max(1e-4, (H - 1) * dy), 0.0, 1.0))
+                us = float(np.clip(sx / max(1e-4, (W - 1) * dx), 0.0, 1.0))
+                vs = float(np.clip(sy / max(1e-4, (H - 1) * dy), 0.0, 1.0))
+            elif cur_orient == "coronal":
+                uc = float(np.clip(cx / max(1e-4, (W - 1) * dx), 0.0, 1.0))
+                vc = float(np.clip(1.0 - cz / max(1e-4, (D - 1) * dz), 0.0, 1.0))
+                un = float(np.clip(nx / max(1e-4, (W - 1) * dx), 0.0, 1.0))
+                vn = float(np.clip(1.0 - nz / max(1e-4, (D - 1) * dz), 0.0, 1.0))
+                us = float(np.clip(sx / max(1e-4, (W - 1) * dx), 0.0, 1.0))
+                vs = float(np.clip(1.0 - sz / max(1e-4, (D - 1) * dz), 0.0, 1.0))
+            else:  # sagittal
+                uc = float(np.clip(cy / max(1e-4, (H - 1) * dy), 0.0, 1.0))
+                vc = float(np.clip(1.0 - cz / max(1e-4, (D - 1) * dz), 0.0, 1.0))
+                un = float(np.clip(ny / max(1e-4, (H - 1) * dy), 0.0, 1.0))
+                vn = float(np.clip(1.0 - nz / max(1e-4, (D - 1) * dz), 0.0, 1.0))
+                us = float(np.clip(sy / max(1e-4, (H - 1) * dy), 0.0, 1.0))
+                vs = float(np.clip(1.0 - sz / max(1e-4, (D - 1) * dz), 0.0, 1.0))
+
+            px_c = rect.left() + uc * rect.width()
+            py_c = rect.top()  + vc * rect.height()
+            px_n = rect.left() + un * rect.width()
+            py_n = rect.top()  + vn * rect.height()
+            px_s = rect.left() + us * rect.width()
+            py_s = rect.top()  + vs * rect.height()
+
+            # Simulated Instrument Shaft (coral #ff5252, solid line)
+            diam = getattr(pose, "diameter_mm", 2.0)
+            pen_width = max(2.0, min(8.0, diam * 1.5))
+            inst_pen = QPen(QColor(255, 82, 82, 220), pen_width, Qt.PenStyle.SolidLine)
+            painter.setPen(inst_pen)
+            painter.drawLine(QPointF(px_s, py_s), QPointF(px_c, py_c))
+
+            # Current Tip Marker (coral/red ring with white center dot)
+            painter.setPen(QPen(QColor(255, 255, 255, 240), 1.5))
+            painter.setBrush(QBrush(QColor(255, 23, 68, 240)))
+            painter.drawEllipse(QPointF(px_c, py_c), 5.0, 5.0)
+            painter.setBrush(QBrush(QColor(255, 255, 255)))
+            painter.drawEllipse(QPointF(px_c, py_c), 1.5, 1.5)
+
+            # Deviation Connector (dashed line from Nearest Planned Point to Current Tip)
+            if pose.lateral_deviation_mm > 0.1:
+                dev_pen = QPen(QColor(255, 23, 68, 220), 1.5, Qt.PenStyle.DashLine)
+                painter.setPen(dev_pen)
+                painter.drawLine(QPointF(px_n, py_n), QPointF(px_c, py_c))
+
+                # Nearest planned point marker on route
+                painter.setPen(QPen(QColor(0, 229, 255), 1.0))
+                painter.setBrush(QBrush(QColor(0, 229, 255, 180)))
+                painter.drawEllipse(QPointF(px_n, py_n), 3.0, 3.0)
+
+                # Deviation badge
+                dev_label = f"Dev: {pose.lateral_deviation_mm:.1f} mm"
+                painter.setFont(QFont("sans-serif", 7, QFont.Weight.Bold))
+                fm = painter.fontMetrics()
+                tw = fm.horizontalAdvance(dev_label) + 6
+                th = fm.height() + 2
+                mid_x = (px_n + px_c) / 2.0
+                mid_y = (py_n + py_c) / 2.0
+                dev_badge = QRectF(mid_x + 6, mid_y - th / 2.0, tw, th)
+                painter.setPen(QPen(QColor(255, 23, 68), 1))
+                painter.setBrush(QBrush(QColor(20, 20, 20, 220)))
+                painter.drawRoundedRect(dev_badge, 2, 2)
+                painter.setPen(QColor(255, 23, 68))
+                painter.drawText(dev_badge, Qt.AlignmentFlag.AlignCenter, dev_label)
+
+        # 7. Structures to Avoid 2D Projection & In-Plane Intersection
+        import math
+        for struct in getattr(self, "avoid_structures", []):
+            sx, sy, sz = struct.center
+            s_rad = getattr(struct, "radius_mm", 5.0)
+            delta_normal = 0.0
+            u_s, v_s = 0.5, 0.5
+
+            if cur_orient == "axial":
+                z_cur = cur_slice * dz
+                delta_normal = abs(z_cur - sz)
+                u_s = float(np.clip(sx / max(1e-4, (W - 1) * dx), 0.0, 1.0))
+                v_s = float(np.clip(sy / max(1e-4, (H - 1) * dy), 0.0, 1.0))
+                scale_norm = rect.width() / max(1e-4, (W - 1) * dx)
+            elif cur_orient == "coronal":
+                y_cur = cur_slice * dy
+                delta_normal = abs(y_cur - sy)
+                u_s = float(np.clip(sx / max(1e-4, (W - 1) * dx), 0.0, 1.0))
+                v_s = float(np.clip(1.0 - sz / max(1e-4, (D - 1) * dz), 0.0, 1.0))
+                scale_norm = rect.width() / max(1e-4, (W - 1) * dx)
+            else:  # sagittal
+                x_cur = cur_slice * dx
+                delta_normal = abs(x_cur - sx)
+                u_s = float(np.clip(sy / max(1e-4, (H - 1) * dy), 0.0, 1.0))
+                v_s = float(np.clip(1.0 - sz / max(1e-4, (D - 1) * dz), 0.0, 1.0))
+                scale_norm = rect.width() / max(1e-4, (H - 1) * dy)
+
+            cxs = rect.left() + u_s * rect.width()
+            cys = rect.top()  + v_s * rect.height()
+
+            # If the current slice intersects the structure's 3D sphere:
+            if delta_normal <= s_rad:
+                r_in = math.sqrt(max(0.0, s_rad ** 2 - delta_normal ** 2))
+                px_r = max(4.0, r_in * scale_norm)
+                # Filled translucent amber disc with solid border
+                painter.setPen(QPen(QColor(255, 145, 0, 230), 1.8))
+                painter.setBrush(QBrush(QColor(255, 145, 0, 75)))
+                painter.drawEllipse(QPointF(cxs, cys), px_r, px_r)
+
+                # Center dot
+                painter.setBrush(QBrush(QColor(255, 145, 0, 240)))
+                painter.drawEllipse(QPointF(cxs, cys), 2.5, 2.5)
+
+                # Name badge
+                s_name = getattr(struct, "name", "Structure")
+                painter.setFont(QFont("sans-serif", 8, QFont.Weight.Bold))
+                fm = painter.fontMetrics()
+                tw = fm.horizontalAdvance(s_name) + 8
+                th = fm.height() + 2
+                s_badge = QRectF(cxs + px_r + 4, cys - th / 2.0, tw, th)
+                painter.setPen(QPen(QColor(255, 145, 0), 1))
+                painter.setBrush(QBrush(QColor(15, 15, 15, 220)))
+                painter.drawRoundedRect(s_badge, 2, 2)
+                painter.setPen(QColor(255, 255, 255))
+                painter.drawText(s_badge, Qt.AlignmentFlag.AlignCenter, s_name)
+            elif delta_normal <= s_rad * 1.8:
+                # Proximity hint: subtle dashed outline
+                px_r = max(3.0, s_rad * scale_norm * 0.8)
+                painter.setPen(QPen(QColor(255, 145, 0, 100), 1.0, Qt.PenStyle.DashLine))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawEllipse(QPointF(cxs, cys), px_r, px_r)
+
+        # 8. ICU Same-Location Marker & Label (ICU Mode: Feature 2)
+        if getattr(self, "icu_same_location", None) is not None and self.icu_same_location.get("is_active", False):
+            x_loc = self.icu_same_location.get("x")
+            y_loc = self.icu_same_location.get("y")
+            z_loc = self.icu_same_location.get("z")
+            if x_loc is not None and y_loc is not None and z_loc is not None:
+                is_before = (self.comparison_active and self.comparison_view == "BEFORE")
+                geom = self.icu_same_location.get("before_geom" if is_before else "current_geom")
+                if geom:
+                    H_g = geom.get("H", H)
+                    W_g = geom.get("W", W)
+                    D_g = geom.get("D", D)
+                    dx_g = geom.get("dx", dx)
+                    dy_g = geom.get("dy", dy)
+                    dz_g = geom.get("dz", dz)
+                    ox_g = geom.get("ox", 0.0)
+                    oy_g = geom.get("oy", 0.0)
+                    oz_g = geom.get("oz", 0.0)
+                else:
+                    H_g, W_g, D_g = H, W, D
+                    dx_g, dy_g, dz_g = dx, dy, dz
+                    ox_g, oy_g, oz_g = 0.0, 0.0, 0.0
+
+                show_marker = False
+                u_loc, v_loc = 0.5, 0.5
+                if cur_orient == "axial":
+                    target_slice = int(np.clip(round((z_loc - oz_g) / max(dz_g, 1e-4)), 0, D_g - 1))
+                    if abs(cur_slice - target_slice) <= 1:
+                        show_marker = True
+                        u_loc = float(np.clip((x_loc - ox_g) / max(1e-4, (W_g - 1) * dx_g), 0.0, 1.0))
+                        v_loc = float(np.clip((y_loc - oy_g) / max(1e-4, (H_g - 1) * dy_g), 0.0, 1.0))
+                elif cur_orient == "coronal":
+                    target_slice = int(np.clip(round((y_loc - oy_g) / max(dy_g, 1e-4)), 0, H_g - 1))
+                    if abs(cur_slice - target_slice) <= 1:
+                        show_marker = True
+                        u_loc = float(np.clip((x_loc - ox_g) / max(1e-4, (W_g - 1) * dx_g), 0.0, 1.0))
+                        v_loc = float(np.clip(1.0 - (z_loc - oz_g) / max(1e-4, (D_g - 1) * dz_g), 0.0, 1.0))
+                else:  # sagittal
+                    target_slice = int(np.clip(round((x_loc - ox_g) / max(dx_g, 1e-4)), 0, W_g - 1))
+                    if abs(cur_slice - target_slice) <= 1:
+                        show_marker = True
+                        u_loc = float(np.clip((y_loc - oy_g) / max(1e-4, (H_g - 1) * dy_g), 0.0, 1.0))
+                        v_loc = float(np.clip(1.0 - (z_loc - oz_g) / max(1e-4, (D_g - 1) * dz_g), 0.0, 1.0))
+
+                if show_marker:
+                    mx = rect.left() + u_loc * rect.width()
+                    my = rect.top() + v_loc * rect.height()
+
+                    # Dedicated ICU Same Location Marker: vibrant cyan reticle (#00e5ff)
+                    painter.setPen(QPen(QColor(0, 229, 255, 240), 1.8))
+                    painter.setBrush(QBrush(QColor(0, 229, 255, 60)))
+                    painter.drawEllipse(QPointF(mx, my), 8.0, 8.0)
+                    painter.setBrush(QBrush(QColor(0, 229, 255, 255)))
+                    painter.drawEllipse(QPointF(mx, my), 2.5, 2.5)
+
+                    # Crosshair ticks
+                    painter.drawLine(int(mx - 12), int(my), int(mx - 4), int(my))
+                    painter.drawLine(int(mx + 4), int(my), int(mx + 12), int(my))
+                    painter.drawLine(int(mx), int(my - 12), int(mx), int(my - 4))
+                    painter.drawLine(int(mx), int(my + 4), int(mx), int(my + 12))
+
+                    # Dedicated Same Location Label
+                    lbl_text = "Same Location"
+                    font_loc = QFont("sans-serif", 8, QFont.Weight.Bold)
+                    painter.setFont(font_loc)
+                    fm = painter.fontMetrics()
+                    tw = fm.horizontalAdvance(lbl_text) + 12
+                    th = 18
+                    lbl_rect = QRectF(mx + 10, my - th / 2.0, tw, th)
+                    painter.setPen(QPen(QColor(0, 229, 255), 1))
+                    painter.setBrush(QBrush(QColor(15, 15, 15, 220)))
+                    painter.drawRoundedRect(lbl_rect, 3, 3)
+                    painter.setPen(QColor(0, 229, 255))
+                    painter.drawText(lbl_rect, Qt.AlignmentFlag.AlignCenter, lbl_text)
+
     def mouseMoveEvent(self, event):
         rect = self._get_target_rect()
         if rect.width() <= 0 or rect.height() <= 0 or self._raw_slice is None:
@@ -409,6 +1021,44 @@ class CTSliceCanvas(QWidget):
         if event.button() == Qt.MouseButton.LeftButton:
             u = float(np.clip((event.position().x() - rect.left()) / rect.width(), 0.0, 1.0))
             v = float(np.clip((event.position().y() - rect.top()) / rect.height(), 0.0, 1.0))
+
+            # ── ICU Feature 2: Same-Location Review Picking Mode ──────────────
+            if getattr(self, "icu_same_location_picking", False):
+                parent_w = self.parent()
+                if hasattr(parent_w, "calc_physical_coords"):
+                    phys = parent_w.calc_physical_coords(self.plane_name, getattr(self, "current_slice_idx", 0), u, v)
+                else:
+                    phys = (u, v, 0.0)
+                self.icu_same_location_picking = False
+                self.setCursor(Qt.CursorShape.ArrowCursor)
+                self.same_location_selected.emit(float(phys[0]), float(phys[1]), float(phys[2]))
+                self.cross_u = u
+                self.cross_v = v
+                self.crosshair_moved.emit(u, v)
+                self.update()
+                return
+
+            # ── Explicit Surgical Landmark/Structure Placement Mode (SET_ENTRY / SET_TARGET / ADD_STRUCTURE) ─
+            if getattr(self, "planning_picking_mode", "IDLE") in ("SET_ENTRY", "SET_TARGET", "ADD_STRUCTURE"):
+                parent_w = self.parent()
+                if hasattr(parent_w, "calc_physical_coords"):
+                    phys = parent_w.calc_physical_coords(self.plane_name, getattr(self, "current_slice_idx", 0), u, v)
+                else:
+                    phys = (u, v, 0.0)
+                mode = self.planning_picking_mode
+                if mode == "SET_ENTRY":
+                    pt_type = "ENTRY"
+                elif mode == "SET_TARGET":
+                    pt_type = "TARGET"
+                else:
+                    pt_type = "STRUCTURE"
+                self.planning_picking_mode = "IDLE"
+                self.planning_point_selected.emit(pt_type, float(phys[0]), float(phys[1]), float(phys[2]))
+                self.cross_u = u
+                self.cross_v = v
+                self.crosshair_moved.emit(u, v)
+                self.update()
+                return
 
             if self.measuring_active and self._raw_slice is not None:
                 parent_w = self.parent()
@@ -503,6 +1153,8 @@ class Slice2DViewerWidget(QWidget):
     closed = pyqtSignal()
     measurement_added = pyqtSignal(object)  # Measurement2D
     physical_point_selected = pyqtSignal(int, float, float, float)  # point_num (1 or 2), x_mm, y_mm, z_mm
+    planning_point_selected = pyqtSignal(str, float, float, float)  # point_type ("ENTRY" or "TARGET"), x_mm, y_mm, z_mm
+    same_location_selected = pyqtSignal(float, float, float)        # physical x_mm, y_mm, z_mm
     measurement_cleared = pyqtSignal()
     measurement_state_changed = pyqtSignal(str)
     window_level_changed = pyqtSignal(float, float)  # window_width, window_level
@@ -527,6 +1179,13 @@ class Slice2DViewerWidget(QWidget):
         self.window_level: float = 400.0
         self._wl_lut: np.ndarray | None = None
         self._build_wl_lut()
+
+        # Before vs After comparison state
+        self.comparison_active: bool = False
+        self.comparison_mode: str = "TOGGLE"
+        self.comparison_view: str = "AFTER"
+        self.comparison_before_vol: np.ndarray | None = None
+        self.comparison_opacity: float = 0.5
 
         self._build_ui()
 
@@ -702,6 +1361,8 @@ class Slice2DViewerWidget(QWidget):
         self.canvas.crosshair_moved.connect(self._on_canvas_crosshair)
         self.canvas.measurement_added.connect(self._on_canvas_measurement_added)
         self.canvas.physical_point_selected.connect(self.physical_point_selected.emit)
+        self.canvas.planning_point_selected.connect(self.planning_point_selected.emit)
+        self.canvas.same_location_selected.connect(self.same_location_selected.emit)
         self.canvas.measurement_state_changed.connect(self._on_canvas_measurement_state_changed)
         layout.addWidget(self.canvas, stretch=1)
 
@@ -815,6 +1476,58 @@ class Slice2DViewerWidget(QWidget):
         if not m.physical_end or m.physical_end == (0.0, 0.0, 0.0):
             m.physical_end = self.calc_physical_coords(m.orientation, m.slice_idx, m.end_u, m.end_v)
         self.measurement_added.emit(m)
+
+    def set_planning_picking_mode(self, mode: str):
+        """Sets active landmark picking mode on canvas (IDLE, SET_ENTRY, SET_TARGET)."""
+        if hasattr(self, "canvas"):
+            self.canvas.set_planning_picking_mode(mode)
+
+    def set_planning_landmarks(self, entry: tuple[float, float, float] | None, target: tuple[float, float, float] | None):
+        """Passes Entry and Target coordinates to the canvas for 2D slice visualization."""
+        if hasattr(self, "canvas"):
+            self.canvas.set_planning_landmarks(entry, target)
+
+    def set_avoid_structures(self, structures: list):
+        """Passes active structures to avoid to the canvas for 2D slice visualization."""
+        if hasattr(self, "canvas"):
+            self.canvas.set_avoid_structures(structures)
+
+    def set_surgical_corridor(self, corridor):
+        """Passes active surgical corridor to the canvas for 2D slice visualization."""
+        if hasattr(self, "canvas"):
+            self.canvas.set_surgical_corridor(corridor)
+
+    def set_virtual_instrument(self, instrument):
+        """Passes active virtual instrument to the canvas for 2D slice visualization."""
+        if hasattr(self, "canvas"):
+            self.canvas.set_virtual_instrument(instrument)
+
+    def set_current_instrument_pose(self, pose):
+        """Passes active simulated current instrument pose to the canvas for 2D slice visualization."""
+        if hasattr(self, "canvas"):
+            self.canvas.set_current_instrument_pose(pose)
+
+    # ── ICU Feature 2: Same-Location Review Methods ───────────────────────────
+    def set_same_location_picking_mode(self, enabled: bool):
+        """Sets active picking mode for ICU Same-Location Review."""
+        if hasattr(self, "canvas"):
+            self.canvas.set_same_location_picking(enabled)
+
+    def set_same_location(self, loc_data: dict | None):
+        """Passes ICU same-location data to canvas for visualization."""
+        if hasattr(self, "canvas"):
+            self.canvas.set_same_location(loc_data)
+
+    def clear_same_location(self):
+        """Clears ICU same-location data from canvas."""
+        if hasattr(self, "canvas"):
+            self.canvas.clear_same_location()
+
+    def navigate_to_physical_point(self, x_mm: float, y_mm: float, z_mm: float):
+        """Navigates current 2D orientation slice to physical coordinates (X, Y, Z)."""
+        self.set_physical_position(x_mm, y_mm, z_mm, update_orientation_slice=True)
+
+
 
     def set_pending_physical_point(self, x_mm: float, y_mm: float, z_mm: float):
         """Called when Point 1 is selected in 3D view to mirror into 2D view."""
@@ -1381,22 +2094,94 @@ class Slice2DViewerWidget(QWidget):
 
         return raw, mm_x, mm_y
 
-    def _render_current_slice(self):
-        """Converts calibrated HU slice into 8-bit QPixmap using pre-baked LUT."""
-        raw, mm_x, mm_y = self._extract_raw_slice()
-        if raw is None or self._wl_lut is None:
-            self.canvas.set_slice_data(None, None, 1.0, 1.0, self.current_orientation)
-            return
+    def _extract_slice_from_vol(self, vol: np.ndarray | None) -> tuple[np.ndarray | None, float, float]:
+        """Extracts 2D HU slice and physical spacings from an arbitrary 3D volume."""
+        if vol is None or vol.ndim != 3:
+            return None, 1.0, 1.0
 
-        # Map true HU [-1024..3071] to 8-bit display indices
+        H, W, D = vol.shape
+        orient = self.current_orientation
+
+        if orient == "axial":
+            idx = int(np.clip(self.slice_indices.get("axial", 0), 0, D - 1))
+            raw = vol[:, :, idx]
+            mm_x = float(self.pixel_spacing[1])
+            mm_y = float(self.pixel_spacing[0])
+        elif orient == "coronal":
+            idx = int(np.clip(self.slice_indices.get("coronal", 0), 0, H - 1))
+            raw = np.flipud(vol[idx, :, :].T)
+            mm_x = float(self.pixel_spacing[1])
+            mm_y = float(self.slice_thickness)
+        else:  # sagittal
+            idx = int(np.clip(self.slice_indices.get("sagittal", 0), 0, W - 1))
+            raw = np.flipud(vol[:, idx, :].T)
+            mm_x = float(self.pixel_spacing[0])
+            mm_y = float(self.slice_thickness)
+
+        return raw, mm_x, mm_y
+
+    def _vol_to_pixmap(self, raw: np.ndarray | None) -> QPixmap | None:
+        """Maps raw HU slice through pre-baked LUT to QPixmap."""
+        if raw is None or self._wl_lut is None:
+            return None
         indices = np.clip(raw.astype(np.int32) + 1024, 0, 4095)
         arr_8bit = np.ascontiguousarray(self._wl_lut[indices], dtype=np.uint8)
-
         sh = arr_8bit.shape
         qimg = QImage(arr_8bit.data, sh[1], sh[0], sh[1], QImage.Format.Format_Grayscale8)
-        pixmap = QPixmap.fromImage(qimg.copy())
+        return QPixmap.fromImage(qimg.copy())
 
-        self.canvas.set_slice_data(pixmap, raw, mm_x, mm_y, self.current_orientation)
+    def set_comparison_state(
+        self,
+        is_active: bool,
+        mode: str = "TOGGLE",
+        current_view: str = "AFTER",
+        before_vol: np.ndarray | None = None,
+        opacity: float = 0.5,
+        before_spacing: tuple | None = None,
+        before_thickness: float | None = None
+    ):
+        """Configures 2D slice comparison state and triggers re-render."""
+        self.comparison_active = bool(is_active)
+        self.comparison_mode = mode
+        self.comparison_view = current_view
+        self.comparison_before_vol = before_vol
+        self.comparison_opacity = float(opacity)
+        if before_spacing is not None:
+            self.comparison_before_spacing = before_spacing
+        if before_thickness is not None:
+            self.comparison_before_thickness = before_thickness
+        self._render_current_slice()
+
+    def _render_current_slice(self):
+        """Converts calibrated HU slice into 8-bit QPixmap using pre-baked LUT."""
+        if self.comparison_active:
+            if self.comparison_mode == "TOGGLE":
+                if self.comparison_view == "BEFORE" and self.comparison_before_vol is not None:
+                    raw, mm_x, mm_y = self._extract_slice_from_vol(self.comparison_before_vol)
+                else:
+                    raw, mm_x, mm_y = self._extract_raw_slice()
+                pixmap = self._vol_to_pixmap(raw)
+                self.canvas.set_slice_data(pixmap, raw, mm_x, mm_y, self.current_orientation)
+                self.canvas.set_comparison_data(True, "TOGGLE", self.comparison_view, None, self.comparison_opacity)
+            elif self.comparison_mode in ("SIDE_BY_SIDE", "OVERLAY"):
+                raw_after, mm_x, mm_y = self._extract_raw_slice()
+                pix_after = self._vol_to_pixmap(raw_after)
+                pix_before = None
+                if self.comparison_before_vol is not None:
+                    raw_b, _, _ = self._extract_slice_from_vol(self.comparison_before_vol)
+                    pix_before = self._vol_to_pixmap(raw_b)
+                self.canvas.set_slice_data(pix_after, raw_after, mm_x, mm_y, self.current_orientation)
+                self.canvas.set_comparison_data(True, self.comparison_mode, self.comparison_view, pix_before, self.comparison_opacity)
+            else:
+                raw, mm_x, mm_y = self._extract_raw_slice()
+                pixmap = self._vol_to_pixmap(raw)
+                self.canvas.set_slice_data(pixmap, raw, mm_x, mm_y, self.current_orientation)
+                self.canvas.set_comparison_data(True, self.comparison_mode, self.comparison_view, None, self.comparison_opacity)
+        else:
+            raw, mm_x, mm_y = self._extract_raw_slice()
+            pixmap = self._vol_to_pixmap(raw)
+            self.canvas.set_slice_data(pixmap, raw, mm_x, mm_y, self.current_orientation)
+            self.canvas.set_comparison_data(False, "TOGGLE", "AFTER", None, 0.5)
 
     def _on_canvas_hover(self, px: int, py: int, hu: float):
         """Updates cursor readout bar with pixel position and genuine HU value."""
@@ -1464,13 +2249,22 @@ class Slice2DViewerWidget(QWidget):
         update_orientation_slice: bool = True
     ):
         """Snaps 2D slice index and in-plane crosshair to physical position (X, Y, Z) in mm."""
-        if self.vol_data is None or self.vol_data.ndim != 3:
+        if self.comparison_active and self.comparison_view == "BEFORE" and self.comparison_before_vol is not None:
+            active_vol = self.comparison_before_vol
+            b_spacing = getattr(self, "comparison_before_spacing", self.pixel_spacing)
+            dy = max(1e-4, float(b_spacing[0]))
+            dx = max(1e-4, float(b_spacing[1]))
+            dz = max(1e-4, float(getattr(self, "comparison_before_thickness", self.slice_thickness)))
+        else:
+            active_vol = self.vol_data
+            dy = max(1e-4, float(self.pixel_spacing[0]))
+            dx = max(1e-4, float(self.pixel_spacing[1]))
+            dz = max(1e-4, float(self.slice_thickness))
+
+        if active_vol is None or active_vol.ndim != 3:
             return
 
-        H, W, D = self.vol_data.shape
-        dy = max(1e-4, float(self.pixel_spacing[0]))
-        dx = max(1e-4, float(self.pixel_spacing[1]))
-        dz = max(1e-4, float(self.slice_thickness))
+        H, W, D = active_vol.shape
 
         ix = int(np.clip(round(x_mm / dx), 0, W - 1))
         iy = int(np.clip(round(y_mm / dy), 0, H - 1))

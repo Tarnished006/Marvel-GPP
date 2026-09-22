@@ -126,7 +126,53 @@ class MPRSliceWidget(QFrame):
         self.mm_per_pixel_x: float = 1.0
         self.mm_per_pixel_y: float = 1.0
 
+        # Before vs After comparison badge state
+        self.comparison_view: str | None = None
+
+        # Planned Route & Landmarks
+        self.entry_landmark: tuple[float, float, float] | None = None
+        self.target_landmark: tuple[float, float, float] | None = None
+        self.avoid_structures: list = []
+        self.vol_dims: tuple[int, int, int] = (1, 1, 1)
+        self.spacings: tuple[float, float, float] = (1.0, 1.0, 1.0)
+
         self.setMouseTracking(True)
+
+    def set_planned_route(self, entry: tuple[float, float, float] | None, target: tuple[float, float, float] | None, vol_dims: tuple[int, int, int] = (1, 1, 1), spacings: tuple[float, float, float] = (1.0, 1.0, 1.0)):
+        """Sets active Entry and Target coordinates for 2D MPR orthogonal projection."""
+        self.entry_landmark = entry
+        self.target_landmark = target
+        self.vol_dims = vol_dims
+        self.spacings = spacings
+        self.update()
+
+    def set_avoid_structures(self, structures: list, vol_dims: tuple[int, int, int] = (1, 1, 1), spacings: tuple[float, float, float] = (1.0, 1.0, 1.0)):
+        """Sets active structures to avoid for 2D MPR orthogonal projection."""
+        self.avoid_structures = list(structures) if structures else []
+        self.vol_dims = vol_dims
+        self.spacings = spacings
+        self.update()
+
+    def set_surgical_corridor(self, corridor, vol_dims: tuple[int, int, int] = (1, 1, 1), spacings: tuple[float, float, float] = (1.0, 1.0, 1.0)):
+        """Sets active surgical corridor for 2D MPR orthogonal projection."""
+        self.surgical_corridor = corridor
+        self.vol_dims = vol_dims
+        self.spacings = spacings
+        self.update()
+
+    def set_virtual_instrument(self, instrument, vol_dims: tuple[int, int, int] = (1, 1, 1), spacings: tuple[float, float, float] = (1.0, 1.0, 1.0)):
+        """Sets active virtual instrument for 2D MPR orthogonal projection."""
+        self.virtual_instrument = instrument
+        self.vol_dims = vol_dims
+        self.spacings = spacings
+        self.update()
+
+    def set_current_instrument_pose(self, pose, vol_dims: tuple[int, int, int] = (1, 1, 1), spacings: tuple[float, float, float] = (1.0, 1.0, 1.0)):
+        """Sets active simulated current instrument pose for 2D MPR orthogonal projection."""
+        self.current_instrument_pose = pose
+        self.vol_dims = vol_dims
+        self.spacings = spacings
+        self.update()
 
     def set_slice_image(self, pixmap: QPixmap, raw_shape: tuple[int, int], mm_x: float, mm_y: float):
         self._pixmap = pixmap
@@ -440,6 +486,21 @@ class MPRSliceWidget(QFrame):
             painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "No Slice Loaded")
             return
 
+        # Before vs After Comparison Badge (top right)
+        if getattr(self, "comparison_view", None):
+            painter.save()
+            font_badge = QFont("sans-serif", 8, QFont.Weight.Bold)
+            painter.setFont(font_badge)
+            badge_txt = str(self.comparison_view).upper()
+            bg_col = QColor(0, 229, 255, 200) if badge_txt == "BEFORE" else QColor(124, 252, 0, 200)
+            b_rect = QRectF(rect.right() - 75, rect.top() + 6, 65, 18)
+            painter.setBrush(QBrush(bg_col))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawRoundedRect(b_rect, 3, 3)
+            painter.setPen(QColor(0, 0, 0))
+            painter.drawText(b_rect, Qt.AlignmentFlag.AlignCenter, badge_txt)
+            painter.restore()
+
         # ── ROI Diagnostic Magnifying Loupe (2.0x Digital Zoom with Micro-Reticle) ────
         active_lens_pos = self.flashlight_pinned_pos if self.flashlight_pinned else self.flashlight_pos
         if self.flashlight_active and active_lens_pos is not None and self._pixmap and not self._pixmap.isNull():
@@ -571,7 +632,261 @@ class MPRSliceWidget(QFrame):
                 painter.drawLine(p3_px, hover_px)
                 self._draw_hint_tag(painter, rect, "Cobb: Click Line 2 End")
 
-        # 7. Anatomical Badges & Orientation Guides
+        # 7. Planned Route Projection
+        if self.entry_landmark and self.target_landmark:
+            ex, ey, ez = self.entry_landmark
+            tx, ty, tz = self.target_landmark
+            H, W, D = self.vol_dims
+            dy, dx, dz = self.spacings
+
+            p_name = self.plane_name.lower()
+            if "axial" in p_name:
+                ue = float(np.clip(ex / max(1e-4, W * dx), 0.0, 1.0))
+                ve = float(np.clip(ey / max(1e-4, H * dy), 0.0, 1.0))
+                ut = float(np.clip(tx / max(1e-4, W * dx), 0.0, 1.0))
+                vt = float(np.clip(ty / max(1e-4, H * dy), 0.0, 1.0))
+            elif "coronal" in p_name:
+                ue = float(np.clip(ex / max(1e-4, W * dx), 0.0, 1.0))
+                ve = float(np.clip((D - 1 - (ez / max(1e-4, dz))) / max(1.0, float(D)), 0.0, 1.0))
+                ut = float(np.clip(tx / max(1e-4, W * dx), 0.0, 1.0))
+                vt = float(np.clip((D - 1 - (tz / max(1e-4, dz))) / max(1.0, float(D)), 0.0, 1.0))
+            else:  # sagittal
+                ue = float(np.clip(ey / max(1e-4, H * dy), 0.0, 1.0))
+                ve = float(np.clip((D - 1 - (ez / max(1e-4, dz))) / max(1.0, float(D)), 0.0, 1.0))
+                ut = float(np.clip(ty / max(1e-4, H * dy), 0.0, 1.0))
+                vt = float(np.clip((D - 1 - (tz / max(1e-4, dz))) / max(1.0, float(D)), 0.0, 1.0))
+
+            cxe = rect.left() + ue * rect.width()
+            cye = rect.top()  + ve * rect.height()
+            cxt = rect.left() + ut * rect.width()
+            cyt = rect.top()  + vt * rect.height()
+
+            # Render corridor boundaries if active and enabled
+            corridor = getattr(self, "surgical_corridor", None)
+            if corridor and getattr(corridor, "is_enabled", True):
+                c_rad = getattr(corridor, "radius_mm", 5.0)
+                if "axial" in p_name:
+                    scale_norm = rect.width() / max(1e-4, W * dx)
+                elif "coronal" in p_name:
+                    scale_norm = rect.width() / max(1e-4, W * dx)
+                else:
+                    scale_norm = rect.width() / max(1e-4, H * dy)
+                px_c_rad = c_rad * scale_norm
+
+                dx_px = cxt - cxe
+                dy_px = cyt - cye
+                len_px = float(math.hypot(dx_px, dy_px))
+                if len_px > 1e-3:
+                    nx = -dy_px / len_px * px_c_rad
+                    ny = dx_px / len_px * px_c_rad
+                    corridor_pen = QPen(QColor(124, 77, 255, 140), 1.25, Qt.PenStyle.DashLine)
+                    painter.setPen(corridor_pen)
+                    painter.drawLine(QPointF(cxe + nx, cye + ny), QPointF(cxt + nx, cyt + ny))
+                    painter.drawLine(QPointF(cxe - nx, cye - ny), QPointF(cxt - nx, cyt - ny))
+
+            # Draw route projection line
+            painter.setPen(QPen(QColor(0, 229, 255, 175), 2, Qt.PenStyle.DashLine))
+            painter.drawLine(QPointF(cxe, cye), QPointF(cxt, cyt))
+
+            # Draw Entry and Target endpoints on projection
+            painter.setPen(QPen(QColor(255, 255, 255, 220), 1.5))
+            painter.setBrush(QBrush(QColor(0, 255, 127)))
+            painter.drawEllipse(QPointF(cxe, cye), 4.5, 4.5)
+            painter.setBrush(QBrush(QColor(255, 51, 102)))
+            painter.drawEllipse(QPointF(cxt, cyt), 4.5, 4.5)
+
+        # 7.4. Virtual Instrument Projection & Tip Marker
+        inst = getattr(self, "virtual_instrument", None)
+        if inst and getattr(inst, "is_visible", False) and hasattr(inst, "route"):
+            H, W, D = self.vol_dims
+            dy, dx, dz = self.spacings
+            p_name = self.plane_name.lower()
+
+            ex, ey, ez = inst.route.entry_point.coordinates
+            tip_x, tip_y, tip_z = inst.tip_position_mm
+
+            if "axial" in p_name:
+                ue = float(np.clip(ex / max(1e-4, W * dx), 0.0, 1.0))
+                ve = float(np.clip(ey / max(1e-4, H * dy), 0.0, 1.0))
+                ut = float(np.clip(tip_x / max(1e-4, W * dx), 0.0, 1.0))
+                vt = float(np.clip(tip_y / max(1e-4, H * dy), 0.0, 1.0))
+            elif "coronal" in p_name:
+                ue = float(np.clip(ex / max(1e-4, W * dx), 0.0, 1.0))
+                ve = float(np.clip((D - 1 - (ez / max(1e-4, dz))) / max(1.0, float(D)), 0.0, 1.0))
+                ut = float(np.clip(tip_x / max(1e-4, W * dx), 0.0, 1.0))
+                vt = float(np.clip((D - 1 - (tip_z / max(1e-4, dz))) / max(1.0, float(D)), 0.0, 1.0))
+            else:  # sagittal
+                ue = float(np.clip(ey / max(1e-4, H * dy), 0.0, 1.0))
+                ve = float(np.clip((D - 1 - (ez / max(1e-4, dz))) / max(1.0, float(D)), 0.0, 1.0))
+                ut = float(np.clip(tip_y / max(1e-4, H * dy), 0.0, 1.0))
+                vt = float(np.clip((D - 1 - (tip_z / max(1e-4, dz))) / max(1.0, float(D)), 0.0, 1.0))
+
+            cxe = rect.left() + ue * rect.width()
+            cye = rect.top()  + ve * rect.height()
+            cxtip = rect.left() + ut * rect.width()
+            cytip = rect.top()  + vt * rect.height()
+
+            # Solid golden shaft line from Entry to Tip
+            if inst.insertion_depth_mm > 1e-3:
+                diam = getattr(inst, "diameter_mm", 2.0)
+                pen_width = max(2.0, min(8.0, diam * 1.5))
+                inst_pen = QPen(QColor(255, 214, 0, 220), pen_width, Qt.PenStyle.SolidLine)
+                painter.setPen(inst_pen)
+                painter.drawLine(QPointF(cxe, cye), QPointF(cxtip, cytip))
+
+            # Virtual Instrument Tip Marker (golden ring with white center dot)
+            painter.setPen(QPen(QColor(255, 255, 255, 240), 1.5))
+            painter.setBrush(QBrush(QColor(255, 214, 0, 240)))
+            painter.drawEllipse(QPointF(cxtip, cytip), 4.5, 4.5)
+            painter.setBrush(QBrush(QColor(255, 255, 255)))
+            painter.drawEllipse(QPointF(cxtip, cytip), 1.5, 1.5)
+
+            # Tip depth badge
+            tip_label = f"Tip: {inst.insertion_depth_mm:.1f} mm"
+            painter.setFont(QFont("sans-serif", 7, QFont.Weight.Bold))
+            fm = painter.fontMetrics()
+            tw = fm.horizontalAdvance(tip_label) + 6
+            th = fm.height() + 2
+            tip_badge = QRectF(cxtip + 8, cytip - th / 2.0, tw, th)
+            painter.setPen(QPen(QColor(255, 214, 0), 1))
+            painter.setBrush(QBrush(QColor(20, 20, 20, 220)))
+            painter.drawRoundedRect(tip_badge, 2, 2)
+            painter.setPen(QColor(255, 214, 0))
+            painter.drawText(tip_badge, Qt.AlignmentFlag.AlignCenter, tip_label)
+
+        # 7.45. Simulated Current Instrument & Live Deviation Projection
+        pose = getattr(self, "current_instrument_pose", None)
+        if pose and getattr(pose, "is_visible", False) and hasattr(pose, "route"):
+            H, W, D = self.vol_dims
+            dy, dx, dz = self.spacings
+            p_name = self.plane_name.lower()
+
+            cx, cy, cz = pose.current_tip_position_mm
+            nx, ny, nz = pose.nearest_planned_point_mm
+            dx_vec, dy_vec, dz_vec = pose.current_direction_vector
+            route_len = pose.route.length_mm
+
+            # Shaft back point: tip - length * dir
+            sx = cx - route_len * dx_vec
+            sy = cy - route_len * dy_vec
+            sz = cz - route_len * dz_vec
+
+            if "axial" in p_name:
+                uc = float(np.clip(cx / max(1e-4, W * dx), 0.0, 1.0))
+                vc = float(np.clip(cy / max(1e-4, H * dy), 0.0, 1.0))
+                un = float(np.clip(nx / max(1e-4, W * dx), 0.0, 1.0))
+                vn = float(np.clip(ny / max(1e-4, H * dy), 0.0, 1.0))
+                us = float(np.clip(sx / max(1e-4, W * dx), 0.0, 1.0))
+                vs = float(np.clip(sy / max(1e-4, H * dy), 0.0, 1.0))
+            elif "coronal" in p_name:
+                uc = float(np.clip(cx / max(1e-4, W * dx), 0.0, 1.0))
+                vc = float(np.clip((D - 1 - (cz / max(1e-4, dz))) / max(1.0, float(D)), 0.0, 1.0))
+                un = float(np.clip(nx / max(1e-4, W * dx), 0.0, 1.0))
+                vn = float(np.clip((D - 1 - (nz / max(1e-4, dz))) / max(1.0, float(D)), 0.0, 1.0))
+                us = float(np.clip(sx / max(1e-4, W * dx), 0.0, 1.0))
+                vs = float(np.clip((D - 1 - (sz / max(1e-4, dz))) / max(1.0, float(D)), 0.0, 1.0))
+            else:  # sagittal
+                uc = float(np.clip(cy / max(1e-4, H * dy), 0.0, 1.0))
+                vc = float(np.clip((D - 1 - (cz / max(1e-4, dz))) / max(1.0, float(D)), 0.0, 1.0))
+                un = float(np.clip(ny / max(1e-4, H * dy), 0.0, 1.0))
+                vn = float(np.clip((D - 1 - (nz / max(1e-4, dz))) / max(1.0, float(D)), 0.0, 1.0))
+                us = float(np.clip(sy / max(1e-4, H * dy), 0.0, 1.0))
+                vs = float(np.clip((D - 1 - (sz / max(1e-4, dz))) / max(1.0, float(D)), 0.0, 1.0))
+
+            px_c = rect.left() + uc * rect.width()
+            py_c = rect.top()  + vc * rect.height()
+            px_n = rect.left() + un * rect.width()
+            py_n = rect.top()  + vn * rect.height()
+            px_s = rect.left() + us * rect.width()
+            py_s = rect.top()  + vs * rect.height()
+
+            # Simulated Instrument Shaft (coral #ff5252, solid line)
+            diam = getattr(pose, "diameter_mm", 2.0)
+            pen_width = max(2.0, min(8.0, diam * 1.5))
+            inst_pen = QPen(QColor(255, 82, 82, 220), pen_width, Qt.PenStyle.SolidLine)
+            painter.setPen(inst_pen)
+            painter.drawLine(QPointF(px_s, py_s), QPointF(px_c, py_c))
+
+            # Current Tip Marker (coral/red ring with white center dot)
+            painter.setPen(QPen(QColor(255, 255, 255, 240), 1.5))
+            painter.setBrush(QBrush(QColor(255, 23, 68, 240)))
+            painter.drawEllipse(QPointF(px_c, py_c), 5.0, 5.0)
+            painter.setBrush(QBrush(QColor(255, 255, 255)))
+            painter.drawEllipse(QPointF(px_c, py_c), 1.5, 1.5)
+
+            # Deviation Connector (dashed line from Nearest Planned Point to Current Tip)
+            if pose.lateral_deviation_mm > 0.1:
+                dev_pen = QPen(QColor(255, 23, 68, 220), 1.5, Qt.PenStyle.DashLine)
+                painter.setPen(dev_pen)
+                painter.drawLine(QPointF(px_n, py_n), QPointF(px_c, py_c))
+
+                # Nearest planned point marker on route
+                painter.setPen(QPen(QColor(0, 229, 255), 1.0))
+                painter.setBrush(QBrush(QColor(0, 229, 255, 180)))
+                painter.drawEllipse(QPointF(px_n, py_n), 3.0, 3.0)
+
+                # Deviation badge
+                dev_label = f"Dev: {pose.lateral_deviation_mm:.1f} mm"
+                painter.setFont(QFont("sans-serif", 7, QFont.Weight.Bold))
+                fm = painter.fontMetrics()
+                tw = fm.horizontalAdvance(dev_label) + 6
+                th = fm.height() + 2
+                mid_x = (px_n + px_c) / 2.0
+                mid_y = (py_n + py_c) / 2.0
+                dev_badge = QRectF(mid_x + 6, mid_y - th / 2.0, tw, th)
+                painter.setPen(QPen(QColor(255, 23, 68), 1))
+                painter.setBrush(QBrush(QColor(20, 20, 20, 220)))
+                painter.drawRoundedRect(dev_badge, 2, 2)
+                painter.setPen(QColor(255, 23, 68))
+                painter.drawText(dev_badge, Qt.AlignmentFlag.AlignCenter, dev_label)
+
+        # 7.5. Structures to Avoid Projection
+        if getattr(self, "avoid_structures", None):
+            H, W, D = self.vol_dims
+            dy, dx, dz = self.spacings
+            p_name = self.plane_name.lower()
+
+            for struct in self.avoid_structures:
+                sx, sy, sz = struct.center
+                s_rad = getattr(struct, "radius_mm", 5.0)
+
+                # Map center to normalized (u, v)
+                if "axial" in p_name:
+                    u_s = float(np.clip(sx / max(1e-4, W * dx), 0.0, 1.0))
+                    v_s = float(np.clip(sy / max(1e-4, H * dy), 0.0, 1.0))
+                elif "coronal" in p_name:
+                    u_s = float(np.clip(sx / max(1e-4, W * dx), 0.0, 1.0))
+                    v_s = float(np.clip((D - 1 - (sz / max(1e-4, dz))) / max(1.0, float(D)), 0.0, 1.0))
+                else:  # sagittal
+                    u_s = float(np.clip(sy / max(1e-4, H * dy), 0.0, 1.0))
+                    v_s = float(np.clip((D - 1 - (sz / max(1e-4, dz))) / max(1.0, float(D)), 0.0, 1.0))
+
+                cxs = rect.left() + u_s * rect.width()
+                cys = rect.top()  + v_s * rect.height()
+
+                # Draw amber structure marker on projection
+                painter.setPen(QPen(QColor(255, 145, 0, 230), 1.8))
+                painter.setBrush(QBrush(QColor(255, 145, 0, 80)))
+                painter.drawEllipse(QPointF(cxs, cys), 5.5, 5.5)
+
+                # Center dot
+                painter.setBrush(QBrush(QColor(255, 145, 0, 240)))
+                painter.drawEllipse(QPointF(cxs, cys), 2.0, 2.0)
+
+                # Label badge
+                s_name = getattr(struct, "name", "Structure")
+                painter.setFont(QFont("sans-serif", 7, QFont.Weight.Bold))
+                fm = painter.fontMetrics()
+                tw = fm.horizontalAdvance(s_name) + 6
+                th = fm.height() + 2
+                badge_r = QRectF(cxs + 7, cys - th / 2.0, tw, th)
+                painter.setPen(QPen(QColor(255, 145, 0), 1))
+                painter.setBrush(QBrush(QColor(15, 15, 15, 220)))
+                painter.drawRoundedRect(badge_r, 2, 2)
+                painter.setPen(QColor(255, 255, 255))
+                painter.drawText(badge_r, Qt.AlignmentFlag.AlignCenter, s_name)
+
+        # 8. Anatomical Badges & Orientation Guides
         painter.setPen(QColor(240, 240, 240))
         painter.setFont(QFont("sans-serif", 8, QFont.Weight.Bold))
         badge_rect = QRectF(rect.left() + 8, rect.top() + 8, rect.width() - 120, 16)
@@ -695,7 +1010,65 @@ class MPRView(QWidget):
         self.info_wl = QLabel("")
         self.info_wl.setStyleSheet("color: #777; font-size: 10px; font-family: monospace;")
 
+        # Before vs After comparison state
+        self.saved_after_vol: np.ndarray | None = None
+        self.saved_after_spacing: tuple | None = None
+        self.saved_after_thickness: float | None = None
+        self.comparison_view: str | None = None
+
         self._build_ui()
+
+    def set_comparison_view(
+        self,
+        current_view: str | None,
+        before_vol: np.ndarray | None = None,
+        before_spacing: tuple | None = None
+    ):
+        """Switches MPR volume between Before and After without re-reading from disk."""
+        self.comparison_view = current_view
+        if current_view == "BEFORE" and before_vol is not None:
+            if self.saved_after_vol is None:
+                self.saved_after_vol = self.vol_data
+                self.saved_after_spacing = self.pixel_spacing
+                self.saved_after_thickness = self.slice_thickness
+            self.vol_data = before_vol
+            if before_spacing:
+                if isinstance(before_spacing[0], (tuple, list)):
+                    self.pixel_spacing = before_spacing[0]
+                    self.slice_thickness = before_spacing[1] if len(before_spacing) > 1 else self.slice_thickness
+                else:
+                    self.pixel_spacing = before_spacing
+            self._update_wl_cache()
+            if self.vol_8bit is not None:
+                H, W, D = self.vol_8bit.shape
+                self.idx_x = max(0, min(self.idx_x, W - 1))
+                self.idx_y = max(0, min(self.idx_y, H - 1))
+                self.idx_z = max(0, min(self.idx_z, D - 1))
+            for w in (self.w_axial, self.w_coronal, self.w_sagittal):
+                w.comparison_view = "BEFORE"
+            if getattr(self, "same_location_coords", None) is not None:
+                self.snap_to_volume_point(*self.same_location_coords)
+            else:
+                self.refresh_all_slices()
+        else:
+            if self.saved_after_vol is not None:
+                self.vol_data = self.saved_after_vol
+                self.pixel_spacing = self.saved_after_spacing
+                self.slice_thickness = self.saved_after_thickness
+                self.saved_after_vol = None
+            self._update_wl_cache()
+            if self.vol_8bit is not None:
+                H, W, D = self.vol_8bit.shape
+                self.idx_x = max(0, min(self.idx_x, W - 1))
+                self.idx_y = max(0, min(self.idx_y, H - 1))
+                self.idx_z = max(0, min(self.idx_z, D - 1))
+            badge_val = "AFTER" if current_view == "AFTER" else None
+            for w in (self.w_axial, self.w_coronal, self.w_sagittal):
+                w.comparison_view = badge_val
+            if getattr(self, "same_location_coords", None) is not None:
+                self.snap_to_volume_point(*self.same_location_coords)
+            else:
+                self.refresh_all_slices()
 
     def _build_wl_lut(self):
         """Precomputes 1D integer lookup table for instantaneous Window/Level mapping (<0.1ms)."""
@@ -1072,6 +1445,93 @@ class MPRView(QWidget):
 
         self.refresh_all_slices()
         self.axial_changed.emit(self.idx_z * self.slice_thickness)
+
+    def set_same_location(self, x_mm: float, y_mm: float, z_mm: float):
+        """Snaps all 3 MPR viewports to the physical coordinates (X, Y, Z) for ICU Same-Location Review."""
+        self.same_location_coords = (float(x_mm), float(y_mm), float(z_mm))
+        self.snap_to_volume_point(x_mm, y_mm, z_mm)
+
+    def clear_same_location(self):
+        """Clears same-location coordinates from MPR view."""
+        self.same_location_coords = None
+        self.refresh_all_slices()
+
+    def set_planned_route(self, entry: tuple[float, float, float] | None, target: tuple[float, float, float] | None):
+        """Passes active Entry and Target landmarks to all 3 orthogonal viewports."""
+        H, W, D = self.vol_8bit.shape if self.vol_8bit is not None else (1, 1, 1)
+        dy = float(self.pixel_spacing[0])
+        dx = float(self.pixel_spacing[1])
+        dz = float(self.slice_thickness)
+        vol_dims = (H, W, D)
+        spacings = (dy, dx, dz)
+        if hasattr(self, "w_axial"):
+            self.w_axial.set_planned_route(entry, target, vol_dims, spacings)
+        if hasattr(self, "w_coronal"):
+            self.w_coronal.set_planned_route(entry, target, vol_dims, spacings)
+        if hasattr(self, "w_sagittal"):
+            self.w_sagittal.set_planned_route(entry, target, vol_dims, spacings)
+
+    def set_avoid_structures(self, structures: list):
+        """Passes active avoid structures to all 3 orthogonal viewports."""
+        H, W, D = self.vol_8bit.shape if self.vol_8bit is not None else (1, 1, 1)
+        dy = float(self.pixel_spacing[0])
+        dx = float(self.pixel_spacing[1])
+        dz = float(self.slice_thickness)
+        vol_dims = (H, W, D)
+        spacings = (dy, dx, dz)
+        if hasattr(self, "w_axial") and self.w_axial:
+            self.w_axial.set_avoid_structures(structures, vol_dims, spacings)
+        if hasattr(self, "w_coronal") and self.w_coronal:
+            self.w_coronal.set_avoid_structures(structures, vol_dims, spacings)
+        if hasattr(self, "w_sagittal") and self.w_sagittal:
+            self.w_sagittal.set_avoid_structures(structures, vol_dims, spacings)
+
+    def set_surgical_corridor(self, corridor):
+        """Passes active surgical corridor to all 3 orthogonal viewports."""
+        H, W, D = self.vol_8bit.shape if self.vol_8bit is not None else (1, 1, 1)
+        dy = float(self.pixel_spacing[0])
+        dx = float(self.pixel_spacing[1])
+        dz = float(self.slice_thickness)
+        vol_dims = (H, W, D)
+        spacings = (dy, dx, dz)
+        if hasattr(self, "w_axial") and self.w_axial:
+            self.w_axial.set_surgical_corridor(corridor, vol_dims, spacings)
+        if hasattr(self, "w_coronal") and self.w_coronal:
+            self.w_coronal.set_surgical_corridor(corridor, vol_dims, spacings)
+        if hasattr(self, "w_sagittal") and self.w_sagittal:
+            self.w_sagittal.set_surgical_corridor(corridor, vol_dims, spacings)
+
+    def set_virtual_instrument(self, instrument):
+        """Passes active virtual instrument to all 3 orthogonal viewports."""
+        H, W, D = self.vol_8bit.shape if self.vol_8bit is not None else (1, 1, 1)
+        dy = float(self.pixel_spacing[0])
+        dx = float(self.pixel_spacing[1])
+        dz = float(self.slice_thickness)
+        vol_dims = (H, W, D)
+        spacings = (dy, dx, dz)
+        if hasattr(self, "w_axial") and self.w_axial:
+            self.w_axial.set_virtual_instrument(instrument, vol_dims, spacings)
+        if hasattr(self, "w_coronal") and self.w_coronal:
+            self.w_coronal.set_virtual_instrument(instrument, vol_dims, spacings)
+        if hasattr(self, "w_sagittal") and self.w_sagittal:
+            self.w_sagittal.set_virtual_instrument(instrument, vol_dims, spacings)
+
+    def set_current_instrument_pose(self, pose):
+        """Passes active simulated current instrument pose to all 3 orthogonal viewports."""
+        H, W, D = self.vol_8bit.shape if self.vol_8bit is not None else (1, 1, 1)
+        dy = float(self.pixel_spacing[0])
+        dx = float(self.pixel_spacing[1])
+        dz = float(self.slice_thickness)
+        vol_dims = (H, W, D)
+        spacings = (dy, dx, dz)
+        if hasattr(self, "w_axial") and self.w_axial:
+            self.w_axial.set_current_instrument_pose(pose, vol_dims, spacings)
+        if hasattr(self, "w_coronal") and self.w_coronal:
+            self.w_coronal.set_current_instrument_pose(pose, vol_dims, spacings)
+        if hasattr(self, "w_sagittal") and self.w_sagittal:
+            self.w_sagittal.set_current_instrument_pose(pose, vol_dims, spacings)
+
+
 
     # ── Ultra-Fast Direct 8-Bit Slice Updaters (0.00ms per slice) ─────────────
 

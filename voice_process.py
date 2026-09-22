@@ -197,7 +197,6 @@ def main():
     try:
         sys.stdout.flush()
         # Redirect stdout to devnull to avoid OSError during interpreter finalization
-        import os
         sys.stdout = open(os.devnull, "w")
     except Exception:
         pass

@@ -1,5 +1,9 @@
 # database.py
 import sqlite3
+import json
+import uuid
+from datetime import datetime, timezone
+from typing import Optional
 
 DB_PATH = "aegis.db"
 
@@ -34,16 +38,22 @@ def add_scan(patient_mrn: str, modality: str, study_date: str, description: str,
     conn.close()
 
 def get_all_patients() -> list[dict]:
-    conn = get_connection()
-    rows = conn.execute("SELECT * FROM patients").fetchall()
-    conn.close()
-    return [dict(row) for row in rows]
+    try:
+        conn = get_connection()
+        rows = conn.execute("SELECT * FROM patients").fetchall()
+        conn.close()
+        return [dict(row) for row in rows]
+    except Exception:
+        return []
 
 def get_scans_for_patient(mrn: str) -> list[dict]:
-    conn = get_connection()
-    rows = conn.execute("SELECT * FROM scans WHERE patient_mrn = ?", (mrn,)).fetchall()
-    conn.close()
-    return [dict(row) for row in rows]
+    try:
+        conn = get_connection()
+        rows = conn.execute("SELECT * FROM scans WHERE patient_mrn = ?", (mrn,)).fetchall()
+        conn.close()
+        return [dict(row) for row in rows]
+    except Exception:
+        return []
 
 # --- UI adapters ---------------------------------------------------------
 # Convert raw DB rows into the exact shapes the PyQt6 screens expect.
@@ -99,18 +109,85 @@ def get_patients_for_ui() -> list[dict]:
         })
     return result
 
+def _normalize_study_date(study_date: str) -> str:
+    """Normalizes various study date formats (YYYYMMDD, YYYY-MM-DD) into comparable YYYY-MM-DD."""
+    if not study_date:
+        return ""
+    s = str(study_date).strip()
+    if len(s) == 8 and s.isdigit():
+        return f"{s[0:4]}-{s[4:6]}-{s[6:8]}"
+    return s
+
 def get_scans_for_ui(mrn: str) -> list[dict]:
     """Shaped for scans.py / viewer_3d.py / or_icu_mode.py: type, date (+ extras for later)."""
     return [
         {
+            "id": s["id"],
+            "patient_mrn": s["patient_mrn"],
             "type": s["modality"] or "CT",
+            "modality": s["modality"] or "CT",
             "date": _format_date(s["study_date"]),
+            "study_date": s["study_date"],
             "description": s["description"],
             "file_path": s["file_path"],
             "slice_count": s["slice_count"],
         }
         for s in get_scans_for_patient(mrn)
     ]
+
+def get_historical_scans_for_patient(mrn: str, current_scan: dict) -> list[dict]:
+    """Returns all scans for the patient that are chronologically earlier than current_scan.
+
+    Ordered from most recent to oldest (descending).
+    Requires both scans to belong to the same patient.
+    """
+    if not mrn or not current_scan:
+        return []
+
+    curr_mrn = str(current_scan.get("patient_mrn", "") or current_scan.get("mrn", "") or mrn).strip()
+    if curr_mrn != str(mrn).strip():
+        # Cross-patient pairing is strictly rejected
+        return []
+
+    curr_path = str(current_scan.get("file_path", "")).strip()
+    curr_id = current_scan.get("id")
+    curr_date_raw = current_scan.get("study_date") or current_scan.get("date") or ""
+    curr_date = _normalize_study_date(curr_date_raw)
+
+    all_scans = get_scans_for_ui(mrn)
+    if not all_scans:
+        return []
+
+    def _scan_sort_key(s):
+        d_raw = s.get("study_date") or s.get("date") or ""
+        d_norm = _normalize_study_date(d_raw)
+        s_id = s.get("id") or 0
+        return (d_norm, s_id)
+
+    sorted_scans = sorted(all_scans, key=_scan_sort_key)
+
+    match_idx = -1
+    for idx, s in enumerate(sorted_scans):
+        if curr_path and s.get("file_path") == curr_path:
+            match_idx = idx
+            break
+        if curr_id is not None and s.get("id") == curr_id:
+            match_idx = idx
+            break
+
+    earlier_scans = []
+    if match_idx >= 0:
+        earlier_scans = sorted_scans[:match_idx]
+    else:
+        curr_key = (curr_date, curr_id or 0)
+        earlier_scans = [s for s in sorted_scans if _scan_sort_key(s) < curr_key]
+
+    return list(reversed(earlier_scans))
+
+def get_previous_scan_for_patient(mrn: str, current_scan: dict) -> Optional[dict]:
+    """Returns the immediately previous scan for the patient, or None if no earlier scan exists."""
+    historical = get_historical_scans_for_patient(mrn, current_scan)
+    return historical[0] if historical else None
 
 def get_patient(mrn: str) -> dict | None:
     """Fetch single patient record by MRN."""
@@ -175,3 +252,272 @@ def get_notes_for_patient(mrn: str) -> list[dict]:
         return [dict(r) for r in rows]
     except Exception:
         return []
+
+
+# --- Surgical Plan Versions Persistence (OR Mode: Feature 7) -------------
+
+def _ensure_plan_versions_table(conn):
+    """Defensively ensures surgical_plan_versions table exists."""
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS surgical_plan_versions ("
+        "  id TEXT PRIMARY KEY,"
+        "  scan_id TEXT NOT NULL,"
+        "  patient_mrn TEXT,"
+        "  name TEXT NOT NULL,"
+        "  created_at TEXT NOT NULL,"
+        "  updated_at TEXT NOT NULL,"
+        "  snapshot_json TEXT NOT NULL,"
+        "  notes TEXT DEFAULT '',"
+        "  FOREIGN KEY (patient_mrn) REFERENCES patients(mrn)"
+        ")"
+    )
+
+def save_surgical_plan_version(
+    scan_id: str,
+    name: str,
+    snapshot: dict,
+    version_id: Optional[str] = None,
+    patient_mrn: Optional[str] = None,
+    notes: str = ""
+) -> dict:
+    """Saves or updates a surgical plan version record in the database."""
+    conn = get_connection()
+    _ensure_plan_versions_table(conn)
+    now_str = datetime.now(timezone.utc).isoformat()
+
+    if version_id:
+        existing = conn.execute("SELECT id, created_at FROM surgical_plan_versions WHERE id = ?", (str(version_id),)).fetchone()
+        if existing:
+            snapshot_json = json.dumps(snapshot)
+            conn.execute(
+                "UPDATE surgical_plan_versions SET name = ?, updated_at = ?, snapshot_json = ?, notes = ? WHERE id = ?",
+                (name, now_str, snapshot_json, notes, str(version_id))
+            )
+            conn.commit()
+            conn.close()
+            return {
+                "id": str(version_id),
+                "scan_id": str(scan_id),
+                "patient_mrn": patient_mrn,
+                "name": name,
+                "created_at": existing["created_at"],
+                "updated_at": now_str,
+                "snapshot": snapshot,
+                "notes": notes,
+            }
+
+    new_id = str(version_id) if version_id else f"plan_{uuid.uuid4().hex[:8]}"
+    snapshot_json = json.dumps(snapshot)
+    conn.execute(
+        "INSERT INTO surgical_plan_versions (id, scan_id, patient_mrn, name, created_at, updated_at, snapshot_json, notes) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (new_id, str(scan_id), patient_mrn, name, now_str, now_str, snapshot_json, notes)
+    )
+    conn.commit()
+    conn.close()
+    return {
+        "id": new_id,
+        "scan_id": str(scan_id),
+        "patient_mrn": patient_mrn,
+        "name": name,
+        "created_at": now_str,
+        "updated_at": now_str,
+        "snapshot": snapshot,
+        "notes": notes,
+    }
+
+def get_surgical_plan_versions(scan_id: str) -> list[dict]:
+    """Retrieves all surgical plan versions associated with a scan, ordered chronologically."""
+    try:
+        conn = get_connection()
+        _ensure_plan_versions_table(conn)
+        rows = conn.execute(
+            "SELECT * FROM surgical_plan_versions WHERE scan_id = ? ORDER BY created_at ASC",
+            (str(scan_id),)
+        ).fetchall()
+        conn.close()
+        results = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["snapshot"] = json.loads(d["snapshot_json"])
+            except Exception:
+                d["snapshot"] = {}
+            results.append(d)
+        return results
+    except Exception:
+        return []
+
+def get_surgical_plan_version(version_id: str) -> Optional[dict]:
+    """Retrieves a single surgical plan version by its ID."""
+    try:
+        conn = get_connection()
+        _ensure_plan_versions_table(conn)
+        row = conn.execute(
+            "SELECT * FROM surgical_plan_versions WHERE id = ?",
+            (str(version_id),)
+        ).fetchone()
+        conn.close()
+        if not row:
+            return None
+        d = dict(row)
+        try:
+            d["snapshot"] = json.loads(d["snapshot_json"])
+        except Exception:
+            d["snapshot"] = {}
+        return d
+    except Exception:
+        return None
+
+def delete_surgical_plan_version(version_id: str) -> bool:
+    """Deletes a surgical plan version by its ID."""
+    try:
+        conn = get_connection()
+        _ensure_plan_versions_table(conn)
+        cursor = conn.execute("DELETE FROM surgical_plan_versions WHERE id = ?", (str(version_id),))
+        conn.commit()
+        deleted = cursor.rowcount > 0
+        conn.close()
+        return deleted
+    except Exception:
+        return False
+
+def rename_surgical_plan_version(version_id: str, new_name: str) -> bool:
+    """Renames an existing surgical plan version."""
+    try:
+        conn = get_connection()
+        _ensure_plan_versions_table(conn)
+        now_str = datetime.now(timezone.utc).isoformat()
+        cursor = conn.execute(
+            "UPDATE surgical_plan_versions SET name = ?, updated_at = ? WHERE id = ?",
+            (new_name, now_str, str(version_id))
+        )
+        conn.commit()
+        updated = cursor.rowcount > 0
+        conn.close()
+        return updated
+    except Exception:
+        return False
+
+
+# --- Tracked Measurements Persistence (ICU Mode: Feature 3) -------------
+
+def _ensure_tracked_measurements_table(conn):
+    """Defensively ensures tracked_measurements table exists."""
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS tracked_measurements ("
+        "  id TEXT PRIMARY KEY,"
+        "  scan_id TEXT NOT NULL,"
+        "  patient_mrn TEXT NOT NULL,"
+        "  label TEXT NOT NULL,"
+        "  value_mm REAL NOT NULL,"
+        "  unit TEXT DEFAULT 'mm',"
+        "  created_at TEXT NOT NULL,"
+        "  metadata_json TEXT DEFAULT '{}',"
+        "  FOREIGN KEY (patient_mrn) REFERENCES patients(mrn)"
+        ")"
+    )
+
+def save_tracked_measurement(
+    measurement_id: str,
+    scan_id: str,
+    patient_mrn: str,
+    label: str,
+    value_mm: float,
+    unit: str = "mm",
+    metadata: Optional[dict] = None
+) -> dict:
+    """Saves or updates a tracked measurement in the database."""
+    conn = get_connection()
+    _ensure_tracked_measurements_table(conn)
+    now_str = datetime.now(timezone.utc).isoformat()
+    meta_json = json.dumps(metadata or {})
+    conn.execute(
+        "INSERT OR REPLACE INTO tracked_measurements (id, scan_id, patient_mrn, label, value_mm, unit, created_at, metadata_json) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (str(measurement_id), str(scan_id), str(patient_mrn), str(label), float(value_mm), str(unit), now_str, meta_json)
+    )
+    conn.commit()
+    conn.close()
+    return {
+        "id": str(measurement_id),
+        "scan_id": str(scan_id),
+        "patient_mrn": str(patient_mrn),
+        "label": str(label),
+        "value_mm": float(value_mm),
+        "unit": str(unit),
+        "created_at": now_str,
+        "metadata": metadata or {}
+    }
+
+def get_tracked_measurements_for_scan(scan_id: str, patient_mrn: Optional[str] = None) -> list[dict]:
+    """Retrieves all tracked measurements for a scan and optionally patient MRN."""
+    try:
+        conn = get_connection()
+        _ensure_tracked_measurements_table(conn)
+        if patient_mrn:
+            rows = conn.execute(
+                "SELECT * FROM tracked_measurements WHERE scan_id = ? AND patient_mrn = ? ORDER BY created_at ASC",
+                (str(scan_id), str(patient_mrn))
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM tracked_measurements WHERE scan_id = ? ORDER BY created_at ASC",
+                (str(scan_id),)
+            ).fetchall()
+        conn.close()
+        results = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["metadata"] = json.loads(d.get("metadata_json", "{}"))
+            except Exception:
+                d["metadata"] = {}
+            results.append(d)
+        return results
+    except Exception:
+        return []
+
+def get_tracked_measurements_for_patient(patient_mrn: str) -> list[dict]:
+    """Retrieves all tracked measurements for a patient MRN."""
+    try:
+        conn = get_connection()
+        _ensure_tracked_measurements_table(conn)
+        rows = conn.execute(
+            "SELECT * FROM tracked_measurements WHERE patient_mrn = ? ORDER BY created_at ASC",
+            (str(patient_mrn),)
+        ).fetchall()
+        conn.close()
+        results = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["metadata"] = json.loads(d.get("metadata_json", "{}"))
+            except Exception:
+                d["metadata"] = {}
+            results.append(d)
+        return results
+    except Exception:
+        return []
+
+def delete_tracked_measurement(measurement_id: str, patient_mrn: Optional[str] = None) -> bool:
+    """Deletes a tracked measurement by ID, optionally scoped to patient MRN."""
+    try:
+        conn = get_connection()
+        _ensure_tracked_measurements_table(conn)
+        if patient_mrn:
+            cursor = conn.execute(
+                "DELETE FROM tracked_measurements WHERE id = ? AND patient_mrn = ?",
+                (str(measurement_id), str(patient_mrn))
+            )
+        else:
+            cursor = conn.execute(
+                "DELETE FROM tracked_measurements WHERE id = ?",
+                (str(measurement_id),)
+            )
+        conn.commit()
+        deleted = cursor.rowcount > 0
+        conn.close()
+        return deleted
+    except Exception:
+        return False

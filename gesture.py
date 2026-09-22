@@ -310,6 +310,7 @@ class GestureWorker(QThread):
                 continue
 
             frame = cv2.flip(frame, 1)
+            frame = np.ascontiguousarray(frame)
             h, w = frame.shape[:2]
 
             now_ms = int(time.time() * 1000)

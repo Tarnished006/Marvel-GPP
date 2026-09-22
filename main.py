@@ -136,6 +136,7 @@ class MainWindow(QMainWindow):
         # --- Top-level nav bar ---
         nav_bar = QHBoxLayout()
         self.clinical_btn = QPushButton("Clinical View")
+        self.viewer_2d_btn = QPushButton("2D Viewer")
         self.viewer_btn = QPushButton("3D Viewer")
         self.or_icu_btn = QPushButton("OR/ICU Mode")
 
@@ -170,7 +171,7 @@ class MainWindow(QMainWindow):
             "QPushButton { color: #aaa; border: 1px solid #444; padding: 4px 10px; }"
         )
 
-        for btn in (self.back_btn, self.clinical_btn, self.viewer_btn, self.or_icu_btn):
+        for btn in (self.back_btn, self.clinical_btn, self.viewer_2d_btn, self.viewer_btn, self.or_icu_btn):
             nav_bar.addWidget(btn)
         nav_bar.addStretch()
         nav_bar.addWidget(self.cam_btn)
@@ -182,11 +183,14 @@ class MainWindow(QMainWindow):
         self.stack = QStackedWidget()
         outer_layout.addWidget(self.stack)
 
+        from screens.viewer_2d import Viewer2D
         self.dashboard = Dashboard()
+        self.viewer_2d = Viewer2D()
         self.viewer_3d = Viewer3D()
         self.or_icu_mode = OrIcuMode()
 
         self.stack.addWidget(self.dashboard)
+        self.stack.addWidget(self.viewer_2d)
         self.stack.addWidget(self.viewer_3d)
         self.stack.addWidget(self.or_icu_mode)
 
@@ -202,6 +206,7 @@ class MainWindow(QMainWindow):
         self.dashboard.view_3d_direct_clicked.connect(self.show_3d_direct)
 
         self.clinical_btn.clicked.connect(lambda: self._go_root(self.dashboard))
+        self.viewer_2d_btn.clicked.connect(lambda: self._go_root(self.viewer_2d))
         self.viewer_btn.clicked.connect(lambda: self._go_root(self.viewer_3d))
         self.or_icu_btn.clicked.connect(lambda: self._go_root(self.or_icu_mode))
 
@@ -407,7 +412,7 @@ class MainWindow(QMainWindow):
         self.back_btn.setVisible(False)
         for i in reversed(range(self.stack.count())):
             w = self.stack.widget(i)
-            if w not in (self.dashboard, self.viewer_3d, self.or_icu_mode):
+            if w not in (self.dashboard, getattr(self, "viewer_2d", None), self.viewer_3d, self.or_icu_mode):
                 self.stack.removeWidget(w)
                 w.deleteLater()
         import gc
@@ -419,7 +424,7 @@ class MainWindow(QMainWindow):
             current = self.stack.currentWidget()
             prev = self._nav_history.pop()
             self.stack.setCurrentWidget(prev)
-            if current not in (self.dashboard, self.viewer_3d, self.or_icu_mode):
+            if current not in (self.dashboard, getattr(self, "viewer_2d", None), self.viewer_3d, self.or_icu_mode):
                 self.stack.removeWidget(current)
                 current.deleteLater()
             import gc
@@ -479,16 +484,28 @@ class MainWindow(QMainWindow):
         self._push_screen(record_screen)
 
     def show_scans(self, patient: dict):
-        # View in 2D goes straight to MPR slices!
         from database import get_scans_for_ui
         scans = get_scans_for_ui(patient["mrn"])
         scan = scans[0] if scans else patient.get("_scan", {})
         
-        self.viewer_3d.load_scan(patient, scan)
-        self.viewer_3d.btn_3d_mode.setChecked(False)
-        self.viewer_3d.btn_mpr_mode.setChecked(True)
-        self.viewer_3d._switch_view_mode(1)
-        self._go_root(self.viewer_3d)
+        slice_cnt = scan.get("slice_count", 0)
+        
+        if slice_cnt > 30:
+            # High slice count -> Route to powerful 3D MPR Engine
+            self.viewer_3d.load_scan(patient, scan)
+            self.viewer_3d.btn_3d_mode.setChecked(False)
+            self.viewer_3d.btn_mpr_mode.setChecked(True)
+            self.viewer_3d._switch_view_mode(1)
+            self._go_root(self.viewer_3d)
+        else:
+            # Low slice count -> Route to lightning fast Dedicated 2D Clinical Workspace
+            # Find the path to the DICOM files
+            folder_path = scan.get("file_path", "")
+            if not folder_path and patient["mrn"] == "U-332911": # Fallback for local Skull test
+                folder_path = os.path.join(os.path.dirname(__file__), "skull")
+                
+            self.viewer_2d.load_scan(folder_path, patient.get("name", "Unknown"))
+            self._go_root(self.viewer_2d)
 
     def show_3d_viewer(self, patient: dict, scan: dict):
         self.viewer_3d.load_scan(patient, scan)

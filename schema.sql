@@ -15,3 +15,55 @@ CREATE TABLE IF NOT EXISTS scans (
     slice_count INTEGER DEFAULT 1,
     FOREIGN KEY (patient_mrn) REFERENCES patients(mrn)
 );
+
+CREATE TABLE IF NOT EXISTS surgical_plan_versions (
+    id TEXT PRIMARY KEY,
+    scan_id TEXT NOT NULL,
+    patient_mrn TEXT,
+    name TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    snapshot_json TEXT NOT NULL,
+    notes TEXT DEFAULT '',
+    FOREIGN KEY (patient_mrn) REFERENCES patients(mrn)
+);
+
+CREATE TABLE IF NOT EXISTS tracked_measurements (
+    id TEXT PRIMARY KEY,
+    scan_id TEXT NOT NULL,
+    patient_mrn TEXT NOT NULL,
+    label TEXT NOT NULL,
+    value_mm REAL NOT NULL,
+    unit TEXT DEFAULT 'mm',
+    created_at TEXT NOT NULL,
+    metadata_json TEXT DEFAULT '{}',
+    FOREIGN KEY (patient_mrn) REFERENCES patients(mrn)
+);
+
+CREATE TABLE IF NOT EXISTS scan_annotations (
+    id TEXT PRIMARY KEY,
+    patient_mrn TEXT NOT NULL,
+    scan_id TEXT NOT NULL,
+    label TEXT NOT NULL,
+    text TEXT DEFAULT '',
+    physical_x_mm REAL NOT NULL,
+    physical_y_mm REAL NOT NULL,
+    physical_z_mm REAL NOT NULL,
+    created_at TEXT NOT NULL,
+    metadata_json TEXT DEFAULT '{}',
+    FOREIGN KEY (patient_mrn) REFERENCES patients(mrn)
+);
+
+CREATE TABLE IF NOT EXISTS device_markers (
+    id TEXT PRIMARY KEY,
+    patient_mrn TEXT NOT NULL,
+    scan_id TEXT NOT NULL,
+    device_type TEXT NOT NULL,
+    label TEXT NOT NULL,
+    physical_x_mm REAL NOT NULL,
+    physical_y_mm REAL NOT NULL,
+    physical_z_mm REAL NOT NULL,
+    created_at TEXT NOT NULL,
+    metadata_json TEXT DEFAULT '{}',
+    FOREIGN KEY (patient_mrn) REFERENCES patients(mrn)
+);

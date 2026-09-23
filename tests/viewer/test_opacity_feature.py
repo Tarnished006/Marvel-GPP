@@ -19,8 +19,14 @@ Verifies:
 import os
 import sys
 import io
-if sys.platform == "win32" and hasattr(sys.stdout, "buffer"):
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+
+ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
+os.chdir(ROOT_DIR)
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 import numpy as np
 import pyvista as pv
 from PyQt6.QtWidgets import QApplication
@@ -35,7 +41,7 @@ _app = QApplication.instance() or QApplication(sys.argv)
 from dicom_engine import build_meshes_from_folder, MeshSet
 from screens.viewer_3d import Viewer3D
 
-SCAN_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "skull")
+SCAN_DIR = os.path.join(ROOT_DIR, "skull")
 
 
 def load_test_viewer():

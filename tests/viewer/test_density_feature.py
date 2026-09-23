@@ -16,15 +16,15 @@ Verifies:
 
 import os
 import sys
-import io
-if sys.platform == "win32" and hasattr(sys.stdout, "buffer"):
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 import numpy as np
 
-# Ensure workspace root is in sys.path
-WORKSPACE = os.path.dirname(os.path.abspath(__file__))
-if WORKSPACE not in sys.path:
-    sys.path.insert(0, WORKSPACE)
+ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
+os.chdir(ROOT_DIR)
+WORKSPACE = ROOT_DIR
 
 import dicom_engine
 from dicom_engine import DicomVolume, MeshSet, get_cache_path, _BONE_COLOUR

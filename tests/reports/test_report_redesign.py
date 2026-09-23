@@ -3,9 +3,16 @@ tests/test_report_redesign.py -- Validation suite for the redesigned Aegis-Touch
 """
 
 import os
+import sys
 import re
 import unittest
 import numpy as np
+
+ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
+os.chdir(ROOT_DIR)
+
 from report_export import build_case_report, _deduplicate_measurements
 
 

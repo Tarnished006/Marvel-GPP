@@ -42,6 +42,14 @@ Covers all 42 required verification scenarios:
 """
 
 import os
+import sys
+
+ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
+os.chdir(ROOT_DIR)
+
+import os
 import math
 import pytest
 import numpy as np

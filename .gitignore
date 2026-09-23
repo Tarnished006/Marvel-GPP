@@ -13,12 +13,13 @@ venv/
 ENV/
 
 # Caches, captures, logs, and generated reports
-.cache/
-captures/
-reports/
-tests/test_reports/
-raw_downloads/
-scratch/
+/.cache/
+/captures/
+/reports/
+test_reports/
+**/test_reports/
+/raw_downloads/
+/scratch/
 *.log
 
 # Database files (local runtime state)

@@ -3218,8 +3218,25 @@ class Viewer3D(QWidget):
         if hasattr(self, "lbl_opacity"):
             self.lbl_opacity.setText("100%")
 
-        # Establish and remember the clean default camera position.
-        self.plotter.reset_camera()
+        # Establish and remember a clean, upright, front-facing 3D anatomical view
+        if hasattr(self, "meshset") and self.meshset is not None and getattr(self.meshset, "bone_mesh", None) is not None:
+            bounds = self.meshset.bone_mesh.bounds
+            center = self.meshset.bone_mesh.center
+            diag = float(np.linalg.norm([bounds[1]-bounds[0], bounds[3]-bounds[2], bounds[5]-bounds[4]]))
+            dist = max(diag * 1.5, 300.0)
+
+            default_pos = (
+                center[0] - dist * 0.88,
+                center[1] + dist * 0.38,
+                center[2] + dist * 0.28,
+            )
+            try:
+                self.plotter.camera_position = [default_pos, center, (0.0, 0.0, 1.0)]
+                self.plotter.renderer.ResetCameraClippingRange()
+            except Exception:
+                self.plotter.reset_camera()
+        else:
+            self.plotter.reset_camera()
 
         default_cam = self.plotter.renderer.GetActiveCamera()
 
@@ -3229,11 +3246,11 @@ class Viewer3D(QWidget):
 
         self._default_camera_focal_point = tuple(
             default_cam.GetFocalPoint()
-                ) 
+        )
 
         self._default_camera_view_up = tuple(
-    default_cam.GetViewUp()
-)
+            default_cam.GetViewUp()
+        )
 
         self.plotter.render()
 
@@ -3528,19 +3545,19 @@ class Viewer3D(QWidget):
 
         positions = {
             "anterior": np.array(
-                [0.0, -distance, 0.0]
+                [-distance, 0.0, 0.0]
             ),
 
             "posterior": np.array(
-                [0.0, distance, 0.0]
-            ),
-
-            "left_lateral": np.array(
                 [distance, 0.0, 0.0]
             ),
 
+            "left_lateral": np.array(
+                [0.0, distance, 0.0]
+            ),
+
             "right_lateral": np.array(
-            [-distance, 0.0, 0.0]
+                [0.0, -distance, 0.0]
             ),
 
             "superior": np.array(
@@ -3559,19 +3576,17 @@ class Viewer3D(QWidget):
             cam = self.plotter.renderer.GetActiveCamera()
 
             if hasattr(self, "_default_camera_position"):
-                cam.SetPosition(
-                    *self._default_camera_position
-                )
-
-                cam.SetFocalPoint(
-                    *self._default_camera_focal_point
-                )
-
-                cam.SetViewUp(
-                    *self._default_camera_view_up
-                )
-
-                cam.OrthogonalizeViewUp()
+                try:
+                    self.plotter.camera_position = [
+                        self._default_camera_position,
+                        self._default_camera_focal_point,
+                        self._default_camera_view_up,
+                    ]
+                except Exception:
+                    cam.SetPosition(*self._default_camera_position)
+                    cam.SetFocalPoint(*self._default_camera_focal_point)
+                    cam.SetViewUp(*self._default_camera_view_up)
+                    cam.OrthogonalizeViewUp()
 
             else:
                 # Fallback if no stored camera exists yet.
@@ -3595,17 +3610,15 @@ class Viewer3D(QWidget):
             return
 
         new_position = focal + positions[cmd]
+        view_up = (1.0, 0.0, 0.0) if cmd in ("superior", "inferior") else (0.0, 0.0, 1.0)
 
-        cam.SetPosition(*new_position)
-        cam.SetFocalPoint(*focal)
-
-    # Keep the model upright.
-        if cmd in ("superior", "inferior"):
-            cam.SetViewUp(0.0, 1.0, 0.0)
-        else:
-            cam.SetViewUp(0.0, 0.0, 1.0)
-
-        cam.OrthogonalizeViewUp()
+        try:
+            self.plotter.camera_position = [tuple(new_position), tuple(focal), view_up]
+        except Exception:
+            cam.SetPosition(*new_position)
+            cam.SetFocalPoint(*focal)
+            cam.SetViewUp(*view_up)
+            cam.OrthogonalizeViewUp()
 
         self.plotter.renderer.ResetCameraClippingRange()
         self.plotter.render()

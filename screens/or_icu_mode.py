@@ -450,26 +450,26 @@ class SurgicalCorridorCard(QFrame):
         self.lbl_metrics.setVisible(False)
         self._layout.addWidget(self.lbl_metrics)
 
-        # Controls Container
-        self.controls_container = QWidget()
-        ctrl_layout = QVBoxLayout(self.controls_container)
-        ctrl_layout.setContentsMargins(0, 0, 0, 0)
-        ctrl_layout.setSpacing(4)
-
         # Visibility Toggle: [ Show Corridor ] / [ Hide Corridor ]
         self.btn_toggle = QPushButton("Hide Corridor")
-        self.btn_toggle.setFixedHeight(22)
+        self.btn_toggle.setFixedHeight(24)
         self.btn_toggle.setStyleSheet("""
             QPushButton {
                 background: #1e1e1e; color: #ccc; border: 1px solid #333;
-                border-radius: 3px; font-size: 9px; padding: 0 6px;
+                border-radius: 3px; font-size: 10px; font-weight: 600; padding: 0 6px;
             }
             QPushButton:hover {
                 background: #2a2a2a; color: #7c4dff; border-color: #7c4dff;
             }
         """)
         self.btn_toggle.clicked.connect(self._on_toggle_clicked)
-        ctrl_layout.addWidget(self.btn_toggle)
+        self._layout.addWidget(self.btn_toggle)
+
+        # Controls Container
+        self.controls_container = QWidget()
+        ctrl_layout = QVBoxLayout(self.controls_container)
+        ctrl_layout.setContentsMargins(0, 0, 0, 0)
+        ctrl_layout.setSpacing(4)
 
         # Radius Control Row: [Slider] [Label]
         radius_row = QHBoxLayout()
@@ -540,6 +540,9 @@ class SurgicalCorridorCard(QFrame):
             self.lbl_metrics.setVisible(False)
             self.controls_container.setVisible(False)
             self.struct_container.setVisible(False)
+            if surgical_plan:
+                self._corridor_enabled = getattr(surgical_plan, "corridor_enabled", True)
+                self.btn_toggle.setText("Hide Corridor" if self._corridor_enabled else "Show Corridor")
             return
 
         # Route exists
@@ -626,22 +629,16 @@ class VirtualInstrumentCard(QFrame):
         self.lbl_metrics.setVisible(False)
         self._layout.addWidget(self.lbl_metrics)
 
-        # Controls Container
-        self.controls_container = QWidget()
-        ctrl_layout = QVBoxLayout(self.controls_container)
-        ctrl_layout.setContentsMargins(0, 0, 0, 0)
-        ctrl_layout.setSpacing(4)
-
         # Buttons Row: [ Show/Hide Instrument ] [ View Instrument ]
         btn_row = QHBoxLayout()
         btn_row.setSpacing(4)
 
         self.btn_toggle = QPushButton("Show Instrument")
-        self.btn_toggle.setFixedHeight(22)
+        self.btn_toggle.setFixedHeight(24)
         self.btn_toggle.setStyleSheet("""
             QPushButton {
                 background: #1e1e1e; color: #ccc; border: 1px solid #333;
-                border-radius: 3px; font-size: 9px; padding: 0 6px;
+                border-radius: 3px; font-size: 10px; font-weight: 600; padding: 0 6px;
             }
             QPushButton:hover {
                 background: #2a2a2a; color: #ffd600; border-color: #ffd600;
@@ -651,11 +648,11 @@ class VirtualInstrumentCard(QFrame):
         btn_row.addWidget(self.btn_toggle, stretch=1)
 
         self.btn_view = QPushButton("View Instrument")
-        self.btn_view.setFixedHeight(22)
+        self.btn_view.setFixedHeight(24)
         self.btn_view.setStyleSheet("""
             QPushButton {
                 background: #1e1e1e; color: #ccc; border: 1px solid #333;
-                border-radius: 3px; font-size: 9px; padding: 0 6px;
+                border-radius: 3px; font-size: 10px; padding: 0 6px;
             }
             QPushButton:hover {
                 background: #2a2a2a; color: #ffd600; border-color: #ffd600;
@@ -663,7 +660,13 @@ class VirtualInstrumentCard(QFrame):
         """)
         self.btn_view.clicked.connect(self.view_instrument_requested.emit)
         btn_row.addWidget(self.btn_view, stretch=1)
-        ctrl_layout.addLayout(btn_row)
+        self._layout.addLayout(btn_row)
+
+        # Controls Container
+        self.controls_container = QWidget()
+        ctrl_layout = QVBoxLayout(self.controls_container)
+        ctrl_layout.setContentsMargins(0, 0, 0, 0)
+        ctrl_layout.setSpacing(4)
 
         # Depth Slider Row: [Depth:] [Slider] [Value]
         depth_row = QHBoxLayout()
@@ -769,6 +772,9 @@ class VirtualInstrumentCard(QFrame):
             self.lbl_metrics.setVisible(False)
             self.controls_container.setVisible(False)
             self.struct_container.setVisible(False)
+            if surgical_plan:
+                self._instrument_visible = getattr(surgical_plan, "instrument_visible", False)
+                self.btn_toggle.setText("Hide Instrument" if self._instrument_visible else "Show Instrument")
             return
 
         self._route_length_mm = route.length_mm
@@ -863,22 +869,16 @@ class LiveDeviationCard(QFrame):
         self.lbl_metrics.setVisible(False)
         self._layout.addWidget(self.lbl_metrics)
 
-        # Controls Container
-        self.controls_container = QWidget()
-        ctrl_layout = QVBoxLayout(self.controls_container)
-        ctrl_layout.setContentsMargins(0, 0, 0, 0)
-        ctrl_layout.setSpacing(4)
-
         # Buttons Row: [ Show/Hide Current Instrument ] [ Reset to Planned Route ]
         btn_row = QHBoxLayout()
         btn_row.setSpacing(4)
 
         self.btn_toggle = QPushButton("Show Current Instrument")
-        self.btn_toggle.setFixedHeight(22)
+        self.btn_toggle.setFixedHeight(24)
         self.btn_toggle.setStyleSheet("""
             QPushButton {
                 background: #1e1e1e; color: #ccc; border: 1px solid #333;
-                border-radius: 3px; font-size: 9px; padding: 0 6px;
+                border-radius: 3px; font-size: 10px; font-weight: 600; padding: 0 6px;
             }
             QPushButton:hover {
                 background: #2a2a2a; color: #ff5252; border-color: #ff5252;
@@ -888,11 +888,11 @@ class LiveDeviationCard(QFrame):
         btn_row.addWidget(self.btn_toggle, stretch=1)
 
         self.btn_reset = QPushButton("Reset to Planned Route")
-        self.btn_reset.setFixedHeight(22)
+        self.btn_reset.setFixedHeight(24)
         self.btn_reset.setStyleSheet("""
             QPushButton {
                 background: #1e1e1e; color: #ccc; border: 1px solid #333;
-                border-radius: 3px; font-size: 9px; padding: 0 6px;
+                border-radius: 3px; font-size: 10px; padding: 0 6px;
             }
             QPushButton:hover {
                 background: #2a2a2a; color: #ff5252; border-color: #ff5252;
@@ -900,7 +900,13 @@ class LiveDeviationCard(QFrame):
         """)
         self.btn_reset.clicked.connect(self._on_reset_clicked)
         btn_row.addWidget(self.btn_reset, stretch=1)
-        ctrl_layout.addLayout(btn_row)
+        self._layout.addLayout(btn_row)
+
+        # Controls Container
+        self.controls_container = QWidget()
+        ctrl_layout = QVBoxLayout(self.controls_container)
+        ctrl_layout.setContentsMargins(0, 0, 0, 0)
+        ctrl_layout.setSpacing(4)
 
         lbl_sim = QLabel("<b>SIMULATION CONTROLS</b>")
         lbl_sim.setStyleSheet("color: #aaa; font-size: 9px; margin-top: 4px;")
@@ -1027,6 +1033,9 @@ class LiveDeviationCard(QFrame):
             self.lbl_metrics.setVisible(False)
             self.controls_container.setVisible(False)
             self.struct_container.setVisible(False)
+            if surgical_plan:
+                self._instrument_visible = getattr(surgical_plan, "deviation_visible", False)
+                self.btn_toggle.setText("Hide Current Instrument" if self._instrument_visible else "Show Current Instrument")
             return
 
         self.lbl_status.setText("Active Simulation")
@@ -1432,16 +1441,22 @@ class CurrentPreviousScanCard(QFrame):
         self.active_view: str = "CURRENT"
         self.is_comparing: bool = False
 
+        self.setObjectName("CurrentPreviousComparisonCard")
         self.setFrameShape(QFrame.Shape.Box)
         self.setStyleSheet("""
-            QFrame {
+            #CurrentPreviousComparisonCard {
                 background: #161616;
                 border: 1px solid #242424;
-                border-radius: 4px;
+                border-radius: 6px;
                 padding: 6px 8px;
             }
-            QFrame:hover {
+            #CurrentPreviousComparisonCard:hover {
                 border-color: #00e5ff;
+            }
+            QLabel {
+                background: transparent;
+                border: none;
+                padding: 0px;
             }
         """)
 
@@ -1678,16 +1693,22 @@ class SameLocationReviewCard(QFrame):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setObjectName("SameLocationReviewCard")
         self.setFrameShape(QFrame.Shape.Box)
         self.setStyleSheet("""
-            QFrame {
+            #SameLocationReviewCard {
                 background: #161616;
                 border: 1px solid #242424;
-                border-radius: 4px;
+                border-radius: 6px;
                 padding: 6px 8px;
             }
-            QFrame:hover {
+            #SameLocationReviewCard:hover {
                 border-color: #00e5ff;
+            }
+            QLabel {
+                background: transparent;
+                border: none;
+                padding: 0px;
             }
         """)
 
@@ -1869,16 +1890,22 @@ class MeasurementTrackingCard(QFrame):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setObjectName("MeasurementTrackingCard")
         self.setFrameShape(QFrame.Shape.Box)
         self.setStyleSheet("""
-            QFrame {
+            #MeasurementTrackingCard {
                 background: #161616;
                 border: 1px solid #242424;
-                border-radius: 4px;
+                border-radius: 6px;
                 padding: 6px 8px;
             }
-            QFrame:hover {
+            #MeasurementTrackingCard:hover {
                 border-color: #00e5ff;
+            }
+            QLabel {
+                background: transparent;
+                border: none;
+                padding: 0px;
             }
         """)
 
@@ -2093,16 +2120,22 @@ class AnnotationCarryForwardCard(QFrame):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setObjectName("AnnotationCarryForwardCard")
         self.setFrameShape(QFrame.Shape.Box)
         self.setStyleSheet("""
-            QFrame {
+            #AnnotationCarryForwardCard {
                 background: #161616;
                 border: 1px solid #242424;
-                border-radius: 4px;
+                border-radius: 6px;
                 padding: 6px 8px;
             }
-            QFrame:hover {
+            #AnnotationCarryForwardCard:hover {
                 border-color: #00e5ff;
+            }
+            QLabel {
+                background: transparent;
+                border: none;
+                padding: 0px;
             }
         """)
 
@@ -2375,16 +2408,22 @@ class WhatChangedCard(QFrame):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setObjectName("WhatChangedCard")
         self.setFrameShape(QFrame.Shape.Box)
         self.setStyleSheet("""
-            QFrame {
+            #WhatChangedCard {
                 background: #161616;
                 border: 1px solid #242424;
-                border-radius: 4px;
+                border-radius: 6px;
                 padding: 6px 8px;
             }
-            QFrame:hover {
+            #WhatChangedCard:hover {
                 border-color: #ff5722;
+            }
+            QLabel {
+                background: transparent;
+                border: none;
+                padding: 0px;
             }
         """)
 
@@ -2595,12 +2634,18 @@ class DeviceMarkersCard(QFrame):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setObjectName("DeviceMarkersCard")
         self.setFrameShape(QFrame.Shape.StyledPanel)
         self.setStyleSheet("""
-            QFrame {
+            #DeviceMarkersCard {
                 background: #141414;
                 border: 1px solid #2a2a2a;
-                border-radius: 4px;
+                border-radius: 6px;
+            }
+            QLabel {
+                background: transparent;
+                border: none;
+                padding: 0px;
             }
         """)
         self.markers: list = []
@@ -2882,12 +2927,18 @@ class QuickHandoffCard(QFrame):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setObjectName("QuickHandoffCard")
         self.setFrameShape(QFrame.Shape.StyledPanel)
         self.setStyleSheet("""
-            QFrame {
+            #QuickHandoffCard {
                 background: #141414;
                 border: 1px solid #2a2a2a;
-                border-radius: 4px;
+                border-radius: 6px;
+            }
+            QLabel {
+                background: transparent;
+                border: none;
+                padding: 0px;
             }
         """)
         self.handoff_snapshot = None
@@ -3173,16 +3224,22 @@ class BeforeAfterCard(QFrame):
         self.display_mode: str = "TOGGLE"
         self.current_view: str = "AFTER"
 
+        self.setObjectName("BeforeAfterComparisonCard")
         self.setFrameShape(QFrame.Shape.Box)
         self.setStyleSheet("""
-            QFrame {
+            #BeforeAfterComparisonCard {
                 background: #161616;
                 border: 1px solid #242424;
-                border-radius: 4px;
+                border-radius: 6px;
                 padding: 6px 8px;
             }
-            QFrame:hover {
+            #BeforeAfterComparisonCard:hover {
                 border-color: #333333;
+            }
+            QLabel {
+                background: transparent;
+                border: none;
+                padding: 0px;
             }
         """)
 
@@ -4527,7 +4584,7 @@ class OrIcuMode(QWidget):
         self.right_panel.setFixedWidth(380)
         self.right_panel.setStyleSheet("background: #0d0f14; border-left: 1px solid #1c212b;")
         self.right_layout = QVBoxLayout(self.right_panel)
-        self.right_layout.setContentsMargins(12, 12, 12, 12)
+        self.right_layout.setContentsMargins(12, 12, 12, 245)  # Bottom margin ensures inspector cards do not get behind Camera HUD
         self.right_layout.setSpacing(8)
 
         # Inspector Header
@@ -4540,11 +4597,18 @@ class OrIcuMode(QWidget):
 
         insp_hdr.addStretch(1)
 
-        self.inspector_status = QLabel("● ACTIVE")
+        self.inspector_status = QPushButton("● ACTIVE")
+        self.inspector_status.setCursor(Qt.CursorShape.PointingHandCursor)
         self.inspector_status.setStyleSheet("""
-            color: #00e5ff; font-size: 10px; font-weight: bold;
-            background: #002e3b; border: 1px solid #00e5ff; border-radius: 3px; padding: 2px 6px;
+            QPushButton {
+                color: #00e5ff; font-size: 10px; font-weight: bold;
+                background: #002e3b; border: 1px solid #00e5ff; border-radius: 3px; padding: 2px 8px;
+            }
+            QPushButton:hover {
+                background: #004357;
+            }
         """)
+        self.inspector_status.clicked.connect(self._on_inspector_status_clicked)
         insp_hdr.addWidget(self.inspector_status)
 
         self.right_layout.addLayout(insp_hdr)
@@ -4990,14 +5054,14 @@ class OrIcuMode(QWidget):
 
         # Card 10: Surgical Corridor
         self.surgical_corridor_card = SurgicalCorridorCard()
-        self.surgical_corridor_card.visibility_changed.connect(self.corridor_visibility_changed.emit)
+        self.surgical_corridor_card.visibility_changed.connect(self._on_corridor_card_visibility)
         self.surgical_corridor_card.radius_changed.connect(self.corridor_radius_changed.emit)
         self.or_cards_group.append(self.surgical_corridor_card)
         self.inspector_stack.addWidget(self.surgical_corridor_card)
 
         # Card 11: Virtual Instrument
         self.virtual_instrument_card = VirtualInstrumentCard()
-        self.virtual_instrument_card.visibility_changed.connect(self.instrument_visibility_changed.emit)
+        self.virtual_instrument_card.visibility_changed.connect(self._on_instrument_card_visibility)
         self.virtual_instrument_card.depth_changed.connect(self.instrument_depth_changed.emit)
         self.virtual_instrument_card.diameter_changed.connect(self.instrument_diameter_changed.emit)
         self.virtual_instrument_card.view_instrument_requested.connect(self.view_instrument_requested.emit)
@@ -5006,7 +5070,7 @@ class OrIcuMode(QWidget):
 
         # Card 12: Live Deviation
         self.live_deviation_card = LiveDeviationCard()
-        self.live_deviation_card.visibility_changed.connect(self.deviation_visibility_changed.emit)
+        self.live_deviation_card.visibility_changed.connect(self._on_deviation_card_visibility)
         self.live_deviation_card.offsets_changed.connect(self.deviation_offsets_changed.emit)
         self.live_deviation_card.angles_changed.connect(self.deviation_angles_changed.emit)
         self.live_deviation_card.reset_deviation_requested.connect(self.reset_deviation_requested.emit)
@@ -5184,10 +5248,17 @@ class OrIcuMode(QWidget):
         self.bottom_mode_lbl.setStyleSheet("color: #00e5ff; font-size: 11px; font-weight: bold; font-family: monospace;")
         if hasattr(self, "inspector_scroll") and self.inspector_scroll:
             self.inspector_scroll.verticalScrollBar().setValue(0)
+        self._update_inspector_status_for_current()
 
     def _select_or_item(self, idx: int):
         if idx < 0 or idx >= len(self.or_rail_items):
             return
+
+        # If user clicks an already active toggleable item (04, 05, 06), toggle it!
+        if getattr(self, "_active_or_index", None) == idx and idx in (3, 4, 5):
+            self._on_inspector_status_clicked()
+            return
+
         self._active_or_index = idx
         for i, item in enumerate(self.or_rail_items):
             item.set_active(i == idx, accent_color="#00e676")
@@ -5196,26 +5267,23 @@ class OrIcuMode(QWidget):
             ("OR / 01", "ENTRY + TARGET LANDMARKS", "● ACTIVE"),
             ("OR / 02", "PLANNED ROUTE TRAJECTORY", "● ACTIVE"),
             ("OR / 03", "STRUCTURES TO AVOID", "● ACTIVE"),
-            ("OR / 04", "SURGICAL CORRIDOR", "● ACTIVE"),
-            ("OR / 05", "VIRTUAL INSTRUMENT", "● ACTIVE"),
-            ("OR / 06", "LIVE DEVIATION MONITOR", "● ACTIVE"),
+            ("OR / 04", "SURGICAL CORRIDOR", "● ON"),
+            ("OR / 05", "VIRTUAL INSTRUMENT", "● OFF"),
+            ("OR / 06", "LIVE DEVIATION MONITOR", "● OFF"),
             ("OR / 07", "PLAN SAVING & VERSIONS", "● ACTIVE"),
             ("OR / 08", "BEFORE VS AFTER COMPARISON", "● ACTIVE"),
             ("OR / 09", "QUICK SURGICAL VIEWS", "● ACTIVE"),
         ]
-        bc, title, status = or_titles[idx]
+        bc, title, _ = or_titles[idx]
         self.inspector_breadcrumb.setText(bc)
         self.inspector_title.setText(title)
-        self.inspector_status.setText(status)
-        self.inspector_status.setStyleSheet("""
-            color: #00e676; font-size: 10px; font-weight: bold;
-            background: #0d2818; border: 1px solid #00e676; border-radius: 3px; padding: 2px 6px;
-        """)
         self.inspector_stack.setCurrentIndex(7 + idx)
         self.bottom_mode_lbl.setText(f"OR SURGICAL WORKFLOW  ·  {bc.split('/')[-1].strip()} {title}")
         self.bottom_mode_lbl.setStyleSheet("color: #00e676; font-size: 11px; font-weight: bold; font-family: monospace;")
         if hasattr(self, "inspector_scroll") and self.inspector_scroll:
             self.inspector_scroll.verticalScrollBar().setValue(0)
+
+        self._update_inspector_status_for_current()
 
     def _sync_rail_badges(self):
         """Synchronizes status badges on rail items with current card/session states."""
@@ -5296,6 +5364,142 @@ class OrIcuMode(QWidget):
 
             # OR 8: Quick Views
             self.or_rail_items[8].set_status("●", "#8b949e")
+
+        self._update_inspector_status_for_current()
+
+    def _set_toggle_button_visual(self, btn: QPushButton, is_on: bool):
+        if is_on:
+            btn.setText("● ON")
+            btn.setStyleSheet("""
+                QPushButton {
+                    color: #00e676; font-size: 10px; font-weight: bold;
+                    background: #0d2818; border: 1px solid #00e676; border-radius: 3px; padding: 2px 8px;
+                }
+                QPushButton:hover {
+                    background: #143d25;
+                }
+            """)
+        else:
+            btn.setText("● OFF")
+            btn.setStyleSheet("""
+                QPushButton {
+                    color: #8b949e; font-size: 10px; font-weight: bold;
+                    background: #161b22; border: 1px solid #30363d; border-radius: 3px; padding: 2px 8px;
+                }
+                QPushButton:hover {
+                    background: #21262d; color: #c9d1d9; border-color: #58a6ff;
+                }
+            """)
+
+    def _update_inspector_status_for_current(self):
+        """Updates inspector header status button text and style according to active mode and selection."""
+        if not hasattr(self, "inspector_status") or self.inspector_status is None:
+            return
+
+        if self.current_mode == "ICU":
+            idx = getattr(self, "_active_icu_index", 0)
+            icu_statuses = ["● READY", "● AVAILABLE", "● ACTIVE", "● ACTIVE", "● READY", "● ACTIVE", "● READY"]
+            st = icu_statuses[idx] if idx < len(icu_statuses) else "● ACTIVE"
+            self.inspector_status.setText(st)
+            self.inspector_status.setStyleSheet("""
+                QPushButton {
+                    color: #00e5ff; font-size: 10px; font-weight: bold;
+                    background: #002e3b; border: 1px solid #00e5ff; border-radius: 3px; padding: 2px 8px;
+                }
+                QPushButton:hover {
+                    background: #004357;
+                }
+            """)
+            return
+
+        # OR Mode
+        idx = getattr(self, "_active_or_index", 0)
+        plan = self.surgical_plan
+
+        if idx == 3:  # 04 Surgical Corridor
+            is_on = bool(plan and getattr(plan, "corridor_enabled", getattr(plan, "corridor_visible", True)))
+            self._set_toggle_button_visual(self.inspector_status, is_on)
+        elif idx == 4:  # 05 Virtual Instrument
+            is_on = bool(plan and getattr(plan, "instrument_visible", False))
+            self._set_toggle_button_visual(self.inspector_status, is_on)
+        elif idx == 5:  # 06 Live Deviation Monitor
+            is_on = bool(plan and getattr(plan, "deviation_visible", False))
+            self._set_toggle_button_visual(self.inspector_status, is_on)
+        else:
+            self.inspector_status.setText("● ACTIVE")
+            self.inspector_status.setStyleSheet("""
+                QPushButton {
+                    color: #00e676; font-size: 10px; font-weight: bold;
+                    background: #0d2818; border: 1px solid #00e676; border-radius: 3px; padding: 2px 8px;
+                }
+                QPushButton:hover {
+                    background: #143d25;
+                }
+            """)
+
+    def _on_inspector_status_clicked(self):
+        """Toggles the currently selected OR feature (Corridor, Instrument, Live Deviation)."""
+        if self.current_mode != "OR":
+            return
+
+        idx = getattr(self, "_active_or_index", 0)
+        plan = self.surgical_plan
+
+        if idx == 3:  # 04 Surgical Corridor
+            curr = bool(plan and getattr(plan, "corridor_enabled", getattr(plan, "corridor_visible", True)))
+            new_val = not curr
+            if plan:
+                plan.set_corridor_enabled(new_val)
+            if hasattr(self, "surgical_corridor_card") and self.surgical_corridor_card:
+                self.surgical_corridor_card._corridor_enabled = new_val
+                self.surgical_corridor_card.btn_toggle.setText("Hide Corridor" if new_val else "Show Corridor")
+            self.corridor_visibility_changed.emit(new_val)
+
+        elif idx == 4:  # 05 Virtual Instrument
+            curr = bool(plan and getattr(plan, "instrument_visible", False))
+            new_val = not curr
+            if plan:
+                plan.set_instrument_visible(new_val)
+            if hasattr(self, "virtual_instrument_card") and self.virtual_instrument_card:
+                self.virtual_instrument_card._instrument_visible = new_val
+                self.virtual_instrument_card.btn_toggle.setText("Hide Instrument" if new_val else "Show Instrument")
+            self.instrument_visibility_changed.emit(new_val)
+
+        elif idx == 5:  # 06 Live Deviation Monitor
+            curr = bool(plan and getattr(plan, "deviation_visible", False))
+            new_val = not curr
+            if plan:
+                plan.set_deviation_visible(new_val)
+            if hasattr(self, "live_deviation_card") and self.live_deviation_card:
+                self.live_deviation_card._instrument_visible = new_val
+                self.live_deviation_card.btn_toggle.setText("Hide Current Instrument" if new_val else "Show Current Instrument")
+            self.deviation_visibility_changed.emit(new_val)
+        else:
+            return
+
+        self._sync_rail_badges()
+        self._update_inspector_status_for_current()
+
+    def _on_corridor_card_visibility(self, visible: bool):
+        if self.surgical_plan:
+            self.surgical_plan.set_corridor_enabled(visible)
+        self.corridor_visibility_changed.emit(visible)
+        self._sync_rail_badges()
+        self._update_inspector_status_for_current()
+
+    def _on_instrument_card_visibility(self, visible: bool):
+        if self.surgical_plan:
+            self.surgical_plan.set_instrument_visible(visible)
+        self.instrument_visibility_changed.emit(visible)
+        self._sync_rail_badges()
+        self._update_inspector_status_for_current()
+
+    def _on_deviation_card_visibility(self, visible: bool):
+        if self.surgical_plan:
+            self.surgical_plan.set_deviation_visible(visible)
+        self.deviation_visibility_changed.emit(visible)
+        self._sync_rail_badges()
+        self._update_inspector_status_for_current()
 
     def _add_workflow_action_card(self, title: str, status_text: str, accent_color: str):
         card = QFrame()

@@ -194,11 +194,15 @@ class MainWindow(QMainWindow):
         self.back_btn.clicked.connect(self._go_back)
         self._nav_history = []
 
-        # Camera HUD toggle — shown in nav bar
+        # Camera HUD toggle — ON by default, styled identically to Air Mouse button
+        self._cam_hud_on = True
         self.cam_btn = QPushButton("Camera: ON")
+        self.cam_btn.setCheckable(True)
+        self.cam_btn.setChecked(True)
         self.cam_btn.setStyleSheet(
-            "QPushButton { color: #aaa; border: 1px solid #444; padding: 4px 10px; }"
+            "QPushButton { color: #00e5ff; border: 1px solid #00e5ff; padding: 4px 10px; font-weight: bold; }"
         )
+        self.cam_btn.clicked.connect(self._toggle_camera_hud)
 
         for btn in (self.back_btn, self.clinical_btn, self.viewer_2d_btn, self.viewer_btn, self.or_icu_btn):
             nav_bar.addWidget(btn)
@@ -274,7 +278,6 @@ class MainWindow(QMainWindow):
         # widget has its final geometry before the first _reposition() call.
         self.cam_hud = CameraHUD(central)
         self.cam_hud.show()
-        self.cam_btn.clicked.connect(self._toggle_camera_hud)
 
         self.dashboard.view_records_clicked.connect(self.show_record)
         self.dashboard.view_scans_clicked.connect(self.show_scans)
@@ -2324,16 +2327,23 @@ class MainWindow(QMainWindow):
         log_action("auto_unlock", None, "unlocked by user")
 
     def _toggle_camera_hud(self):
-        self.cam_hud.toggle_visibility()
-        if self.cam_hud.isVisible():
+        self._set_camera_hud(not getattr(self, "_cam_hud_on", True))
+
+    def _set_camera_hud(self, enabled: bool):
+        self._cam_hud_on = enabled
+        self.cam_hud.setVisible(enabled)
+        if enabled:
+            self.cam_hud.raise_()
             self.cam_btn.setText("Camera: ON")
+            self.cam_btn.setChecked(True)
             self.cam_btn.setStyleSheet(
-                "QPushButton { color: #aaa; border: 1px solid #444; padding: 4px 10px; }"
+                "QPushButton { color: #00e5ff; border: 1px solid #00e5ff; padding: 4px 10px; font-weight: bold; }"
             )
         else:
             self.cam_btn.setText("Camera: OFF")
+            self.cam_btn.setChecked(False)
             self.cam_btn.setStyleSheet(
-                "QPushButton { color: #555; border: 1px solid #333; padding: 4px 10px; }"
+                "QPushButton { color: #888; border: 1px solid #555; padding: 4px 10px; }"
             )
 
     def resizeEvent(self, event):

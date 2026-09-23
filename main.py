@@ -1753,7 +1753,7 @@ class MainWindow(QMainWindow):
         """Switches to 2D slice picking mode to create a new spatial annotation."""
         self._go_root(self.viewer_3d)
         if hasattr(self.viewer_3d, "slice_viewer") and self.viewer_3d.slice_viewer:
-            self.viewer_3d.slice_viewer.set_annotation_picking(True)
+            self.viewer_3d.slice_viewer.set_annotation_picking_mode(True)
             self.flash_status("Click on 2D slice to place annotation")
 
     def _on_annotation_point_selected(self, x_mm: float, y_mm: float, z_mm: float):
@@ -2241,7 +2241,7 @@ class MainWindow(QMainWindow):
         if hasattr(self.or_icu_mode, "current_previous_card") and self.or_icu_mode.current_previous_card:
             previous_scan = self.or_icu_mode.current_previous_card.previous_scan
         if not previous_scan and patient.get("mrn"):
-            previous_scan = get_previous_scan_for_patient(patient.get("mrn"))
+            previous_scan = get_previous_scan_for_patient(patient.get("mrn"), current_scan=current_scan)
 
         self.quick_handoff_manager.generate_handoff(
             patient=patient,
@@ -2249,7 +2249,7 @@ class MainWindow(QMainWindow):
             previous_scan=previous_scan,
             same_location_review=getattr(self, "icu_same_location", None),
             measurement_tracker=getattr(self, "measurement_tracker", None),
-            annotation_cf_manager=getattr(self, "annotation_carry_forward_manager", None),
+            annotation_cf_manager=getattr(self, "annotation_cf_manager", getattr(self, "annotation_carry_forward_manager", None)),
             change_review=getattr(self, "change_review", None),
             device_marker_manager=getattr(self, "device_marker_manager", None),
         )

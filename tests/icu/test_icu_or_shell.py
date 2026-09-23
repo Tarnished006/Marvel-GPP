@@ -247,3 +247,91 @@ def test_9_mainwindow_navigation_handoff(qapp, sample_patient, sample_scan):
     assert main_win.viewer_3d.current_patient["mrn"] == "TEST-84729"
 
     main_win.close()
+
+
+# ── Test 10: Regression Test — Persistent Card Lifecycle Across Mode Switches ─
+def test_10_persistent_card_lifecycle_across_mode_switches(qapp, sample_patient, sample_scan):
+    """Regression test: verifies that switching between ICU and OR modes preserves
+    all card widgets and child QLabels, preventing 'wrapped C/C++ object ... has been deleted'.
+    """
+    from PyQt6.QtCore import QCoreApplication, QEvent
+    from surgical_plan import SurgicalPlanSession
+    from main import MainWindow
+
+    # 1. Direct OrIcuMode lifecycle test
+    widget = OrIcuMode()
+    widget.set_patient_and_scan(sample_patient, sample_scan)
+
+    plan = SurgicalPlanSession()
+    plan.scan_id = sample_scan.get("file_path")
+    plan.set_entry(10.0, 20.0, 30.0)
+    plan.set_target(40.0, 50.0, 60.0)
+
+    # Cycle modes repeatedly, pumping deferred deletes
+    for _ in range(5):
+        widget.set_mode("OR")
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        qapp.processEvents()
+
+        widget.set_mode("ICU")
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        qapp.processEvents()
+
+    # Now call set_surgical_plan in ICU mode (the exact crash condition reported)
+    widget.set_surgical_plan(plan)
+
+    from PyQt6.sip import isdeleted
+
+    # Verify all OR cards are live Qt objects and their labels are readable
+    assert widget.entry_target_card is not None
+    assert not isdeleted(widget.entry_target_card.lbl_entry_status)
+    entry_text = widget.entry_target_card.lbl_entry_status.text()
+    assert "10.0" in entry_text and "20.0" in entry_text and "30.0" in entry_text
+
+    assert not isdeleted(widget.planned_route_card.lbl_route_status)
+    assert not isdeleted(widget.structures_to_avoid_card.lbl_status)
+    assert not isdeleted(widget.surgical_corridor_card.lbl_status)
+    assert not isdeleted(widget.virtual_instrument_card.lbl_status)
+    assert not isdeleted(widget.live_deviation_card.lbl_status)
+    assert not isdeleted(widget.plan_versions_card.lbl_status)
+    assert not isdeleted(widget.before_after_card.lbl_status)
+    assert not isdeleted(widget.quick_views_card.lbl_active_preset)
+
+    # Verify all ICU cards are also live Qt objects and their labels are readable
+    assert not isdeleted(widget.current_previous_card.lbl_status)
+    assert not isdeleted(widget.same_location_card.lbl_status)
+    assert not isdeleted(widget.measurement_tracking_card.lbl_status)
+    assert not isdeleted(widget.annotation_carry_forward_card.lbl_status)
+    assert not isdeleted(widget.what_changed_card.lbl_status)
+    assert not isdeleted(widget.device_markers_card.lbl_header_status)
+    assert not isdeleted(widget.quick_handoff_card.lbl_header_status)
+    assert widget.same_location_card.lbl_status.text() is not None
+
+    # 2. End-to-end test with MainWindow navigation flow
+    main_win = MainWindow()
+    main_win.viewer_3d.current_patient = sample_patient
+    main_win.viewer_3d.current_scan = sample_scan
+    main_win.viewer_3d.surgical_plan = plan
+
+    # Repeatedly open ICU, switch to OR, switch to ICU
+    for _ in range(3):
+        main_win._open_or_icu()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        qapp.processEvents()
+
+        main_win.or_icu_mode.set_mode("OR")
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        qapp.processEvents()
+
+        main_win.or_icu_mode.set_mode("ICU")
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        qapp.processEvents()
+
+        # Call _open_or_icu again (triggers set_surgical_plan)
+        main_win._open_or_icu()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        qapp.processEvents()
+
+    # Confirm live Qt status
+    assert "10.0" in main_win.or_icu_mode.entry_target_card.lbl_entry_status.text()
+    main_win.close()

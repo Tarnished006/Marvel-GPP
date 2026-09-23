@@ -1810,6 +1810,10 @@ class Slice2DViewerWidget(QWidget):
         if hasattr(self, "canvas"):
             self.canvas.set_annotation_picking(enabled)
 
+    def set_annotation_picking(self, enabled: bool):
+        """Backward-compatible alias for set_annotation_picking_mode."""
+        self.set_annotation_picking_mode(enabled)
+
     def set_active_annotations(self, annots: list[dict] | None):
         """Passes ICU annotations list to canvas for visualization."""
         if hasattr(self, "canvas"):

@@ -2194,10 +2194,9 @@ class Viewer3D(QWidget):
         # Pre-load & cache Before scan bone mesh ONCE
         if before_path and os.path.isdir(before_path) and self.comparison.before_mesh is None:
             try:
-                from dicom_engine import DicomLoader
+                from dicom_engine import build_meshes_from_folder
                 preset = "skull" if "skull" in before_path.lower() else "body"
-                loader = DicomLoader(before_path)
-                mset = loader.load_scan(iso_preset=preset)
+                mset = build_meshes_from_folder(before_path, preset=preset)
                 if mset and mset.bone_mesh:
                     self.comparison.before_mesh = mset.bone_mesh
             except Exception as exc:
@@ -3256,6 +3255,7 @@ class Viewer3D(QWidget):
 
         # Enable targeted 3D-to-2D raycast snapping
         try:
+            self.plotter.disable_picking()
             self.plotter.enable_point_picking(
                 callback=self._on_3d_point_picked,
                 show_message=False,

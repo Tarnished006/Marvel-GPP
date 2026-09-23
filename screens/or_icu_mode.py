@@ -4159,9 +4159,15 @@ class OrIcuMode(QWidget):
         self.workflow_scroll = QScrollArea()
         self.workflow_scroll.setWidgetResizable(True)
         self.workflow_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        # Move scrollbar to left to avoid camera overlay
+        self.workflow_scroll.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+        
         self.workflow_container = QWidget()
+        # Restore content direction to normal
+        self.workflow_container.setLayoutDirection(Qt.LayoutDirection.LeftToRight)
+        
         self.workflow_items_layout = QVBoxLayout(self.workflow_container)
-        self.workflow_items_layout.setContentsMargins(0, 0, 0, 0)
+        self.workflow_items_layout.setContentsMargins(0, 0, 0, 245) # Extra bottom margin so camera HUD doesn't block cards
         self.workflow_items_layout.setSpacing(6)
         self.workflow_scroll.setWidget(self.workflow_container)
         self.right_layout.addWidget(self.workflow_scroll, stretch=1)

@@ -255,10 +255,16 @@ class Dashboard(QWidget):
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        # Move scrollbar to left to avoid camera overlay
+        self.scroll_area.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
 
         self.scroll_content = QWidget()
+        # Restore content direction to normal
+        self.scroll_content.setLayoutDirection(Qt.LayoutDirection.LeftToRight)
+        
         self.grid = QGridLayout(self.scroll_content)
         self.grid.setSpacing(10)
+        self.grid.setContentsMargins(0, 0, 0, 245) # Extra bottom margin so camera HUD doesn't block cards
 
         self.scroll_area.setWidget(self.scroll_content)
         layout.addWidget(self.scroll_area)

@@ -1187,7 +1187,7 @@ class PlanVersionsCard(QFrame):
 
         self.lbl_empty = QLabel("No saved plans")
         self.lbl_empty.setStyleSheet("color: #666666; font-size: 10px; font-style: italic;")
-        self.versions_layout.addWidget(self.lbl_empty)
+        self._layout.addWidget(self.lbl_empty)
 
     def update_versions(self, surgical_plan, scan_id: str):
         """Refreshes the saved versions list from database for the active scan."""
@@ -1207,9 +1207,9 @@ class PlanVersionsCard(QFrame):
                 item.widget().deleteLater()
 
         if not scan_id:
-            self.lbl_empty = QLabel("No active scan")
-            self.lbl_empty.setStyleSheet("color: #666666; font-size: 10px; font-style: italic;")
-            self.versions_layout.addWidget(self.lbl_empty)
+            self.lbl_empty.setText("No active scan")
+            self.lbl_empty.setVisible(True)
+            self.versions_container.setVisible(False)
             return
 
         try:
@@ -1219,10 +1219,13 @@ class PlanVersionsCard(QFrame):
             versions = []
 
         if not versions:
-            self.lbl_empty = QLabel("No saved plans")
-            self.lbl_empty.setStyleSheet("color: #666666; font-size: 10px; font-style: italic;")
-            self.versions_layout.addWidget(self.lbl_empty)
+            self.lbl_empty.setText("No saved plans")
+            self.lbl_empty.setVisible(True)
+            self.versions_container.setVisible(False)
             return
+
+        self.lbl_empty.setVisible(False)
+        self.versions_container.setVisible(True)
 
         # Display versions chronologically
         for v in versions:
@@ -5129,6 +5132,21 @@ class OrIcuMode(QWidget):
                     self.live_deviation_card.update_deviation(self.surgical_plan)
                 if hasattr(self, "quick_views_card") and self.quick_views_card:
                     self.quick_views_card.update_availability(self.surgical_plan)
+            else:
+                if hasattr(self, "entry_target_card") and self.entry_target_card:
+                    self.entry_target_card.update_landmarks(None, None)
+                if hasattr(self, "planned_route_card") and self.planned_route_card:
+                    self.planned_route_card.update_route(None)
+                if hasattr(self, "structures_to_avoid_card") and self.structures_to_avoid_card:
+                    self.structures_to_avoid_card.update_structures(None)
+                if hasattr(self, "surgical_corridor_card") and self.surgical_corridor_card:
+                    self.surgical_corridor_card.update_corridor(None)
+                if hasattr(self, "virtual_instrument_card") and self.virtual_instrument_card:
+                    self.virtual_instrument_card.update_instrument(None)
+                if hasattr(self, "live_deviation_card") and self.live_deviation_card:
+                    self.live_deviation_card.update_deviation(None)
+                if hasattr(self, "quick_views_card") and self.quick_views_card:
+                    self.quick_views_card.update_availability(None)
 
             scan_id = (self.current_scan.get("file_path") if self.current_scan else "") or str(self.current_scan.get("id", "") if self.current_scan else "")
             if hasattr(self, "plan_versions_card") and self.plan_versions_card:

@@ -184,6 +184,11 @@ class AnnotationCarryForwardManager:
             self.selected_annotation_id = annotation_id
             self._update_target_scan_id()
 
+    def clear_selection(self):
+        """Deselects any currently active annotation."""
+        self.selected_annotation_id = None
+        self.target_scan_id = None
+
     def _update_target_scan_id(self):
         """Sets default target scan based on source annotation's scan ID."""
         annot = self.get_selected_annotation()

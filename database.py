@@ -184,10 +184,19 @@ def get_historical_scans_for_patient(mrn: str, current_scan: dict) -> list[dict]
 
     return list(reversed(earlier_scans))
 
-def get_previous_scan_for_patient(mrn: str, current_scan: dict) -> Optional[dict]:
+def get_previous_scan_for_patient(mrn: str, current_scan: Optional[dict] = None) -> Optional[dict]:
     """Returns the immediately previous scan for the patient, or None if no earlier scan exists."""
-    historical = get_historical_scans_for_patient(mrn, current_scan)
-    return historical[0] if historical else None
+    if not mrn:
+        return None
+    if current_scan:
+        historical = get_historical_scans_for_patient(mrn, current_scan)
+        return historical[0] if historical else None
+
+    # Fallback when current_scan is not specified: return second most recent study if available
+    scans = get_scans_for_ui(mrn)
+    if scans and len(scans) >= 2:
+        return scans[1]
+    return None
 
 def get_patient(mrn: str) -> dict | None:
     """Fetch single patient record by MRN."""

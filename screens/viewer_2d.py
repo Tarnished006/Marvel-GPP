@@ -96,21 +96,24 @@ class Viewer2D(QWidget):
 
     def _handle_gesture_pan(self, dx: float, dy: float):
         """Called by the gesture thread when a thumb+ring gesture is detected in Viewer Mode."""
-        if not self.isVisible():
+        main_win = self.window()
+        if hasattr(main_win, 'stack') and main_win.stack.currentWidget() != self:
             return
             
         # dx, dy are typically -0.06 to 0.06. Scale up for scrolling.
-        sensitivity = 3000
+        sensitivity = 5000
         h_bar = self.view.horizontalScrollBar()
         v_bar = self.view.verticalScrollBar()
         
+        # Translate the view natively if scrollbars are inactive, otherwise scroll
+        self.view.translate(-dx * sensitivity * 0.01, -dy * sensitivity * 0.01)
         h_bar.setValue(h_bar.value() - int(dx * sensitivity))
         v_bar.setValue(v_bar.value() - int(dy * sensitivity))
 
     def _handle_gesture_zoom(self, direction: int):
         """Called by the gesture thread when a zoom gesture is detected."""
-        # Ensure we only zoom if this widget is visible
-        if not self.isVisible():
+        main_win = self.window()
+        if hasattr(main_win, 'stack') and main_win.stack.currentWidget() != self:
             return
             
         zoom_in_factor = 1.03
@@ -121,6 +124,8 @@ class Viewer2D(QWidget):
         else:
             zoom_factor = zoom_out_factor
             
+        # Set anchor to center so it zooms smoothly
+        self.view.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorViewCenter)
         self.view.scale(zoom_factor, zoom_factor)
 
     def _build_ui(self):

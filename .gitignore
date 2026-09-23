@@ -1,13 +1,65 @@
-raw_downloads/
-aegis.db
+# Python bytecode & compiled files
 __pycache__/
 **/__pycache__/
+*.py[cod]
+*$py.class
 *.pyc
-.cache/
-reports/
-captures/
+.pytest_cache/
+
+# Virtual environments
 .venv/
+env/
+venv/
+ENV/
+
+# Caches, captures, logs, and generated reports
+.cache/
+captures/
+reports/
 tests/test_reports/
-chest_real/
-abdomen_real/
+raw_downloads/
+scratch/
+*.log
+
+# Database files (local runtime state)
+*.db
+*.sqlite
+*.sqlite3
+aegis.db
+patients.db
+
+# Archives and compressed files
 *.zip
+*.tar
+*.tar.gz
+*.7z
+*.rar
+
+# Mock and duplicate experimental scan folders
+mock_2d_*/
+external_2d_*/
+hq_2d_*/
+scratch_lattice/
+
+# One-off / patch scripts
+patch_*.py
+master_patch.py
+fix_*.py
+apply_ui_fixes.py
+check_dcm.py
+create_mock_2d.py
+distinguish_datasets.py
+download_datasets.py
+extract_local_dicoms.py
+generate_hq_*.py
+get_2d_scans.py
+inject_external_2d.py
+reset.py
+route_mpr.py
+show_cards.py
+test.py
+
+# OS generated files
+.DS_Store
+Thumbs.db
+desktop.ini

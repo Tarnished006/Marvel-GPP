@@ -3,7 +3,7 @@ import numpy as np
 import pydicom
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton, 
                              QSlider, QLabel, QGraphicsView, QGraphicsScene, QGraphicsPixmapItem,
-                             QSplitter)
+                             QSplitter, QComboBox)
 from PyQt6.QtCore import Qt, QTimer, QRectF
 from PyQt6.QtGui import QImage, QPixmap, QPainter, QColor, QFont
 from signal_bus import signal_bus
@@ -162,7 +162,14 @@ class Viewer2D(QWidget):
         self.btn_cine.setStyleSheet(btn_style)
         self.btn_cine.setCheckable(True)
         self.btn_cine.clicked.connect(self.toggle_cine)
+
+        self.scan_selector = QComboBox()
+        self.scan_selector.setStyleSheet(btn_style)
+        self.scan_selector.currentIndexChanged.connect(self._on_scan_selected)
         
+        toolbar.addWidget(QLabel("Select X-Ray:"))
+        toolbar.addWidget(self.scan_selector)
+        toolbar.addSpacing(15)
         toolbar.addWidget(self.btn_invert)
         toolbar.addWidget(self.btn_rotate)
         toolbar.addWidget(self.btn_reset)
@@ -207,6 +214,45 @@ class Viewer2D(QWidget):
         view_layout.addWidget(self.view, stretch=1)
         view_layout.addWidget(self.slice_scrollbar)
         main_layout.addLayout(view_layout, stretch=1)
+
+    def update_scan_list(self):
+        from database import get_patients_for_ui
+        patients = get_patients_for_ui()
+        
+        current_path = None
+        if self.scan_selector.currentIndex() > 0:
+            data = self.scan_selector.itemData(self.scan_selector.currentIndex())
+            if data: current_path = data[0]
+
+        self.scan_selector.blockSignals(True)
+        self.scan_selector.clear()
+        self.scan_selector.addItem("--- Select a 2D Scan ---", None)
+        
+        has_2d = False
+        target_idx = 1
+        
+        for p in patients:
+            s = p.get("_scan", {})
+            if s and s.get("slice_count", 0) <= 30:
+                has_2d = True
+                path = s.get("file_path")
+                self.scan_selector.addItem(f"{p['name']} - {s.get('description', 'Scan')}", (path, p['name']))
+                if path == current_path:
+                    target_idx = self.scan_selector.count() - 1
+                    
+        self.scan_selector.blockSignals(False)
+        
+        # Always trigger a load so it's never blank
+        if has_2d:
+            self.scan_selector.setCurrentIndex(target_idx)
+            # If the index didn't change (e.g. was already target_idx), the signal won't fire. Force it:
+            self._on_scan_selected(target_idx)
+
+    def _on_scan_selected(self, index):
+        data = self.scan_selector.itemData(index)
+        if data:
+            folder_path, name = data
+            self.load_scan(folder_path, name)
 
     def load_scan(self, folder_path: str, patient_name: str = "Unknown"):
         self.dcm_files = []
@@ -280,6 +326,9 @@ class Viewer2D(QWidget):
         
         if self.is_inverted:
             img = 255 - img
+            
+        # Ensure memory is contiguous before passing to C++ QImage
+        img = np.ascontiguousarray(img)
             
         h, w = img.shape
         # Crucial to copy() so memory isn't collected

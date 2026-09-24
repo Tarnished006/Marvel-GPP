@@ -255,6 +255,8 @@ class Viewer2D(QWidget):
             self.load_scan(folder_path, name)
 
     def load_scan(self, folder_path: str, patient_name: str = "Unknown"):
+        from config import resolve_scan_path
+        folder_path = resolve_scan_path(folder_path)
         self.dcm_files = []
         self.pixel_arrays = []
         

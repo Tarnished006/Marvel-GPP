@@ -344,6 +344,14 @@ class Viewer2D(QWidget):
         self.default_window_width = self.window_width
         self.default_window_center = self.window_center
         
+        # Dynamically set slider ranges based on the actual DICOM range
+        max_w = max(2000, int(self.window_width * 1.5))
+        min_l = min(-1000, int(self.window_center - self.window_width))
+        max_l = max(1000, int(self.window_center + self.window_width))
+        
+        self.slider_w.setRange(1, max_w)
+        self.slider_l.setRange(min_l, max_l)
+        
         self.slider_w.blockSignals(True)
         self.slider_w.setValue(self.window_width)
         self.slider_w.blockSignals(False)

@@ -252,11 +252,36 @@ class Dashboard(QWidget):
         self.dir_label.setStyleSheet("color: #666; font-size: 10px; font-weight: 600;")
         layout.addWidget(self.dir_label)
 
+        # Container for scroll arrows and grid
+        scroll_layout = QHBoxLayout()
+        
+        # Left-side gesture scroll buttons
+        scroll_controls = QVBoxLayout()
+        self.btn_scroll_up = QPushButton("▲")
+        self.btn_scroll_up.setFixedSize(34, 60)
+        self.btn_scroll_up.setStyleSheet("QPushButton { background: #161b22; color: #8b949e; border: 1px solid #30363d; border-radius: 4px; font-weight: bold; font-size: 16px; } QPushButton:hover { color: #00e5ff; border-color: #00e5ff; }")
+        
+        self.btn_scroll_down = QPushButton("▼")
+        self.btn_scroll_down.setFixedSize(34, 60)
+        self.btn_scroll_down.setStyleSheet("QPushButton { background: #161b22; color: #8b949e; border: 1px solid #30363d; border-radius: 4px; font-weight: bold; font-size: 16px; } QPushButton:hover { color: #00e5ff; border-color: #00e5ff; }")
+        
+        scroll_controls.addWidget(self.btn_scroll_up)
+        scroll_controls.addStretch()
+        scroll_controls.addWidget(self.btn_scroll_down)
+        
+        scroll_layout.addLayout(scroll_controls)
+
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setFrameShape(QFrame.Shape.NoFrame)
-        # Move scrollbar to left to avoid camera overlay
-        self.scroll_area.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+        # Hide standard scrollbars to enforce gesture button usage
+        self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+        # Wire up the scroll logic (adjust by 200px per pinch/click)
+        self.btn_scroll_up.clicked.connect(lambda: self.scroll_area.verticalScrollBar().setValue(max(0, self.scroll_area.verticalScrollBar().value() - 200)))
+        self.btn_scroll_down.clicked.connect(lambda: self.scroll_area.verticalScrollBar().setValue(min(self.scroll_area.verticalScrollBar().maximum(), self.scroll_area.verticalScrollBar().value() + 200)))
+
 
         self.scroll_content = QWidget()
         # Restore content direction to normal
@@ -267,7 +292,8 @@ class Dashboard(QWidget):
         self.grid.setContentsMargins(0, 0, 0, 245) # Extra bottom margin so camera HUD doesn't block cards
 
         self.scroll_area.setWidget(self.scroll_content)
-        layout.addWidget(self.scroll_area)
+        scroll_layout.addWidget(self.scroll_area, stretch=1)
+        layout.addLayout(scroll_layout)
 
         self._refresh_patient_grid()
 

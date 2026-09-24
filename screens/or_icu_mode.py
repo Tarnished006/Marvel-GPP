@@ -4350,15 +4350,24 @@ class OrIcuMode(QWidget):
         self.workflow_header.setStyleSheet("color: #00e5ff; font-size: 11px; font-weight: 800; letter-spacing: 0.8px;")
         rail_layout.addWidget(self.workflow_header)
 
+        # Gesture-friendly Up Arrow
+        self.btn_scroll_up = QPushButton("▲")
+        self.btn_scroll_up.setFixedHeight(30)
+        self.btn_scroll_up.setStyleSheet("QPushButton { background: #161b22; color: #8b949e; border: 1px solid #30363d; border-radius: 4px; font-weight: bold; } QPushButton:hover { color: #00e5ff; border-color: #00e5ff; }")
+        rail_layout.addWidget(self.btn_scroll_up)
+
         self.workflow_scroll = QScrollArea()
         self.workflow_scroll.setWidgetResizable(True)
         self.workflow_scroll.setFrameShape(QFrame.Shape.NoFrame)
         self.workflow_scroll.setStyleSheet("QScrollArea { background: transparent; }")
+        # Hide standard scrollbars to enforce gesture button usage
+        self.workflow_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.workflow_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
         self.workflow_container = QWidget()
         self.workflow_container.setStyleSheet("background: transparent;")
         self.workflow_items_layout = QVBoxLayout(self.workflow_container)
-        self.workflow_items_layout.setContentsMargins(0, 0, 0, 245)  # Extra bottom margin so camera HUD does not block cards
+        self.workflow_items_layout.setContentsMargins(0, 0, 0, 20)  # Reduced bottom margin since we have down arrow
         self.workflow_items_layout.setSpacing(4)
 
         # Container for ICU Rail Items
@@ -4380,6 +4389,16 @@ class OrIcuMode(QWidget):
         self.workflow_items_layout.addStretch(1)
         self.workflow_scroll.setWidget(self.workflow_container)
         rail_layout.addWidget(self.workflow_scroll, stretch=1)
+
+        # Gesture-friendly Down Arrow
+        self.btn_scroll_down = QPushButton("▼")
+        self.btn_scroll_down.setFixedHeight(30)
+        self.btn_scroll_down.setStyleSheet("QPushButton { background: #161b22; color: #8b949e; border: 1px solid #30363d; border-radius: 4px; font-weight: bold; } QPushButton:hover { color: #00e5ff; border-color: #00e5ff; }")
+        rail_layout.addWidget(self.btn_scroll_down)
+
+        # Wire up the scroll logic (adjust by 150px per pinch/click)
+        self.btn_scroll_up.clicked.connect(lambda: self.workflow_scroll.verticalScrollBar().setValue(max(0, self.workflow_scroll.verticalScrollBar().value() - 150)))
+        self.btn_scroll_down.clicked.connect(lambda: self.workflow_scroll.verticalScrollBar().setValue(min(self.workflow_scroll.verticalScrollBar().maximum(), self.workflow_scroll.verticalScrollBar().value() + 150)))
 
         body.addWidget(self.workflow_rail_panel)
 

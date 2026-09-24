@@ -79,6 +79,10 @@ class Viewer2D(QWidget):
         self.dcm_files = []
         self.pixel_arrays = []
         self.current_idx = 0
+
+        self.pixel_arrays_2 = []
+        self.dcm_files_2 = []
+        self.current_idx_2 = 0
         
         self.window_width = 400
         self.window_center = 40
@@ -174,6 +178,23 @@ class Viewer2D(QWidget):
         toolbar.addWidget(self.btn_rotate)
         toolbar.addWidget(self.btn_reset)
         toolbar.addWidget(self.btn_cine)
+        self.btn_compare = QPushButton("Compare Mode")
+        self.btn_compare.setStyleSheet(btn_style)
+        self.btn_compare.setCheckable(True)
+        self.btn_compare.clicked.connect(self.toggle_compare)
+        
+        self.scan_selector_2 = QComboBox()
+        self.scan_selector_2.setStyleSheet(btn_style)
+        self.scan_selector_2.currentIndexChanged.connect(self._on_scan_selected_2)
+        self.scan_selector_2.setVisible(False)
+        self.lbl_compare = QLabel("Compare with:")
+        self.lbl_compare.setVisible(False)
+        
+        toolbar.addSpacing(15)
+        toolbar.addWidget(self.btn_compare)
+        toolbar.addWidget(self.lbl_compare)
+        toolbar.addWidget(self.scan_selector_2)
+
         
         # Contrast Slider
         toolbar.addSpacing(20)
@@ -213,6 +234,21 @@ class Viewer2D(QWidget):
         view_layout = QHBoxLayout()
         view_layout.addWidget(self.view, stretch=1)
         view_layout.addWidget(self.slice_scrollbar)
+
+        self.view2 = ClinicalGraphicsView()
+        self.view2.setVisible(False)
+        
+        self.slice_scrollbar2 = QSlider(Qt.Orientation.Vertical)
+        self.slice_scrollbar2.setInvertedAppearance(True)
+        self.slice_scrollbar2.setStyleSheet("""
+            QSlider::groove:vertical { background: #222; width: 8px; border-radius: 4px; }
+            QSlider::handle:vertical { background: #7cfc00; height: 30px; margin: 0 -4px; border-radius: 4px; }
+        """)
+        self.slice_scrollbar2.valueChanged.connect(self._on_slice_scroll_2)
+        self.slice_scrollbar2.setVisible(False)
+        
+        view_layout.addWidget(self.view2, stretch=1)
+        view_layout.addWidget(self.slice_scrollbar2)
         main_layout.addLayout(view_layout, stretch=1)
 
     def update_scan_list(self):
@@ -242,6 +278,13 @@ class Viewer2D(QWidget):
                     
         self.scan_selector.blockSignals(False)
         
+        self.scan_selector_2.blockSignals(True)
+        self.scan_selector_2.clear()
+        self.scan_selector_2.addItem("--- Select a Scan to Compare ---", None)
+        for i in range(1, self.scan_selector.count()):
+            self.scan_selector_2.addItem(self.scan_selector.itemText(i), self.scan_selector.itemData(i))
+        self.scan_selector_2.blockSignals(False)
+
         # Always trigger a load so it's never blank
         if has_2d:
             self.scan_selector.setCurrentIndex(target_idx)
@@ -295,10 +338,19 @@ class Viewer2D(QWidget):
             wc = first.WindowCenter
             self.window_width = int(ww[0] if isinstance(ww, pydicom.multival.MultiValue) else ww)
             self.window_center = int(wc[0] if isinstance(wc, pydicom.multival.MultiValue) else wc)
-            self.slider_w.setValue(self.window_width)
-            self.slider_l.setValue(self.window_center)
         except:
             pass # Use defaults
+            
+        self.default_window_width = self.window_width
+        self.default_window_center = self.window_center
+        
+        self.slider_w.blockSignals(True)
+        self.slider_w.setValue(self.window_width)
+        self.slider_w.blockSignals(False)
+        
+        self.slider_l.blockSignals(True)
+        self.slider_l.setValue(self.window_center)
+        self.slider_l.blockSignals(False)
             
         # Update HUD
         self.view.hud_data["top_left"] = f"Patient: {patient_name}"
@@ -309,7 +361,12 @@ class Viewer2D(QWidget):
         self.slice_scrollbar.setValue(0)
         
         self.current_idx = 0
+
+        self.pixel_arrays_2 = []
+        self.dcm_files_2 = []
+        self.current_idx_2 = 0
         self.update_image()
+        if hasattr(self, "view2") and self.view2.isVisible(): self.update_image_2()
         self.view.fitInView(self.view.scene.itemsBoundingRect(), Qt.AspectRatioMode.KeepAspectRatio)
 
     def update_image(self):
@@ -351,14 +408,17 @@ class Viewer2D(QWidget):
     def _on_slider_w(self, val):
         self.window_width = val
         self.update_image()
+        if hasattr(self, "view2") and self.view2.isVisible(): self.update_image_2()
         
     def _on_slider_l(self, val):
         self.window_center = val
         self.update_image()
+        if hasattr(self, "view2") and self.view2.isVisible(): self.update_image_2()
         
     def _on_slice_scroll(self, val):
         self.current_idx = val
         self.update_image()
+        if hasattr(self, "view2") and self.view2.isVisible(): self.update_image_2()
 
     def _next_slice(self):
         nxt = self.current_idx + 1
@@ -369,19 +429,125 @@ class Viewer2D(QWidget):
     def toggle_invert(self):
         self.is_inverted = not self.is_inverted
         self.update_image()
+        if hasattr(self, "view2") and self.view2.isVisible(): self.update_image_2()
         
     def rotate_image(self):
         self.rotation_angle = (self.rotation_angle + 90) % 360
         self.update_image()
+        if hasattr(self, "view2") and self.view2.isVisible(): self.update_image_2()
         
     def reset_view(self):
         self.rotation_angle = 0
         self.is_inverted = False
-        self.view.fitInView(self.view.scene.itemsBoundingRect(), Qt.AspectRatioMode.KeepAspectRatio)
+        
+        # Reset window/level
+        if hasattr(self, 'default_window_width'):
+            self.window_width = self.default_window_width
+            self.window_center = self.default_window_center
+            
+            self.slider_w.blockSignals(True)
+            self.slider_w.setValue(self.window_width)
+            self.slider_w.blockSignals(False)
+            
+            self.slider_l.blockSignals(True)
+            self.slider_l.setValue(self.window_center)
+            self.slider_l.blockSignals(False)
+            
         self.update_image()
+        if hasattr(self, "view2") and self.view2.isVisible(): self.update_image_2()
+        self.view.fitInView(self.view.scene.itemsBoundingRect(), Qt.AspectRatioMode.KeepAspectRatio)
 
     def toggle_cine(self):
         if self.btn_cine.isChecked():
             self.cine_timer.start(100) # 10 fps
         else:
             self.cine_timer.stop()
+
+    def toggle_compare(self):
+        is_comparing = self.btn_compare.isChecked()
+        self.scan_selector_2.setVisible(is_comparing)
+        self.lbl_compare.setVisible(is_comparing)
+        self.view2.setVisible(is_comparing)
+        if is_comparing and self.pixel_arrays_2:
+            self.slice_scrollbar2.setVisible(True)
+        else:
+            self.slice_scrollbar2.setVisible(False)
+
+    def _on_scan_selected_2(self, index):
+        data = self.scan_selector_2.itemData(index)
+        if data:
+            folder_path, name = data
+            self.load_scan_2(folder_path, name)
+
+    def load_scan_2(self, folder_path: str, patient_name: str = "Unknown"):
+        from config import resolve_scan_path
+        import os, pydicom, numpy as np
+        folder_path = resolve_scan_path(folder_path)
+        self.dcm_files_2 = []
+        self.pixel_arrays_2 = []
+        
+        if not os.path.exists(folder_path): return
+
+        files = [f for f in os.listdir(folder_path) if f.lower().endswith(".dcm")]
+        if not files: return
+            
+        slices = []
+        for f in files:
+            try:
+                ds = pydicom.dcmread(os.path.join(folder_path, f))
+                slices.append(ds)
+            except: pass
+                
+        slices.sort(key=lambda x: float(getattr(x, "InstanceNumber", 0)))
+        self.dcm_files_2 = slices
+        
+        for ds in self.dcm_files_2:
+            arr = ds.pixel_array
+            slope = float(getattr(ds, "RescaleSlope", 1.0))
+            intercept = float(getattr(ds, "RescaleIntercept", 0.0))
+            self.pixel_arrays_2.append(arr * slope + intercept)
+            
+        first = self.dcm_files_2[0]
+        self.view2.hud_data["top_left"] = f"Patient: {patient_name}"
+        self.view2.hud_data["top_right"] = f"Modality: {getattr(first, 'Modality', 'CT')}"
+        
+        self.slice_scrollbar2.setRange(0, len(self.pixel_arrays_2) - 1)
+        self.slice_scrollbar2.setValue(0)
+        self.slice_scrollbar2.setVisible(True)
+        
+        self.current_idx_2 = 0
+        self.update_image_2()
+        self.view2.fitInView(self.view2.scene.itemsBoundingRect(), Qt.AspectRatioMode.KeepAspectRatio)
+
+    def update_image_2(self):
+        import numpy as np
+        from PyQt6.QtGui import QImage, QPixmap
+        if not self.pixel_arrays_2: return
+            
+        arr = self.pixel_arrays_2[self.current_idx_2]
+        img_min = self.window_center - self.window_width / 2.0
+        img_max = self.window_center + self.window_width / 2.0
+        
+        img = np.clip(arr, img_min, img_max)
+        img = (img - img_min) / (img_max - img_min) * 255.0
+        img = img.astype(np.uint8)
+        
+        if self.is_inverted: img = 255 - img
+            
+        img = np.ascontiguousarray(img)
+        h, w = img.shape
+        qimg = QImage(img.data, w, h, w, QImage.Format.Format_Grayscale8).copy()
+        
+        pixmap = QPixmap.fromImage(qimg)
+        self.view2.pixmap_item.setPixmap(pixmap)
+        
+        self.view2.pixmap_item.setTransformOriginPoint(pixmap.width()/2, pixmap.height()/2)
+        self.view2.pixmap_item.setRotation(self.rotation_angle)
+        
+        self.view2.hud_data["bottom_left"] = f"W: {self.window_width} L: {self.window_center}"
+        self.view2.hud_data["bottom_right"] = f"Slice: {self.current_idx_2 + 1}/{len(self.pixel_arrays_2)}"
+        self.view2.viewport().update()
+
+    def _on_slice_scroll_2(self, val):
+        self.current_idx_2 = val
+        self.update_image_2()

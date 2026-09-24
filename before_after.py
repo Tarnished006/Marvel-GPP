@@ -1,6 +1,6 @@
 # before_after.py
 """
-Dedicated Before vs After comparison data model for Aegis-Touch / Marvel-GPP.
+Dedicated Before vs After comparison data model for Sanketa / Marvel-GPP.
 
 Supports visual review and comparison of imaging changes over time for the same patient.
 Enforces patient safety, scan validation, and complete isolation from surgical planning state.

@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from typing import Optional, Any, List, Dict
 from config import resolve_scan_path, make_relative_path
 
-DB_PATH = "aegis.db"
+DB_PATH = "sanketa.db"
 
 def get_connection():
     conn = sqlite3.connect(DB_PATH)

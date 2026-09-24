@@ -1,7 +1,7 @@
 """
-seed_db.py — Marvel GPP Database Seeder
+seed_db.py — Sanketa Database Seeder
 =========================================
-Run this script once on any machine to build (or rebuild) aegis.db
+Run this script once on any machine to build (or rebuild) sanketa.db
 from scratch using the DICOM folders in your DICOM_ROOT.
 
 Usage:

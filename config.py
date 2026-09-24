@@ -1,19 +1,19 @@
 r"""
-config.py — Marvel GPP Path Configuration
+config.py — Sanketa Path Configuration
 ==========================================
 This file tells the app WHERE your DICOM scan folders live.
 
 Each teammate sets DICOM_ROOT once to their local Google Drive sync path.
 
 Examples:
-  Windows (Google Drive):  r"C:\Users\yourname\Google Drive\My Drive\Marvel_GPP_Data"
-  Mac (Google Drive):      "/Users/yourname/Google Drive/My Drive/Marvel_GPP_Data"
+  Windows (Google Drive):  r"C:\Users\yourname\Google Drive\My Drive\Sanketa_Data"
+  Mac (Google Drive):      "/Users/yourname/Google Drive/My Drive/Sanketa_Data"
   Local dev (no Drive):    leave as default — uses the project folder itself
 
 HOW TO SET IT:
   Option A (recommended) — Environment variable, no code change needed:
-      Windows:  set DICOM_ROOT=C:\Users\yourname\Google Drive\My Drive\Marvel_GPP_Data
-      Mac/Linux: export DICOM_ROOT=/Users/yourname/Google Drive/My Drive/Marvel_GPP_Data
+      Windows:  set DICOM_ROOT=C:\Users\yourname\Google Drive\My Drive\Sanketa_Data
+      Mac/Linux: export DICOM_ROOT=/Users/yourname/Google Drive/My Drive/Sanketa_Data
 
   Option B — Edit this file directly:
       Change the fallback path below to your local Google Drive path.
@@ -52,7 +52,7 @@ def make_relative_path(absolute_path: str) -> str:
     Converts an absolute DICOM folder path to a path relative to DICOM_ROOT.
     Used when saving new scans to the database.
 
-    e.g. "C:/Users/rithy/.../Marvel_GPP_Data/skull" -> "skull"
+    e.g. "C:/Users/rithy/.../Sanketa_Data/skull" -> "skull"
     """
     try:
         return os.path.relpath(absolute_path, DICOM_ROOT)

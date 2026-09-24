@@ -19,7 +19,7 @@ def download_and_convert(url, output_dir, patient_name, patient_id, description)
     dcm_path = os.path.join(output_dir, "image.dcm")
     
     print(f"Downloading {description} from {url}...")
-    headers = {"User-Agent": "MarvelGPP-Bot/1.0 (test@example.com)"}
+    headers = {"User-Agent": "Sanketa-Bot/1.0 (test@example.com)"}
     
     try:
         response = requests.get(url, stream=True, headers=headers)

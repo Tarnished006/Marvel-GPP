@@ -1,6 +1,6 @@
 # dicom_engine.py
 """
-DICOM -> 3D mesh pipeline for Aegis-Touch.
+DICOM -> 3D mesh pipeline for Sanketa.
 
 Owns exactly one job: given a folder of .dcm slices, produce a bone-only
 renderable PyVista mesh.  No skin surface is generated — it obscures anatomy.
@@ -391,7 +391,7 @@ class MeshSet:
         return mesh
 
     def _extract_organs(self, preset: str = "body") -> dict[str, dict]:
-        """Soft-tissue organ meshes removed -- Aegis-Touch delivers pure, clinically pristine cortical bone."""
+        """Soft-tissue organ meshes removed -- Sanketa delivers pure, clinically pristine cortical bone."""
         return {}
 
     def __init__(

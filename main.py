@@ -155,7 +155,7 @@ class MainWindow(QMainWindow):
     AUTO_LOCK_MS = 5 * 60 * 1000   # 5 minutes of no gesture activity
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Aegis-Touch")
+        self.setWindowTitle("Sanketa")
         self.resize(1280, 720)
 
         central = QWidget()

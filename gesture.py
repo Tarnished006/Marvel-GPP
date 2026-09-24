@@ -1,6 +1,7 @@
 import sys
 import time
 import cv2
+import os
 import numpy as np
 import mediapipe as mp
 from mediapipe.tasks import python
@@ -401,10 +402,27 @@ class GestureWorker(QThread):
         # Return all valid scored candidates (primary presenter first, followed by others)
         return [s[1] for s in scored]
 
-    # ─────────────────────────── Main loop ────────────────────────────────────
     def run(self):
+        # Select camera index: default to 0 (laptop webcam), or use --cam / --camera / CAMERA_INDEX
+        cam_src = 0
+        if "--cam" in sys.argv:
+            try:
+                cam_src = int(sys.argv[sys.argv.index("--cam") + 1])
+            except (IndexError, ValueError):
+                pass
+        elif "--camera" in sys.argv:
+            try:
+                cam_src = int(sys.argv[sys.argv.index("--camera") + 1])
+            except (IndexError, ValueError):
+                pass
+        elif "CAMERA_INDEX" in os.environ:
+            try:
+                cam_src = int(os.environ["CAMERA_INDEX"])
+            except ValueError:
+                pass
+
         # High-speed threaded camera capture: completely eliminates DirectShow queue lag
-        self.cam = CameraStream(0, 640, 480, 30)
+        self.cam = CameraStream(cam_src, 640, 480, 30)
 
         while self.running:
             ok, frame = self.cam.read(timeout=0.035)

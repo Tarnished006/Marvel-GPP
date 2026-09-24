@@ -467,11 +467,17 @@ class MainWindow(QMainWindow):
 
     def move_os_cursor(self, norm_x: float, norm_y: float):
         """Moves the OS cursor from the UI thread via QCursor (no OS throttling)."""
-        screen = QApplication.primaryScreen().geometry()
-        target_x = screen.left() + int(norm_x * (screen.width() - 1))
-        target_y = screen.top()  + int(norm_y * (screen.height() - 1))
-        clamped_x = max(screen.left(), min(screen.right(), target_x))
-        clamped_y = max(screen.top(),  min(screen.bottom(), target_y))
+        # Support external monitors: map gestures to the active window or screen bounds
+        if self.isFullScreen() or self.isMaximized():
+            win_screen = self.window().screen() or QApplication.primaryScreen()
+            bounds = win_screen.geometry()
+        else:
+            bounds = self.geometry()
+
+        target_x = bounds.left() + int(norm_x * (bounds.width() - 1))
+        target_y = bounds.top()  + int(norm_y * (bounds.height() - 1))
+        clamped_x = max(bounds.left(), min(bounds.right(), target_x))
+        clamped_y = max(bounds.top(),  min(bounds.bottom(), target_y))
 
         # Click stabilization deadband:
         # When pinch starts, user's hand naturally trembles by 5-15px.
@@ -2352,6 +2358,17 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'cam_hud'):
             self.cam_hud._reposition()
 
+    def keyPressEvent(self, event):
+        """F11 toggles Fullscreen mode on the current monitor."""
+        if event.key() == Qt.Key.Key_F11:
+            if self.isFullScreen():
+                self.showNormal()
+            else:
+                self.showFullScreen()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
     def closeEvent(self, event):
         self.worker.stop()
         if hasattr(self, "voice_worker"):
@@ -2371,10 +2388,22 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
     app.setStyleSheet(DARK_STYLESHEET)
 
+    screens = app.screens()
+    target_screen = app.primaryScreen()
+    if "--external" in sys.argv and len(screens) > 1:
+        target_screen = screens[1]
+    elif "--screen" in sys.argv:
+        try:
+            s_idx = int(sys.argv[sys.argv.index("--screen") + 1])
+            if 0 <= s_idx < len(screens):
+                target_screen = screens[s_idx]
+        except (IndexError, ValueError):
+            pass
+
     window = MainWindow()
-    screen = app.primaryScreen().availableGeometry()
-    window.resize(screen.width(), screen.height())
-    window.move(screen.x(), screen.y())
+    geom = target_screen.availableGeometry()
+    window.resize(geom.width(), geom.height())
+    window.move(geom.x(), geom.y())
     window.show()
 
     sys.exit(app.exec())

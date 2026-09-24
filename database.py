@@ -2,8 +2,10 @@
 import sqlite3
 import json
 import uuid
+import os
 from datetime import datetime, timezone
 from typing import Optional, Any, List, Dict
+from config import resolve_scan_path, make_relative_path
 
 DB_PATH = "aegis.db"
 
@@ -29,10 +31,12 @@ def add_patient(mrn: str, name: str, sex: str, age: str):
     conn.close()
 
 def add_scan(patient_mrn: str, modality: str, study_date: str, description: str, file_path: str, slice_count: int = 1):
+    # Always store as a relative path so the DB is portable across machines
+    relative_path = make_relative_path(file_path) if file_path else ""
     conn = get_connection()
     conn.execute(
         "INSERT INTO scans (patient_mrn, modality, study_date, description, file_path, slice_count) VALUES (?, ?, ?, ?, ?, ?)",
-        (patient_mrn, modality, study_date, description, file_path, slice_count)
+        (patient_mrn, modality, study_date, description, relative_path, slice_count)
     )
     conn.commit()
     conn.close()
@@ -103,7 +107,7 @@ def get_patients_for_ui() -> list[dict]:
                 "type": modality,
                 "date": date,
                 "description": desc,
-                "file_path": primary_scan.get("file_path", ""),
+                "file_path": resolve_scan_path(primary_scan.get("file_path", "")),
                 "slice_count": slice_cnt,
             } if primary_scan else {}
         })
@@ -129,7 +133,7 @@ def get_scans_for_ui(mrn: str) -> list[dict]:
             "date": _format_date(s["study_date"]),
             "study_date": s["study_date"],
             "description": s["description"],
-            "file_path": s["file_path"],
+            "file_path": resolve_scan_path(s["file_path"]),
             "slice_count": s["slice_count"],
         }
         for s in get_scans_for_patient(mrn)

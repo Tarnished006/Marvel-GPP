@@ -284,7 +284,12 @@ class MainWindow(QMainWindow):
         self.dashboard.view_3d_direct_clicked.connect(self.show_3d_direct)
 
         self.clinical_btn.clicked.connect(lambda: self._go_root(self.dashboard))
-        self.viewer_2d_btn.clicked.connect(lambda: self._go_root(self.viewer_2d))
+        
+        def show_2d_viewer():
+            self._go_root(self.viewer_2d)
+            self.viewer_2d.update_scan_list()
+            
+        self.viewer_2d_btn.clicked.connect(show_2d_viewer)
         self.viewer_btn.clicked.connect(lambda: self._go_root(self.viewer_3d))
         self.or_icu_btn.clicked.connect(self._open_or_icu)
         self.or_icu_mode.open_in_viewer_requested.connect(self._on_icu_or_open_in_viewer)
